@@ -28,10 +28,10 @@ def _imports_shared_calculator(relative_path: str, name: str, alias_name: str) -
 
 def test_legacy_cost_and_private_callers_remain_compatible() -> None:
     # Keep this unit test independent of the optional async database package that
-    # importing the full Rath/Web runtime requires.  Syntax compilation covers
+    # importing the full Agent/Web runtime requires.  Syntax compilation covers
     # import execution; this asserts both callers retain the single calculator.
     assert _imports_shared_calculator(
-        "app/rath/single_agent.py", "resolved_usage_cost_usd", "_resolved_usage_cost_usd",
+        "app/agents/execution.py", "resolved_usage_cost_usd", "_resolved_usage_cost_usd",
     )
     assert _imports_shared_calculator(
         "app/web_console/core.py", "usage_cost_usd", "_usage_cost_usd",

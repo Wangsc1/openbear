@@ -4,6 +4,7 @@ import ConsoleView from "./views/consoleView/ConsoleView.vue";
 import {createAttachmentDraftStorage} from "./views/consoleView/attachmentDraftStorage.js";
 import { defineLazyView } from "./lazyView.js";
 import { installMobileViewport } from "./mobileViewport.js";
+import {installPushNavigation, installPushPresence} from "./pwa/pushClient.js";
 import LoginView from "./views/LoginView.vue";
 import BearLogoPreview from "./components/BearLogoPreview.vue";
 import ConversationTree from "./components/ConversationTree.vue";
@@ -249,6 +250,13 @@ function applyRouteFromLocation(options = {}) {
 function closeSidebar() {
   sidebarOpen.value = false;
 }
+function handleHistoryNavigation() {
+  // Keep native Back/Forward semantics; stale navigation UI must not obscure
+  // the page selected by the browser's history entry.
+  closeSidebar();
+  closeConversationMenu();
+  applyRouteFromLocation();
+}
 function selectNav(key) {
   active.value = key;
   closeSidebar();
@@ -447,7 +455,7 @@ async function refreshConsoleAfterPropSync() {
   await nextTick();
   refreshConsole();
 }
-function focusLocalConversation(folderId = draftFolderId.value) {
+function focusLocalConversation(folderId = draftFolderId.value, { revealInFolders = true } = {}) {
   active.value = "console";
   const existing = conversations.value.find(isLocalConversation);
   const target = existing ? String(existing.folderId || "") : String(folderId || "");
@@ -457,12 +465,12 @@ function focusLocalConversation(folderId = draftFolderId.value) {
   closeSidebar();
   syncRoute();
   void refreshConsoleAfterPropSync();
-  void nextTick().then(() => conversationTreeRef.value?.revealDraft(target));
+  if (revealInFolders) void nextTick().then(() => conversationTreeRef.value?.revealDraft(target));
 }
 async function startConsoleNewSession() {
   await handleTreeNewConversation(selectedFolderId.value);
 }
-async function handleTreeNewConversation(folderId = "") {
+async function handleTreeNewConversation(folderId = "", options = {}) {
   const target = String(folderId || "");
   const existing = conversations.value.find(isLocalConversation);
   if (existing && String(existing.folderId || "") !== target) {
@@ -476,7 +484,7 @@ async function handleTreeNewConversation(folderId = "") {
       setConversationsIfChanged(conversations.value.map((row) => isLocalConversation(row) ? { ...row, folderId: target, parentId: target } : row));
     } catch { /* Repeated new keeps the existing draft and its original folder. */ }
   } else if (!existing) setDraftFolderId(target);
-  focusLocalConversation(draftFolderId.value);
+  focusLocalConversation(draftFolderId.value, options);
   ElMessage.success(existing ? "已聚焦未发送的新会话" : "已开启新会话");
 }
 function handleTreeRows(rows = []) {
@@ -921,12 +929,21 @@ watch(pageDocumentTitle, (title) => {
 }, {immediate: true});
 
 let stopMobileViewport = null;
+let stopPushNavigation = null, pushPresence = null;
+watch([active, activeConversationUuid], () => pushPresence?.update(), {flush: 'post'});
 onMounted(() => {
+  if (!isLoginPath) {
+    stopPushNavigation = installPushNavigation(window, (url) => {
+      window.history.pushState({}, '', url);
+      handleHistoryNavigation();
+    });
+    pushPresence = installPushPresence(window, () => active.value === 'console' ? activeConversationUuid.value : '');
+  }
   if (!isLoginPath) stopMobileViewport = installMobileViewport({
     beforeChange: () => consoleViewRef.value?.captureMobileViewportAnchor(),
     afterChange: anchor => consoleViewRef.value?.restoreMobileViewportAnchor(anchor),
   });
-  window.addEventListener("popstate", applyRouteFromLocation);
+  window.addEventListener("popstate", handleHistoryNavigation);
   window.addEventListener("openbear:conversations-refresh", handleExternalConversationsRefresh);
   window.addEventListener("click", closeConversationMenu);
   window.addEventListener("scroll", closeConversationMenu, true);
@@ -943,11 +960,13 @@ onMounted(() => {
   }
 });
 onBeforeUnmount(() => {
+  stopPushNavigation?.();
+  pushPresence?.stop();
   stopMobileViewport?.();
   closeReferenceShelf();
   stopReferenceCatalog({clear:true});
   stopThemeSubscription();
-  window.removeEventListener("popstate", applyRouteFromLocation);
+  window.removeEventListener("popstate", handleHistoryNavigation);
   window.removeEventListener("openbear:conversations-refresh", handleExternalConversationsRefresh);
   window.removeEventListener("click", closeConversationMenu);
   window.removeEventListener("scroll", closeConversationMenu, true);
@@ -1386,7 +1405,7 @@ onBeforeUnmount(() => {
       width="720px"
       top="8vh"
       append-to-body
-      class="version-dialog"
+      class="version-dialog mobile-viewport-dialog"
       :show-close="true"
     >
       <template #header>

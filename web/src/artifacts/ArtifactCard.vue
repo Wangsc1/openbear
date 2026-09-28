@@ -1,29 +1,30 @@
 <script setup>
 import {computed, onBeforeUnmount, onMounted, ref} from "vue";
 import {ElMessage} from "element-plus";
+import {Globe, Image, FileText, FileCode, FileArchive, FileSpreadsheet, Presentation, FileAudio, FileVideo, File, Braces, Type, ArrowUpRight, Maximize2, Copy, Download} from "@lucide/vue";
+import {artifactPresentation} from "./artifactPresentation.js";
+import {onArtifactDownload} from "./artifactDownload.js";
 import {copyTextToClipboard} from "../utils/clipboard.js";
-import {artifactFromUrl, artifactRecord, artifactFormat, artifactSharedPath, formatFileSize, loadArtifactCard, openArtifactPreview} from "./artifactFiles.js";
+import {artifactFromUrl, artifactRecord, artifactSharedPath, formatFileSize, loadArtifactCard, openArtifactPreview} from "./artifactFiles.js";
 
 const props = defineProps({href: {type: String, required: true}, label: {type: String, default: ""}});
 const identity = artifactFromUrl(props.href);
 const record = identity ? artifactRecord(identity) : null;
 const root = ref(null);
-const format = computed(() => artifactFormat(record?.metadata));
+const presentation = computed(() => artifactPresentation(record?.metadata));
+const icons = {html: Globe, image: Image, markdown: FileText, pdf: FileText, document: FileText, spreadsheet: FileSpreadsheet, presentation: Presentation, archive: FileArchive, audio: FileAudio, video: FileVideo, font: Type, code: FileCode, data: Braces, text: FileText, file: File};
+const imageFailed = ref(false);
 const sharedPath = computed(() => artifactSharedPath(record?.metadata));
 const title = computed(() => record?.summary?.title || props.label || record?.metadata?.fileName || "附件");
 const excerpt = computed(() => {
 	if (record?.metadataError) return "暂时无法读取附件信息，点击查看详情。";
-	if (format.value.kind === "html") return "HTML 页面 · 可切换页面预览与源码";
-	if (record?.summary?.excerpt) return record.summary.excerpt;
-	if (!record?.metadata) return "点击即可在对话中查看附件";
-	if (format.value.kind === "image") return "图片附件 · 在对话中查看与缩放";
-	if (format.value.kind === "unsupported") return "此格式暂不支持站内预览，可下载原文件查看。";
-	if (record.metadata.sizeBytes === 0) return "空文件";
-	return record.metadata.fileName;
+	if (record?.metadata?.sizeBytes === 0) return "空文件";
+	return record?.summary?.excerpt || "";
 });
 let observer;
 function load() { observer?.disconnect(); if (record) void loadArtifactCard(record).catch(() => {}); }
 function open(event) { if (identity) openArtifactPreview(identity, title.value, event.currentTarget); }
+const openLabel = computed(() => `${record?.metadata && !presentation.value.previewable ? '查看附件详情' : '预览附件'}：${title.value}`);
 async function copyPath() {
 	if (!sharedPath.value) return;
 	try { await copyTextToClipboard(sharedPath.value); ElMessage.success("工作区路径已复制"); }
@@ -38,46 +39,67 @@ onBeforeUnmount(() => observer?.disconnect());
 </script>
 
 <template>
-	<div ref="root" class="artifact-card" :class="{'is-unavailable': record?.metadataError, 'has-shared-path': sharedPath}" :data-artifact-id="identity?.artifactUuid">
-		<button type="button" class="artifact-card-open" :aria-label="`预览附件：${title}`" @click="open">
-			<span class="artifact-card-icon" aria-hidden="true">
-				<svg v-if="format.kind === 'image'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3.5" y="3.5" width="17" height="17" rx="3"/><circle cx="9" cy="8.5" r="1.5"/><path d="m4 17 5-5 3 3 4-5 4 5"/></svg>
-				<svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13.5 3.5H6A2 2 0 0 0 4 5.5v13a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8z"/><path d="M13 4v7h7M8 14h8M8 17h5"/></svg>
+	<div ref="root" class="artifact-card" :class="[`artifact-card--${presentation.category}`, {'is-unavailable': record?.metadataError, 'has-shared-path': sharedPath}]" :data-artifact-id="identity?.artifactUuid">
+		<button type="button" class="artifact-card-open" :aria-label="openLabel" @click.stop="open">
+			<span v-if="presentation.category === 'image'" class="artifact-card-thumbnail" :class="{'is-failed': imageFailed}" aria-hidden="true">
+				<img v-if="!imageFailed" :src="identity?.contentUrl" alt="" loading="lazy" decoding="async" @error="imageFailed = true"/>
+				<template v-else><Image :stroke-width="1.5"/><span>缩略图未能加载 · 点击重试查看</span></template>
+				<span v-if="!imageFailed" class="artifact-card-image-hint"><Maximize2 :size="14"/>查看大图</span>
+			</span>
+			<span v-else class="artifact-card-icon" aria-hidden="true">
+				<component :is="icons[presentation.category]" :size="23" :stroke-width="1.6"/>
+				<span class="artifact-card-extension">{{ presentation.badge }}</span>
 			</span>
 			<span class="artifact-card-copy">
 				<span class="artifact-card-title" :title="record?.metadata?.fileName || title">{{ title }}</span>
-				<span class="artifact-card-excerpt">{{ excerpt }}</span>
-				<span class="artifact-card-meta"><span>{{ record?.metadata ? format.label : '附件' }}</span><span aria-hidden="true">·</span><span>{{ record?.metadata ? formatFileSize(record.metadata.sizeBytes) : (record?.busy ? '读取信息中…' : '点击预览') }}</span></span>
+				<span v-if="record?.metadata?.fileName && record.metadata.fileName !== title" class="artifact-card-filename" :title="record.metadata.fileName">{{ record.metadata.fileName }}</span>
+				<span v-if="excerpt" class="artifact-card-excerpt" :class="{'is-code': ['code', 'data'].includes(presentation.category)}">{{ excerpt }}</span>
+				<span class="artifact-card-meta"><span class="artifact-card-type">{{ presentation.label }}</span><span aria-hidden="true">·</span><span>{{ record?.metadata ? formatFileSize(record.metadata.sizeBytes) : (record?.busy ? '读取信息中…' : '等待读取') }}</span><span v-if="record?.metadata" class="artifact-card-intent">{{ presentation.action }}<ArrowUpRight v-if="presentation.previewable" :size="12" aria-hidden="true"/></span></span>
 			</span>
 		</button>
-		<button v-if="sharedPath" type="button" class="artifact-card-copy-path" :aria-label="`复制工作区路径：${sharedPath}`" title="复制工作区路径" @click.stop="copyPath">
-			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
-		</button>
-		<a class="artifact-card-download" :href="identity?.downloadUrl || href" download :aria-label="`下载原文件：${record?.metadata?.fileName || title}`" title="下载原文件" @click.stop>
-			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/></svg>
-		</a>
+		<div class="artifact-card-actions">
+			<button v-if="sharedPath" type="button" class="artifact-card-copy-path" :aria-label="`复制工作区路径：${sharedPath}`" title="复制工作区路径" @click.stop="copyPath"><Copy :size="16" :stroke-width="1.7" aria-hidden="true"/></button>
+			<a class="artifact-card-download" :href="identity?.downloadUrl || href" download :aria-label="`下载原文件：${record?.metadata?.fileName || title}`" title="下载原文件" @click.stop="onArtifactDownload($event, identity)"><Download :size="17" :stroke-width="1.7" aria-hidden="true"/></a>
+		</div>
 	</div>
 </template>
 
 <style>
-.md-artifact-slot { margin: 12px 0; max-width: 620px; min-width: 0; }
-.artifact-card { position: relative; width: 100%; overflow: hidden; border: 1px solid var(--ob-border-soft); border-radius: 14px; background: var(--ob-surface); color: var(--ob-text); box-shadow: 0 2px 5px rgb(20 30 50 / 3%); transition: border-color .15s, box-shadow .15s; }
-.artifact-card:hover { border-color: var(--ob-blue); box-shadow: 0 4px 14px rgb(20 30 50 / 6%); }
-.artifact-card-open { display: grid; grid-template-columns: 42px minmax(0, 1fr); align-items: start; gap: 13px; width: 100%; padding: 16px 53px 16px 16px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.artifact-card-icon { display: grid; place-items: center; width: 42px; height: 48px; border: 1px solid var(--ob-border-soft); border-radius: 10px; color: var(--ob-blue); background: var(--ob-surface-soft); }
-.artifact-card-icon svg { width: 25px; height: 25px; }
-.artifact-card-copy { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
-.artifact-card-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ob-text-strong); font-size: 14px; font-weight: 650; line-height: 1.6; }
-.artifact-card-excerpt { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; height: 37px; color: var(--ob-text-subtle); font-size: 12px; line-height: 18.5px; overflow-wrap: anywhere; }
-.artifact-card-meta { display: flex; align-items: center; gap: 7px; padding-top: 1px; font-size: 10.5px; font-weight: 500; line-height: 16px; color: var(--ob-text-muted); }
-.artifact-card.has-shared-path .artifact-card-open { padding-right: 90px; }
-.artifact-card-copy-path, .artifact-card-download { position: absolute; top: 12px; display: grid; place-items: center; width: 32px; height: 32px; border: 0; border-radius: 8px; background: transparent; color: var(--ob-text-subtle); text-decoration: none !important; cursor: pointer; }
-.artifact-card-copy-path { right: 47px; }
-.artifact-card-download { right: 11px; }
-.artifact-card-copy-path:hover, .artifact-card-download:hover { background: var(--ob-surface-soft); color: var(--ob-blue); }
-.artifact-card-copy-path svg, .artifact-card-download svg { width: 18px; height: 18px; }
+.md-artifact-slot { margin: 10px 0; max-width: 620px; min-width: 0; }
+.artifact-card { --artifact-accent: var(--ob-text-subtle); --artifact-tint: var(--ob-surface-soft); position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; width: 100%; overflow: hidden; border: 1px solid var(--ob-border); border-radius: 12px; background: var(--ob-surface); color: var(--ob-text); transition: border-color .15s; }
+.artifact-card--html, .artifact-card--document { --artifact-accent: var(--ob-blue); --artifact-tint: var(--ob-blue-soft); }
+.artifact-card--pdf { --artifact-accent: var(--ob-danger); --artifact-tint: var(--ob-danger-soft); }
+.artifact-card--spreadsheet, .artifact-card--data { --artifact-accent: var(--ob-success); --artifact-tint: var(--ob-success-soft); }
+.artifact-card--presentation { --artifact-accent: var(--ob-orange); --artifact-tint: var(--ob-orange-soft); }
+.artifact-card--archive { --artifact-accent: var(--ob-warning); --artifact-tint: var(--ob-warning-soft); }
+.artifact-card--audio, .artifact-card--video { --artifact-accent: var(--ob-violet); --artifact-tint: var(--ob-violet-soft); }
+.artifact-card:hover { border-color: var(--artifact-accent); }
+.artifact-card-open { display: grid; grid-template-columns: 46px minmax(0, 1fr); align-items: start; gap: 12px; min-width: 0; width: 100%; padding: 14px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.artifact-card-icon { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 5px; width: 46px; min-height: 56px; padding: 7px 2px; border-radius: 8px; color: var(--artifact-accent); background: var(--artifact-tint); }
+.artifact-card-extension { max-width: 100%; font: 600 9px/1.1 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+.artifact-card-copy { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.artifact-card-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ob-text-strong); font-size: 14px; font-weight: 600; line-height: 1.6; }
+.artifact-card-filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ob-text-subtle); font-size: 11px; line-height: 1.5; }
+.artifact-card-excerpt { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin: 3px 0; color: var(--ob-text-subtle); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.artifact-card-excerpt.is-code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
+.artifact-card-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 3px 7px; margin-top: 3px; color: var(--ob-text-muted); font-size: 11px; line-height: 1.5; }
+.artifact-card-type { color: var(--ob-text-subtle); }
+.artifact-card-intent { display: inline-flex; align-items: center; gap: 3px; margin-left: auto; color: var(--artifact-accent); }
+.artifact-card-actions { display: flex; align-self: start; gap: 2px; padding: 12px 10px 0 0; }
+.artifact-card-copy-path, .artifact-card-download { display: grid; place-items: center; flex: none; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--ob-text-subtle); text-decoration: none !important; cursor: pointer; }
+.artifact-card-copy-path:hover, .artifact-card-download:hover { background: var(--ob-surface-soft); color: var(--ob-text-strong); }
 .artifact-card-open:focus-visible, .artifact-card-copy-path:focus-visible, .artifact-card-download:focus-visible { outline: 2px solid var(--ob-blue); outline-offset: -3px; }
 .artifact-card.is-unavailable .artifact-card-excerpt { color: var(--ob-text-muted); }
-@media (max-width: 600px) { .artifact-card-open { padding-left: 12px; gap: 10px; grid-template-columns: 34px minmax(0, 1fr); } .artifact-card-icon { width: 34px; height: 42px; } .artifact-card-title { font-size: 13px; } }
+.artifact-card--image { display: block; }
+.artifact-card--image .artifact-card-open { display: block; padding: 0; }
+.artifact-card--image .artifact-card-copy { padding: 12px 54px 12px 14px; }
+.artifact-card--image.has-shared-path .artifact-card-copy { padding-right: 86px; }
+.artifact-card--image .artifact-card-actions { position: absolute; bottom: 12px; right: 10px; padding: 0; }
+.artifact-card-thumbnail { position: relative; display: flex; align-items: center; justify-content: center; height: 180px; padding: 10px; overflow: hidden; border-bottom: 1px solid var(--ob-border-soft); background: var(--ob-surface-soft); }
+.artifact-card.artifact-card--image .artifact-card-thumbnail img { display: block; width: 100%; height: 100%; max-width: 100%; max-height: 100%; margin: 0; border-radius: 0; box-shadow: none; object-fit: contain; cursor: zoom-in; }
+.artifact-card-image-hint { position: absolute; bottom: 10px; right: 10px; display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border: 1px solid var(--ob-border-soft); border-radius: 6px; background: var(--ob-surface); color: var(--ob-text-subtle); font-size: 11px; line-height: 1.4; }
+.artifact-card-thumbnail.is-failed { flex-direction: column; gap: 10px; color: var(--ob-text-muted); font-size: 12px; }
+.artifact-card-thumbnail.is-failed > svg { width: 28px; height: 28px; }
+@media (max-width: 600px) { .artifact-card-open { padding: 12px 10px; gap: 9px; grid-template-columns: 40px minmax(0, 1fr); } .artifact-card-icon { width: 40px; min-height: 52px; } .artifact-card-title { font-size: 13px; } .artifact-card-actions { padding: 10px 6px 0 0; gap: 0; } .artifact-card-intent { margin-left: 0; } .artifact-card-thumbnail { height: 150px; } }
 @media (prefers-reduced-motion: reduce) { .artifact-card { transition: none; } }
 </style>

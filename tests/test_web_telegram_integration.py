@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.agent import steering
-from app.agent.runs import RunRegistry
+from app.runtime.scheduler import ControllerRuns
 from app.db.dao import MessageDAO
 from app.llm.events import StreamEvent
 from app.tools.base import ToolRegistry
@@ -20,7 +20,7 @@ web_env = _shared_web_env
 
 
 async def configure(server, monkeypatch, backend):
-    server.runs = RunRegistry()
+    server.runs = ControllerRuns()
     server.llm_factory = FakeRunFactory(backend, context_window=128000)
     server.model_selection = SimpleNamespace(current="openai/gpt")
     server.tools = ToolRegistry()

@@ -80,7 +80,7 @@ async def test_simulated_continued_agent_can_be_supervised_and_approved_only_fro
     first = await call(reg, "Agent", {"prompt": "Retain investigation without writing notes", "tools": []}, ctx)
     sid, old_tid = first["agentSession"]["agentId"], first["task"]["taskUuid"]
     original_complete = backend.complete
-    monkeypatch.setattr(_FakeConfig.rath, "agent_plan_enabled", True)
+    monkeypatch.setattr(_FakeConfig.agents, "agent_plan_enabled", True)
     submitted = asyncio.Event()
     stages = asyncio.Queue()
     release = asyncio.Queue()
@@ -193,7 +193,7 @@ async def test_simulated_continued_agent_can_be_supervised_and_approved_only_fro
         row = await (await dao.db.conn.execute("SELECT COUNT(*) FROM conversation_task_memories")).fetchone()
         assert row[0] == 0  # Actual continuation never needed a memory report.
     finally:
-        runs = list(manager._runs.values())
+        runs = manager.scheduler.tasks(kind="agent")
         for run in runs:
             run.cancel()
         await asyncio.gather(*runs, return_exceptions=True)
@@ -204,7 +204,7 @@ async def test_info_replan_versions_preserve_evidence_and_current_task_without_c
     first = await call(reg, "Agent", {"prompt": "prior checkpoint", "tools": []}, ctx)
     sid, old_tid = first["agentSession"]["agentId"], first["task"]["taskUuid"]
     session = await dao.agent_session(sid)
-    monkeypatch.setattr(_FakeConfig.rath, "agent_plan_enabled", True)
+    monkeypatch.setattr(_FakeConfig.agents, "agent_plan_enabled", True)
     tid = await dao.create_task(
         chat_id=ctx.chat_id, workflow_uuid=session.workflow_uuid, agent_session_uuid=sid,
         parent_session_uuid=ctx.session_uuid, title="next managed round", status="running",

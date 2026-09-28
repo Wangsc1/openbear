@@ -2,6 +2,7 @@
 import {computed, onBeforeUnmount, onMounted, ref} from "vue";
 import {ElMessage} from "element-plus";
 import {copyTextToClipboard} from "../utils/clipboard.js";
+import {onArtifactDownload} from "./artifactDownload.js";
 import {artifactFromUrl, artifactRecord, artifactSharedPath, loadArtifactMetadata} from "./artifactFiles.js";
 
 const props = defineProps({href: {type: String, required: true}});
@@ -26,7 +27,7 @@ async function copyPath() {
 
 <template>
 	<span ref="root" class="artifact-image-actions">
-		<a :href="identity?.downloadUrl" download title="下载原图片" aria-label="下载原图片" @click.stop>下载</a>
+		<a :href="identity?.downloadUrl" download title="下载原图片" aria-label="下载原图片" @click.stop="onArtifactDownload($event, identity)">下载</a>
 		<button v-if="sharedPath" type="button" :aria-label="`复制工作区路径：${sharedPath}`" title="复制工作区路径" @click.stop="copyPath">复制路径</button>
 	</span>
 </template>

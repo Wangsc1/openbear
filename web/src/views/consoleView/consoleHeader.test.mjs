@@ -19,7 +19,7 @@ const helpers = vm.createContext({});
 vm.runInContext(between(display, 'export function fmtLiveElapsedMs(', 'export function fmtElapsedFromStart(').replaceAll('export ', ''), helpers);
 
 function headerState(overrides = {}) {
-  const props = reactive({title:'测试会话',titleIdentity:'chat',conversationPath:'OpenBear',running:false,runStartedAt:0,status:'就绪',tokensText:'128.4K',tokensDetail:'输入、输出及缓存明细',durationMs:229000,costText:'$0.0832',...overrides});
+  const props = reactive({title:'测试会话',titleIdentity:'chat',conversationPath:'OpenBear',running:false,runStartedAt:0,status:'就绪',tokensText:'128.4K',tokensDetail:'输入、输出及缓存明细',cachePercentText:'80.0%',durationMs:229000,costText:'$0.0832',...overrides});
   const script = header.scriptSetup.content.replace(/^import .*;\n/gm, '');
   const ctx = vm.createContext({computed,defineProps:()=>props,...helpers});
   vm.runInContext(script, ctx);
@@ -34,17 +34,26 @@ async function renderHeader(overrides) {
   return renderToString(app);
 }
 
-test('desktop header renders path before animated title, four readable values and no decoration icons', async () => {
+test('desktop header renders path before animated title, five readable values including cache percentage and no decoration icons', async () => {
   const html = await renderHeader({title:'长标题',conversationPath:'工程 / OpenBear'});
   assert.ok(html.indexOf('/工程/OpenBear') < html.indexOf('长标题'));
-  for (const label of ['运行状态','总 Tokens','总耗时','总花费']) assert.ok(html.includes(label));
-  assert.equal((html.match(/class="header-metric"/g)||[]).length, 4);
+  for (const label of ['运行状态','总 Tokens','缓存命中','总耗时','总花费']) assert.ok(html.includes(label));
+  assert.equal((html.match(/class="header-metric"/g)||[]).length, 5);
+  assert.match(html, /80\.0%/);
+  assert.match(html, /会话累计读缓存 Tokens \/ 累计完整输入 Tokens/);
   assert.match(html,/128\.4<span class="header-unit">K/);
   assert.match(html,/3<span class="header-unit">分/);
   assert.match(html,/49<span class="header-unit">秒/);
   assert.match(html,/\$0\.0832/);
   assert.match(html,/title="输入、输出及缓存明细"/);
   assert.doesNotMatch(html, /<svg|header-orb|header-run-clock/);
+});
+
+test('header preserves missing cache data and displays a measured zero hit rate', async () => {
+  for (const cachePercentText of ['—', '0.0%', '92.4%']) {
+    const html = await renderHeader({cachePercentText});
+    assert.ok(html.includes(`<span class="header-number">${cachePercentText}</span>`));
+  }
 });
 
 test('running badge and current-run clock are separate from cumulative duration, idle retains status', async () => {

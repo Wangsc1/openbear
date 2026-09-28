@@ -54,7 +54,7 @@ class WebAdminTaskMemoryMixin:
             raise web.HTTPBadRequest(text="invalid_scope_type")
         if scope_type == SCOPE_AGENT_SESSION:
             owner = str(source.get("agentSessionUuid") or source.get("taskUuid") or "").strip()
-            instance = await self.rath_dao.agent_session(owner)
+            instance = await self.agent_dao.agent_session(owner)
             if (instance is None or instance.session_kind != "independent"
                     or instance.chat_id != int(row.get("internal_chat_id") or 0)
                     or instance.openbear_session_uuid != str(row.get("conversation_uuid") or "")):
@@ -63,7 +63,7 @@ class WebAdminTaskMemoryMixin:
         task_uuid = str(source.get("taskUuid") or "").strip()
         if not task_uuid:
             raise web.HTTPNotFound(text="task_memory_not_found")
-        task = await self.rath_dao.get_task(task_uuid)
+        task = await self.agent_dao.get_task(task_uuid)
         if (
             task is None
             or int(task.chat_id or 0) != int(row.get("internal_chat_id") or 0)

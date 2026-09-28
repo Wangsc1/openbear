@@ -3,6 +3,7 @@ import { computed, defineAsyncComponent, nextTick, onMounted, reactive, ref } fr
 import { ElMessage } from "element-plus";
 import { Api, apiError } from "../api";
 import ModelOrderPicker from "../components/ModelOrderPicker.vue";
+import DeviceNotifications from "../pwa/DeviceNotifications.vue";
 import { settingDisplayValue, settingStorageValue, settingRangeLabel } from "./settingsDisplay.js";
 
 const MdEditor = defineAsyncComponent(() => import("../components/AdaptiveMdEditor.vue"));
@@ -246,6 +247,16 @@ function handleEditorBlur(spec) {
     reset(spec);
   }, 80);
 }
+function onEditorKeydown(event, spec) {
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    reset(spec);
+  } else if (event.key === "Enter" && !isLongText(spec)) {
+    event.preventDefault();
+    void save(spec);
+  }
+}
 async function selectOption(spec, value) {
   draft[spec.path] = value;
   await save(spec);
@@ -406,9 +417,10 @@ onMounted(load);
               :class="testingNotification ? 'is-loading' : ''"
               :disabled="testingNotification"
               @click="testTaskNotification"
-            >{{ testingNotification ? '发送中…' : '发送测试通知' }}</button>
+            >{{ testingNotification ? '发送中…' : '发送 Telegram 测试通知' }}</button>
           </header>
 
+          <DeviceNotifications v-if="section.key === 'web_notifications'" />
           <div class="settings-list">
             <article
               v-for="spec in section.specs"
@@ -539,7 +551,7 @@ onMounted(load);
                             :placeholder="inputPlaceholder(spec)"
                             :disabled="saving[spec.path]"
                             @blur="handleEditorBlur(spec)"
-                            @keydown.esc.prevent="reset(spec)"
+                            @keydown="onEditorKeydown($event, spec)"
                           />
                           <el-input
                             v-else
@@ -552,8 +564,7 @@ onMounted(load);
                             :placeholder="inputPlaceholder(spec)"
                             :disabled="saving[spec.path]"
                             @blur="handleEditorBlur(spec)"
-                            @keydown.enter.prevent="save(spec)"
-                            @keydown.esc.prevent="reset(spec)"
+                            @keydown="onEditorKeydown($event, spec)"
                           ><template v-if="spec.displayScale > 1" #append>{{ spec.unit }}</template></el-input>
                           <button type="button" class="mac-icon-action mac-icon-action--primary" :class="saving[spec.path] ? 'is-loading' : ''" :disabled="!isDirty(spec) || saving[spec.path]" title="保存" @mousedown.prevent @click="save(spec)">{{ saving[spec.path] ? '…' : '✓' }}</button>
                           <button type="button" class="mac-icon-action" :disabled="saving[spec.path]" title="撤销" @mousedown.prevent @click="reset(spec)">↩</button>

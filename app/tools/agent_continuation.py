@@ -5,8 +5,8 @@ import json
 from dataclasses import replace
 from typing import Any
 
-from app.rath.continuity import AgentContinuityError, agent_session_public
-from app.rath.schemas import TERMINAL_TASK_STATUSES, RathTask
+from app.agents.continuity import AgentContinuityError, agent_session_public
+from app.agents.schemas import TERMINAL_TASK_STATUSES, AgentTask
 from app.tools.allowlist import (
     AGENT_DELEGATION_TOOL_NAMES,
     agent_delegation_names,
@@ -32,7 +32,7 @@ class AgentContinuationTools:
                 raise AgentContinuityError("agent_instance_not_found", "No Agent instance or exact task UUID exists in this conversation")
             session = await self.dao.agent_session(task.agent_session_uuid)
         if session:
-            scoped = RathTask(task_uuid="", chat_id=session.chat_id, parent_session_uuid=session.openbear_session_uuid)
+            scoped = AgentTask(task_uuid="", chat_id=session.chat_id, parent_session_uuid=session.openbear_session_uuid)
             if self._task_scope_error(scoped, ctx):
                 raise AgentContinuityError("agent_instance_not_found", "No Agent instance exists in this conversation")
         if session is None and task is None:
@@ -61,10 +61,10 @@ class AgentContinuationTools:
                 raise AgentContinuityError("agent_instance_busy", "Finish or stop the original task first", task_uuid=task.task_uuid)
             snapshot = (session.metadata or {}).get("agentSnapshot") if session else None
             if snapshot:
-                source = RathTask(task_uuid="", workflow_uuid=session.workflow_uuid, input={"agentSnapshot": snapshot})
-                agent = await self._agent_from_task(source)
+                source = AgentTask(task_uuid="", workflow_uuid=session.workflow_uuid, input={"agentSnapshot": snapshot})
+                agent = await self._agent_from_task(source, for_new_round=True)
             else:
-                agent = await self._agent_from_task(task) if task else None
+                agent = await self._agent_from_task(task, for_new_round=True) if task else None
             if agent is None:
                 raise AgentContinuityError("agent_definition_unavailable", "The original Agent definition cannot be restored")
             ceiling = (session.metadata or {}).get("presetToolCeiling") if session else None
@@ -79,7 +79,7 @@ class AgentContinuationTools:
             mode = _normalize_agent_plan_mode(args.get("planMode"))
             if mode not in {"direct", "managed"}:
                 return _json({"ok": False, "error": "invalid_agent_plan_mode"})
-            if mode == "managed" and not getattr(self.config.rath, "agent_plan_enabled", True):
+            if mode == "managed" and not getattr(self.config.agents, "agent_plan_enabled", True):
                 return _json({"ok": False, "error": "managed_agent_plan_disabled"})
             if mode == "managed" and (ctx.task_notification is None or ctx.agent_wait is None):
                 return _json({"ok": False, "error": "controller_runtime_required"})
@@ -128,7 +128,7 @@ class AgentContinuationTools:
         from app.tools.agents import _task_agent_plan_mode
         data = task.input or {}
         granted = (data.get("agentSnapshot") or {}).get("toolAllowlist") or []
-        managed = bool(getattr(self.config.rath, "agent_plan_enabled", True)) and _task_agent_plan_mode(task) == "managed"
+        managed = bool(getattr(self.config.agents, "agent_plan_enabled", True)) and _task_agent_plan_mode(task) == "managed"
         cur = await self.dao.db.conn.execute("SELECT * FROM rath_task_plan_state WHERE task_uuid=?", (task.task_uuid,))
         row = await cur.fetchone()
         state = dict(row) if row else {}

@@ -5,7 +5,7 @@ import vm from "node:vm";
 import {createOutboundSendTracker, probeSocket, restoreOutboundDraft, waitForSocketOpen} from "./outboundSend.js";
 import {referenceDisplayText, referenceErrorText, referenceToken, referenceKey, referencesInText} from "../../references/codec.js";
 import {createOperationFrameBuffer} from './operationFrameBuffer.js';
-import {createAttachmentDraftStorage} from './attachmentDraftStorage.js';
+import {createAttachmentDraftStorage, planAttachmentDraftRecord} from './attachmentDraftStorage.js';
 import {initialConversationTitle} from '../../conversationTitle.js';
 import {createMemoryAttachmentDraftDriver} from './attachmentDraftMemoryDriver.mjs';
 
@@ -21,11 +21,14 @@ function between(start, end, text = source) {
 }
 const actual = [
   between("const canSend = computed(() => {", "const modelGroups = computed("),
+  between("function setUploadProgress(uuid, entries) {", "const modelMenuOpen = ref("),
+  between("const warnedMemoryOnlyDraftIds = new Map();", "async function removeAttachment(id) {"),
   between("function activeAttachmentKey()", "function queueSentAttachmentPreviewRevokes("),
   between("function closeWs() {", "function normalizePendingSteering("),
   between("function finishPendingOutboundSend(", "function applyLoadedConversationState("),
   between("async function send() {", "async function stop() {"),
   between("async function stop() {", "async function newSession() {"),
+  between("async function switchConversation(", "watch(() => props.conversationUuid,"),
 ].join("\n");
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 
@@ -73,17 +76,22 @@ function harness({local = false, halfOpenFirst = false, createConversation} = {}
     createOutboundSendTracker: (options) => createOutboundSendTracker({...options, ...timer}),
     probeSocket: (socket) => probeSocket(socket, timer),
     waitForSocketOpen: (socket) => waitForSocketOpen(socket, timer),
-    restoreOutboundDraft, referenceDisplayText, referenceErrorText, referencesInText, initialConversationTitle, referenceCatalog: {ready:true,connected:true},
+    restoreOutboundDraft, referenceDisplayText, referenceErrorText, referencesInText, initialConversationTitle, planAttachmentDraftRecord, referenceCatalog: {ready:true,connected:true},
     props, composer: {value: null},
     attachmentRestoring: {value: false},
     compacting: {value: false}, modelMutating: {value: false}, sendPending: {value: false}, running: {value: false},
     draft: {value: "original message"}, pendingAttachments: {value: []}, attachmentPreviews: {value: {}},
+    uploadProgressByConversation: {value: {}}, localDefaultsFolderId: local ? '' : null,
     messages: {value: []}, lastStats: {value: null}, foregroundRunning: {value: false}, rootTurnRunning: {value: false},
     runStartedAt: {value: 0}, status: {value: "就绪"}, lastFrameSeq: {value: 10},
     autoScrollLocked: {value: true}, chatState: {value: {running: false}}, draftByConversation: {value: {}},
     activeConversationUuid: {get value() {return props.conversationUuid;}},
     isLocalConversation: {get value() {return props.conversationUuid.startsWith("local:");}},
     localToServerTransitionUuid: {value: ""}, terminalStateRefreshScheduler: {invalidate: noop}, cancelScheduledUiWork: noop,
+    runConfigOverride: {value:null}, activeTurnIndex: {value:0},
+    resetAgentAutoOpenBoundary: noop, clearUiCaches: noop, resetOperationStore: noop,
+    restoreDraftForConversation: (uuid) => {context.draft.value = context.draftByConversation.value[uuid] || '';},
+    focusComposer: async () => {},
     conversationWsUrl: (uuid) => `ws://test.invalid/${uuid}`,
     localAttachmentPayload: () => [], clearDraftForConversation: noop, adjustComposerHeight: noop, closeComposerMenus: noop,
     attachmentDrafts: createAttachmentDraftStorage({driver: attachmentDriver}),
@@ -110,6 +118,8 @@ function harness({local = false, halfOpenFirst = false, createConversation} = {}
     const attachmentsByConversation=new Map(); const attachmentHydrations=new Map();
     let ws=null; let wsConversationUuid=""; let reconnectTimer=null;
     let componentMounted=true; let sendAttemptGeneration=0; let connectionResumePromise=null;
+    let conversationSwitchGeneration=0; let runConfigInteractionGeneration=0;
+    let readingAnchor=null; let pinnedActiveTurnIndex=null; let pendingLoadBottomScroll=null;
     let timelinePageInitialized=!props.conversationUuid.startsWith('local:');
     let timelinePageConversationUuid=props.conversationUuid;
     const outboundSends=createOutboundSendTracker({onTimeout:(pending)=>recoverUnconfirmedSend(pending)});
@@ -223,7 +233,7 @@ test("actual socket close/error recovers immediately; old ACK cannot clear a new
     await h.run("send()");
     assert.equal(h.sends().length, 2);
     h.context.draft.value = "newer draft";
-    h.run(`handleWsMessage(JSON.stringify({type:"ack",requestId:${JSON.stringify(first.requestId)}}));`);
+    oldSocket.emit("message", JSON.stringify({type:"ack",requestId:first.requestId}));
     assert.equal(h.run("sendPending.value"), true);
     assert.equal(h.context.draft.value, "newer draft");
     h.run("leavePendingSend()");
@@ -272,7 +282,7 @@ test("ACK removes only submitted attachments; recovery retains original plus new
     await h.run("send()");
     h.context.pendingAttachments.value.push(next);
     if (accepted) {
-      h.run(`handleWsMessage(JSON.stringify({type:"ack",requestId:${JSON.stringify(h.sends()[0].requestId)}}));`);
+      h.sockets[0].emit("message", JSON.stringify({type:"ack",requestId:h.sends()[0].requestId}));
       assert.deepEqual(Array.from(h.context.pendingAttachments.value, (item) => item.id), ["next"]);
     } else {
       await h.advance(15000);
@@ -316,7 +326,7 @@ test("resume expires suspended ACK timer and recovers input without a user refre
   assert.equal(h.context.draft.value, "original message");
 });
 
-test("conversation change cancels delayed preparation and restores only the source conversation draft", async () => {
+test("explicit cancellation of delayed preparation restores only the source conversation draft", async () => {
   let resolveCreate;
   const h = harness({local: true, createConversation: () => new Promise((resolve) => {resolveCreate = resolve;})});
   const sending = h.run("send()");
@@ -354,7 +364,9 @@ test("slow HTTP upload outlives preparation/ACK timers and only sends opaque ref
   h.context.pendingAttachments.value = [{id: "large", file: {name: "large.zip", size: 70 * 1024 * 1024}}];
   const sending = h.run("send()");
   await flush();
-  progress({loaded: 35, total: 70, fileIndex: 0, fileCount: 1});
+  progress({loaded: 35 * 1024 * 1024, total: 70 * 1024 * 1024, fileIndex: 0, fileCount: 1,
+    fileLoaded: 35 * 1024 * 1024, fileSize: 70 * 1024 * 1024, phase: 'uploading'});
+  assert.equal(h.context.uploadProgressByConversation.value['conv-a'].large.percent, 50);
   assert.match(h.context.status.value, /50%/);
   await h.advance(600000);
   assert.equal(h.context.sendPending.value, true);
@@ -383,27 +395,35 @@ test("upload rejection restores draft and all attachments without sending a mess
   assert.match(h.warnings[0], /disk_full/);
 });
 
-test("leaving during upload aborts HTTP and ignores late completion/progress", async () => {
+test("switching conversations during upload keeps A's HTTP send and B's draft independent", async () => {
   const h = harness();
   let finishUpload, options;
-  h.context.pendingAttachments.value = [{id: "first", file: {name: "file.zip"}}];
-  h.context.Api.uploadConversationFiles = (_uuid, _files, opts) => {
+  h.context.pendingAttachments.value = [{id: "first", file: {name: "file.zip",size: 1}}];
+  h.context.Api.uploadConversationFiles = (uuid, _files, opts) => {
+    assert.equal(uuid, 'conv-a');
     options = opts;
     return new Promise(resolve => {finishUpload = resolve;});
   };
   const sending = h.run("send()");
   await flush();
-  h.context.props.conversationUuid = "other";
-  h.context.draft.value = "other draft";
-  h.run("leavePendingSend()");
-  assert.equal(options.signal.aborted, true);
-  h.context.status.value = "other status";
-  options.onProgress({loaded: 1, total: 1, fileIndex: 0, fileCount: 1});
-  finishUpload([{uploadId: "late-upload"}]);
+  h.context.draftByConversation.value.other = 'other draft';
+  h.context.props.conversationUuid = 'other';
+  await h.run('switchConversation("other","conv-a")');
+  assert.equal(options.signal.aborted, false);
+  assert.equal(h.context.draft.value, 'other draft');
+  h.context.status.value = 'other status';
+  options.onProgress({loaded:1,total:1,fileIndex:0,fileCount:1,fileLoaded:1,fileSize:1,phase:'finalizing'});
+  assert.equal(h.context.uploadProgressByConversation.value['conv-a'].first.phase, 'finalizing');
+  assert.equal(h.context.status.value, 'other status');
+  finishUpload([{uploadId:'late-upload'}]);
   await sending;
-  assert.equal(h.context.status.value, "other status");
-  assert.equal(h.context.draft.value, "other draft");
-  assert.equal(h.sends().length, 0);
+  assert.equal(h.sends().length, 1);
+  assert.equal(h.sockets[0].url, 'ws://test.invalid/conv-a');
+  assert.deepEqual(h.sends()[0].files, [{uploadId:'late-upload'}]);
+  assert.equal(h.context.draft.value, 'other draft');
+  assert.equal(h.context.draftByConversation.value.other, 'other draft');
+  h.sockets[0].emit('message',JSON.stringify({type:'ack',requestId:h.sends()[0].requestId}));
+  assert.equal(h.context.sendPending.value, false);
   assert.equal(h.timers.size, 0);
 });
 

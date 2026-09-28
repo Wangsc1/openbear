@@ -54,7 +54,7 @@ function turnEvent(event) {
     render,
     setup: () => vm.runInContext(`({props, emit: () => {}, ${setupNames.join(", ")}})`, context),
   });
-  for (const name of ["el-tooltip", "el-icon", "el-image", "Check", "CopyDocument", "RefreshLeft", "Link",
+  for (const name of ["el-tooltip", "el-icon", "el-image", "Check", "CopyDocument", "Undo2", "Link",
     "ArrowRight", "Bell", "CircleCheck", "CircleClose", "MagicStick", "Refresh", "Tools"]) {
     app.component(name, slot);
   }

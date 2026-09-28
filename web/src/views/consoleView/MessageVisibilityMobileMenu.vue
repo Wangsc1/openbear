@@ -23,7 +23,7 @@ function choose(action) {
 </script>
 
 <template>
-  <el-drawer v-model="open" direction="btt" size="auto" title="消息操作" class="visibility-mobile-sheet" append-to-body destroy-on-close>
+  <el-drawer v-model="open" direction="btt" size="auto" title="消息操作" class="visibility-mobile-sheet mobile-viewport-sheet" append-to-body destroy-on-close>
     <div v-if="mobileMenu?.preview" class="visibility-sheet-target" aria-label="当前操作的消息">
       <span>正在操作 · {{ mobileMenu.preview.label }}</span>
       <p>{{ mobileMenu.preview.text }}</p>

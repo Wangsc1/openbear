@@ -1,10 +1,7 @@
 """Agent runtime model / thinking / fast resolution.
 
-Priority (new task):
-1. frozen task snapshot (continue / resume)
-2. Agent preset explicit model/think
-3. conversation Agent defaults
-4. main conversation model / model default thinking / main fast
+New tasks, including AgentContinue rounds, resolve preset > conversation > main.
+Only an unfinished task's resume/retry uses its frozen runtime snapshot.
 """
 
 from __future__ import annotations
@@ -18,7 +15,7 @@ from app.models.thinking import (
     normalize_think_level,
     normalize_think_levels,
 )
-from app.rath.schemas import RathAgentDef
+from app.agents.schemas import AgentDefinition
 
 
 def _int_or(value: Any, default: int) -> int:
@@ -59,8 +56,28 @@ def conversation_agent_defaults(conversation: dict[str, Any] | None) -> dict[str
     }
 
 
+def agent_preset_fields(snapshot: dict[str, Any]) -> dict[str, str]:
+    """Recover preset intent, not the last task's effective runtime.
+
+    Older snapshots overwrote model/thinkLevel with resolved values. Their
+    source markers distinguish inherited values from explicit preset choices.
+    Unknown legacy provenance keeps the saved value rather than guessing.
+    """
+    source = snapshot.get("source") if isinstance(snapshot.get("source"), dict) else {}
+    model_source = snapshot.get("modelSource") or source.get("model")
+    think_source = snapshot.get("thinkSource") or source.get("thinkLevel")
+    return {
+        "model": str(snapshot.get("presetModel") or "").strip() if "presetModel" in snapshot else (
+            "" if model_source in {"main", "conversation"} else str(snapshot.get("model") or "").strip()
+        ),
+        "think_level": str(snapshot.get("presetThinkLevel") or "").strip() if "presetThinkLevel" in snapshot else (
+            "" if think_source in {"model_default", "conversation"} else str(snapshot.get("thinkLevel") or "").strip()
+        ),
+    }
+
+
 def resolve_agent_runtime_config(
-    agent: RathAgentDef | None = None,
+    agent: AgentDefinition | None = None,
     *,
     config: Config,
     model_selection_current: str = "",
@@ -69,8 +86,8 @@ def resolve_agent_runtime_config(
     main_fast_requested: bool = False,
     frozen: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Resolve effective Agent model/think/fast for launch or continue."""
-    agent = agent or RathAgentDef(
+    """Resolve a new round, or restore an unfinished task via frozen."""
+    agent = agent or AgentDefinition(
         id=0,
         agent_key="general-purpose",
         name="general-purpose",
@@ -237,7 +254,7 @@ def resolve_agent_runtime_config(
 
 
 def agent_runtime_snapshot_fields(resolved: dict[str, Any]) -> dict[str, Any]:
-    """Fields merged into agentSnapshot at task start so continue stays frozen."""
+    """Freeze this task's runtime for its own resume/retry, not future rounds."""
     source = resolved.get("source") if isinstance(resolved.get("source"), dict) else {}
     snapshot = {
         "model": str(resolved.get("model") or ""),

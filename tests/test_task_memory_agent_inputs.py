@@ -9,7 +9,7 @@ import pytest
 from app.context.strategies import ModelSummaryStrategy
 from app.context.window import WindowPolicy
 from app.llm.base import AgentResult
-from app.rath.single_agent import SingleAgentWorkflowRunner
+from app.agents.execution import AgentExecutor
 from app.task_memory import (
     SCOPE_AGENT_SESSION,
     SCOPE_AGENT_TASK,
@@ -104,7 +104,7 @@ async def test_managed_phase_gate_uses_actual_schemas_and_appends_only(runner_en
     registry = ToolRegistry()
     register_task_memory_tool(registry, memories)
     backend = RecordingBackend()
-    runner = SingleAgentWorkflowRunner(dao, task_uuid, agent=replace(agent, tool_allowlist=["TaskMemory"]),
+    runner = AgentExecutor(dao, task_uuid, agent=replace(agent, tool_allowlist=["TaskMemory"]),
                                        backend=backend, model="gpt", max_tokens=2048,
                                        tools=registry, plan_protocol_enabled=True)
     # Isolate the actual physical request path without pretending a fake Plan was
@@ -144,34 +144,44 @@ async def test_actual_agent_windows_reinject_latest_complete_notes(runner_env, s
     registry = ToolRegistry()
     register_task_memory_tool(registry, memories)
     backend = RecordingBackend()
-    runner = SingleAgentWorkflowRunner(dao, task_uuid,
+    runner = AgentExecutor(dao, task_uuid,
                                        agent=replace(agent, tool_allowlist=["TaskMemory"] if granted else []),
                                        backend=backend, model="gpt", max_tokens=2048,
                                        tools=registry, plan_protocol_enabled=False)
+    commit_final = runner._commit_final_result
+
+    async def inspect_live_window(result, **kwargs):
+        # Exercise later request boundaries before committing the task's terminal
+        # result, inside its real RunSession. A completed Agent must never call
+        # the provider again merely to satisfy this lower-level context test.
+        nonlocal shared
+        first = backend.calls[-1][0]
+        assert "<body>old-shared-body</body>" in str(first)
+        assert ("OWN-PRIVATE-BODY" in str(first)) is granted
+        window = runner._get_window_runtime()
+        window.policy = WindowPolicy(128000, trigger_tokens=8000)
+
+        async def selected_strategy():
+            return strategy
+
+        window.strategy_resolver = selected_strategy
+        window.strategies["model_summary"] = ModelSummaryStrategy(strategy_env.cfg, strategy_env.factory, "p/main")
+        messages = copy.deepcopy(first)
+        for index in range(2):
+            body = f"macOS appearance preference, revision {index}."
+            shared = await memories.update(shared["memoryUuid"], conversation_uuid="session-1", scope_type=SCOPE_CONVERSATION,
+                                           expected_revision=shared["revision"], changes={"body": body})
+            messages += batch(80 + index, text="evictable original tool result " * 1000) + batch(90 + index) + batch(100 + index)
+            schemas = await runner._allowed_tool_schemas()
+            assert await runner._prepare_context_window(messages, schemas, force=True)
+            await runner._call_model(messages, schemas)
+            sent = backend.calls[-1][0]
+            assert len(states(sent)) == 1
+            assert f"<body>{body}</body>" in states(sent)[0]["content"]
+            assert "old-shared-body" not in str(sent)
+            assert ("OWN-PRIVATE-BODY" in str(sent)) is granted
+            assert window.active_strategy == strategy
+        return await commit_final(result, **kwargs)
+
+    runner._commit_final_result = inspect_live_window
     assert (await runner.run())["summary"] == "done"
-    first = backend.calls[-1][0]
-    assert "<body>old-shared-body</body>" in str(first)
-    assert ("OWN-PRIVATE-BODY" in str(first)) is granted
-    window = runner._get_window_runtime()
-    window.policy = WindowPolicy(128000, trigger_tokens=8000)
-
-    async def selected_strategy():
-        return strategy
-
-    window.strategy_resolver = selected_strategy
-    window.strategies["model_summary"] = ModelSummaryStrategy(strategy_env.cfg, strategy_env.factory, "p/main")
-    messages = copy.deepcopy(first)
-    for index in range(2):
-        body = f"macOS appearance preference, revision {index}."
-        shared = await memories.update(shared["memoryUuid"], conversation_uuid="session-1", scope_type=SCOPE_CONVERSATION,
-                                       expected_revision=shared["revision"], changes={"body": body})
-        messages += batch(80 + index, text="evictable original tool result " * 1000) + batch(90 + index) + batch(100 + index)
-        schemas = await runner._allowed_tool_schemas()
-        assert await runner._prepare_context_window(messages, schemas, force=True)
-        await runner._call_model(messages, schemas)
-        sent = backend.calls[-1][0]
-        assert len(states(sent)) == 1
-        assert f"<body>{body}</body>" in states(sent)[0]["content"]
-        assert "old-shared-body" not in str(sent)
-        assert ("OWN-PRIVATE-BODY" in str(sent)) is granted
-        assert window.active_strategy == strategy

@@ -92,11 +92,11 @@ from app.models.thinking import (
     normalize_think_levels,
 )
 from app.operation_locks import ChatOperationLocks
-from app.rath.builtin_workflows import SINGLE_AGENT_WORKFLOW_SLUG
-from app.rath.dao import RathDAO
-from app.rath.manager import RathTaskManager
-from app.rath.single_agent import (
-    SingleAgentWorkflowRunner,
+from app.agents.profiles import SINGLE_AGENT_WORKFLOW_SLUG
+from app.agents.dao import AgentDAO
+from app.agents.control import AgentControlService
+from app.agents.execution import (
+    AgentExecutor,
     agent_to_snapshot,
     safe_agent_llm_session_id,
 )

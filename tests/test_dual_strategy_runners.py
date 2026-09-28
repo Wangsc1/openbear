@@ -13,7 +13,7 @@ from app.context.strategies import ModelSummaryStrategy
 from app.context.window import source_of
 from app.llm.base import AgentResult
 from app.llm.events import StreamEvent, ToolCall, Usage
-from app.rath.single_agent import SingleAgentWorkflowRunner
+from app.agents.execution import AgentExecutor
 from app.tools.base import ToolRegistry
 from tests.test_agent_continuity import call
 from tests.test_agent_continuity import env as continuation_fixture
@@ -167,7 +167,7 @@ async def test_managed_agent_summary_refreshes_full_plan_without_resetting_phase
         (tid,),
     )
     await dao.db.conn.commit()
-    runner = SingleAgentWorkflowRunner(dao, tid, agent=agent, backend=env.backends["p/main"], model="main",
+    runner = AgentExecutor(dao, tid, agent=agent, backend=env.backends["p/main"], model="main",
         model_label="p/main", max_tokens=2048, tools=ToolRegistry(), plan_protocol_enabled=True,
         context_window=128000, rollover_trigger_tokens=16000, context_config=env.cfg, context_llm_factory=env.factory)
     task = await dao.get_task(tid)

@@ -1,7 +1,8 @@
 """OpenBear Agent orchestration tools.
 
-Rath remains the durable execution substrate, but the main OpenBear model sees
-only a Claude-Code-style control surface: launch an Agent, message it, or stop it.
+Agent policies use the same execution core and scheduler as the controller.
+The model-facing tools preserve launch, continuation, Plan, message and stop
+contracts; legacy task identifiers remain stable for existing conversations.
 """
 from __future__ import annotations
 
@@ -22,24 +23,24 @@ from app.db.dao import MessageDAO
 from app.llm.events import Usage
 from app.llm.factory import BackendFactory
 from app.memory.client import MemoryClient
-from app.models.agent_runtime import resolve_agent_runtime_config
+from app.models.agent_runtime import agent_preset_fields, resolve_agent_runtime_config
 from app.models.selection import ModelSelection
-from app.rath.agent_prompt import render_agent_base_system_prompt
-from app.rath.builtin_workflows import SINGLE_AGENT_WORKFLOW_SLUG, ensure_builtin_workflows
-from app.rath.continuity import agent_session_public
-from app.rath.controller_projection import project_agent_payload_for_controller
-from app.rath.dao import RathDAO
-from app.rath.manager import RathTaskManager
-from app.rath.plan import AgentPlanCoordinator, PlanError, register_agent_plan_tools
-from app.rath.schemas import (
+from app.agents.agent_prompt import render_agent_base_system_prompt
+from app.agents.profiles import SINGLE_AGENT_WORKFLOW_SLUG, ensure_builtin_workflows
+from app.agents.continuity import agent_session_public
+from app.agents.controller_projection import project_agent_payload_for_controller
+from app.agents.dao import AgentDAO
+from app.agents.control import AgentControlService
+from app.agents.plan import AgentPlanCoordinator, PlanError, register_agent_plan_tools
+from app.agents.schemas import (
     ACTIVE_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
-    RathAgentDef,
-    RathAgentSession,
-    RathTask,
+    AgentDefinition,
+    AgentSession,
+    AgentTask,
 )
-from app.rath.single_agent import (
-    SingleAgentWorkflowRunner,
+from app.agents.execution import (
+    AgentExecutor,
     agent_to_snapshot,
     safe_agent_llm_session_id,
 )
@@ -80,7 +81,7 @@ def _normalize_agent_plan_mode(value: Any, *, default: str = _AGENT_PLAN_MODE_DI
     return mode or default
 
 
-def _task_agent_plan_mode(task: RathTask | None) -> str:
+def _task_agent_plan_mode(task: AgentTask | None) -> str:
     """Return the task's frozen Plan mode.
 
     Tasks created before per-task Plan modes existed have no planMode field and
@@ -113,7 +114,7 @@ def _events_public(events) -> list[dict[str, Any]]:
 
 
 def _task_public(
-    task: RathTask | None,
+    task: AgentTask | None,
     *,
     include_output: bool = False,
     model: str = "",
@@ -298,7 +299,7 @@ def _render_agent_task_notification(payload: dict[str, Any]) -> str:
     )
 
 
-def _agent_result_output_tokens(task: RathTask | None, result: dict[str, Any]) -> int:
+def _agent_result_output_tokens(task: AgentTask | None, result: dict[str, Any]) -> int:
     """Return final Agent output tokens, with a conservative local fallback."""
     actual = max(0, int(getattr(task, "last_output_tokens", 0) or 0)) if task is not None else 0
     if actual > 0:
@@ -318,8 +319,8 @@ class AgentTools(AgentContinuationTools):
         self,
         *,
         config: Config,
-        dao: RathDAO,
-        manager: RathTaskManager,
+        dao: AgentDAO,
+        manager: AgentControlService,
         llm_factory: BackendFactory,
         model_selection: ModelSelection,
         registry: ToolRegistry,
@@ -338,36 +339,36 @@ class AgentTools(AgentContinuationTools):
         self.memory = memory
         coordinator = manager.plan_coordinator
         if coordinator is None:
-            rath_config = config.rath
+            agents_config = config.agents
             coordinator = AgentPlanCoordinator(
                 dao,
                 manager,
-                max_revision_rounds=int(getattr(rath_config, "agent_plan_max_revision_rounds", 3) or 3),
-                max_steps=int(getattr(rath_config, "agent_plan_max_steps", 30) or 30),
+                max_revision_rounds=int(getattr(agents_config, "agent_plan_max_revision_rounds", 3) or 3),
+                max_steps=int(getattr(agents_config, "agent_plan_max_steps", 30) or 30),
                 max_criteria_per_step=int(
-                    getattr(rath_config, "agent_plan_max_criteria_per_step", 10) or 10
+                    getattr(agents_config, "agent_plan_max_criteria_per_step", 10) or 10
                 ),
-                max_final_outputs=int(getattr(rath_config, "agent_plan_max_final_outputs", 20) or 20),
-                plan_review_prompt=str(getattr(rath_config, "plan_review_prompt", "") or ""),
+                max_final_outputs=int(getattr(agents_config, "agent_plan_max_final_outputs", 20) or 20),
+                plan_review_prompt=str(getattr(agents_config, "plan_review_prompt", "") or ""),
             )
             manager.plan_coordinator = coordinator
         self.plan: AgentPlanCoordinator = coordinator
         self.plan.available_tools = lambda: agent_delegation_names(self.registry)
-        self.plan.max_revision_rounds = max(1, int(getattr(config.rath, "agent_plan_max_revision_rounds", 3) or 3))
-        self.plan.max_steps = max(1, int(getattr(config.rath, "agent_plan_max_steps", 30) or 30))
+        self.plan.max_revision_rounds = max(1, int(getattr(config.agents, "agent_plan_max_revision_rounds", 3) or 3))
+        self.plan.max_steps = max(1, int(getattr(config.agents, "agent_plan_max_steps", 30) or 30))
         self.plan.max_criteria_per_step = max(
-            1, int(getattr(config.rath, "agent_plan_max_criteria_per_step", 10) or 10)
+            1, int(getattr(config.agents, "agent_plan_max_criteria_per_step", 10) or 10)
         )
-        self.plan.max_final_outputs = max(1, int(getattr(config.rath, "agent_plan_max_final_outputs", 20) or 20))
-        self.plan.plan_review_prompt = str(getattr(config.rath, "plan_review_prompt", "") or "")
+        self.plan.max_final_outputs = max(1, int(getattr(config.agents, "agent_plan_max_final_outputs", 20) or 20))
+        self.plan.plan_review_prompt = str(getattr(config.agents, "plan_review_prompt", "") or "")
 
     def _plan_prompts(self) -> dict[str, str]:
-        rath = self.config.rath
+        agents = self.config.agents
         return {
-            "rath.planDraftPrompt": str(getattr(rath, "plan_draft_prompt", "") or ""),
-            "rath.planRevisionPrompt": str(getattr(rath, "plan_revision_prompt", "") or ""),
-            "rath.planExecutionPrompt": str(getattr(rath, "plan_execution_prompt", "") or ""),
-            "rath.planContextRestorePrompt": str(getattr(rath, "plan_context_restore_prompt", "") or ""),
+            "rath.planDraftPrompt": str(getattr(agents, "plan_draft_prompt", "") or ""),
+            "rath.planRevisionPrompt": str(getattr(agents, "plan_revision_prompt", "") or ""),
+            "rath.planExecutionPrompt": str(getattr(agents, "plan_execution_prompt", "") or ""),
+            "rath.planContextRestorePrompt": str(getattr(agents, "plan_context_restore_prompt", "") or ""),
         }
 
     async def _plan_notification_snapshot(self, task_uuid: str) -> dict[str, Any]:
@@ -428,7 +429,7 @@ class AgentTools(AgentContinuationTools):
 
     async def _resolve_agent_runtime(
         self,
-        agent: RathAgentDef,
+        agent: AgentDefinition,
         *,
         chat_id: int = 0,
         conversation: dict[str, Any] | None = None,
@@ -501,6 +502,8 @@ class AgentTools(AgentContinuationTools):
                 chat_id,
                 commit=False,
                 session_uuid=session_uuid,
+                attempt_id=str(detail.get("attemptId") or ""),
+                usage_known=detail.get("usageReported"),
                 model=effective_model_label,
                 protocol=effective_protocol,
                 think_level=str(detail.get("thinkLevel") or ""),
@@ -563,7 +566,7 @@ class AgentTools(AgentContinuationTools):
             return [item.strip() for item in text.split(",")]
         return None
 
-    def _resolve_requested_agent_tools(self, args: dict[str, Any], agent: RathAgentDef) -> dict[str, Any]:
+    def _resolve_requested_agent_tools(self, args: dict[str, Any], agent: AgentDefinition) -> dict[str, Any]:
         raw = None
         found = False
         for key in ("tools", "toolAllowlist", "tool_allowlist", "allowedTools"):
@@ -784,7 +787,7 @@ class AgentTools(AgentContinuationTools):
                 "allowedPlanModes": sorted(_AGENT_PLAN_MODES),
                 "message": "planMode must be direct or managed.",
             })
-        plan_capability_enabled = bool(getattr(self.config.rath, "agent_plan_enabled", True))
+        plan_capability_enabled = bool(getattr(self.config.agents, "agent_plan_enabled", True))
         if plan_mode == _AGENT_PLAN_MODE_MANAGED and not plan_capability_enabled:
             return _json({
                 "ok": False,
@@ -1164,9 +1167,11 @@ class AgentTools(AgentContinuationTools):
                 protocol=str(getattr(backend, "protocol", "") or ""),
                 detail=detail,
             )
-            await _emit_progress()
+            # Only persist accounting here: the caller owns the global writer.
+            # Runner events publish progress from a separate task. Awaiting the
+            # Web publish lock here inverts publish -> writer and deadlocks auth.
 
-        runner = SingleAgentWorkflowRunner(
+        runner = AgentExecutor(
             self.dao,
             task_uuid,
             agent=agent,
@@ -1194,14 +1199,14 @@ class AgentTools(AgentContinuationTools):
             **self._model_retry_kwargs(task_uuid),
             model_call_limit=self._model_call_limit_for(agent),
             tool_call_limit=self._tool_call_limit_for(agent),
-            plan_control_call_limit=int(getattr(self.config.rath, "plan_control_call_limit", 200) or 200),
+            plan_control_call_limit=int(getattr(self.config.agents, "plan_control_call_limit", 200) or 200),
             poll_interval_s=0.5,
             on_model_call=_on_agent_model_call,
             on_event=_on_runner_event,
             task_notification=notification_cb,
             conversation_event=conversation_event_cb,
             plan_protocol_enabled=(
-                bool(getattr(self.config.rath, "agent_plan_enabled", True))
+                bool(getattr(self.config.agents, "agent_plan_enabled", True))
                 and _task_agent_plan_mode(task) == _AGENT_PLAN_MODE_MANAGED
             ),
             plan_prompts=self._plan_prompts(),
@@ -1210,7 +1215,6 @@ class AgentTools(AgentContinuationTools):
         progress_task: asyncio.Task | None = None
         if progress_cb is not None or progress_payload_cb is not None:
             await _emit_progress_and_maybe_stop()
-            progress_task = asyncio.create_task(_progress_loop())
         async def _run_registered_continue() -> dict[str, Any]:
             async with self.manager.execution_slot(task_uuid):
                 return await runner.run_continue(guidance)
@@ -1248,6 +1252,8 @@ class AgentTools(AgentContinuationTools):
                 expected_statuses=("resuming",),
             )
             raise
+        if progress_cb is not None or progress_payload_cb is not None:
+            progress_task = asyncio.create_task(_progress_loop())
         try:
             wait_s = self._foreground_wait_s_for_context(ctx, allow_detach=True)
             done, _pending = await asyncio.wait({child_task}, timeout=wait_s)
@@ -1375,7 +1381,7 @@ class AgentTools(AgentContinuationTools):
         scope_error = self._task_scope_error(task, ctx)
         if scope_error:
             return _json({"ok": False, "error": "task_out_of_scope", "taskUuid": task_uuid, "message": scope_error})
-        if task.status in TERMINAL_TASK_STATUSES:
+        if task.status in TERMINAL_TASK_STATUSES and self.manager.task(task_uuid) is None:
             return _json({
                 "ok": True,
                 "stopped": False,
@@ -1445,7 +1451,7 @@ class AgentTools(AgentContinuationTools):
             "task": _task_public(refreshed or task, include_output=False),
         })
 
-    def _task_scope_error(self, task: RathTask, ctx: ToolRuntimeContext) -> str:
+    def _task_scope_error(self, task: AgentTask, ctx: ToolRuntimeContext) -> str:
         if ctx.chat_id <= 0 and not ctx.session_uuid:
             return "error: 缺少运行时会话范围，拒绝读取/控制 Rath 任务。"
         if ctx.chat_id > 0 and int(task.chat_id or 0) != int(ctx.chat_id):
@@ -1454,7 +1460,7 @@ class AgentTools(AgentContinuationTools):
             return "error: Rath 任务不属于当前 OpenBear Session，已拒绝访问。"
         return ""
 
-    async def _resolve_agent(self, ref: Any) -> RathAgentDef | None:
+    async def _resolve_agent(self, ref: Any) -> AgentDefinition | None:
         agents = await self.dao.list_agents(include_disabled=False)
         if ref is None:
             return None
@@ -1472,15 +1478,15 @@ class AgentTools(AgentContinuationTools):
                 return agent
         return None
 
-    async def _resolve_agent_preset(self, ref: Any) -> RathAgentDef | None:
+    async def _resolve_agent_preset(self, ref: Any) -> AgentDefinition | None:
         text = str(ref or "").strip()
         if not text or text.lower() in {"general-purpose", "general", "default"}:
             return await self._default_general_agent()
         return await self._resolve_agent(text)
 
-    async def _default_general_agent(self) -> RathAgentDef:
+    async def _default_general_agent(self) -> AgentDefinition:
         workflow_uuid = await self._default_workflow_uuid()
-        return RathAgentDef(
+        return AgentDefinition(
             id=0,
             agent_key="general-purpose",
             name="general-purpose",
@@ -1500,10 +1506,10 @@ class AgentTools(AgentContinuationTools):
             workflow_uuid=workflow_uuid,
         )
 
-    async def _resolve_scoped_task(self, ref: Any) -> RathTask | None:
+    async def _resolve_scoped_task(self, ref: Any) -> AgentTask | None:
         ctx = current_tool_context()
         text = str(ref or "").strip()
-        candidates: list[RathTask] = []
+        candidates: list[AgentTask] = []
         if text:
             exact = await self.dao.get_task(text)
             if exact is not None and not self._task_scope_error(exact, ctx):
@@ -1612,20 +1618,23 @@ class AgentTools(AgentContinuationTools):
             ),
         }, None
 
-    async def _agent_from_task(self, task: RathTask) -> RathAgentDef | None:
+    async def _agent_from_task(self, task: AgentTask, *, for_new_round: bool = False) -> AgentDefinition | None:
         snapshot = task.input.get("agentSnapshot") if isinstance(task.input, dict) else {}
         workflow_uuid = str(task.workflow_uuid or "").strip()
         if isinstance(snapshot, dict):
             agent_key = str(snapshot.get("agentKey") or "").strip()
             if agent_key:
-                return RathAgentDef(
+                runtime_fields = agent_preset_fields(snapshot) if for_new_round else {
+                    "model": str(snapshot.get("model") or ""),
+                    "think_level": str(snapshot.get("thinkLevel") or ""),
+                }
+                return AgentDefinition(
                     id=int(snapshot.get("id") or 0),
                     agent_key=agent_key,
                     name=str(snapshot.get("name") or agent_key),
                     description=str(snapshot.get("description") or ""),
                     system_prompt=str(snapshot.get("systemPrompt") or ""),
-                    model=str(snapshot.get("model") or ""),
-                    think_level=str(snapshot.get("thinkLevel") or ""),
+                    **runtime_fields,
                     tool_allowlist=sanitize_tool_allowlist(snapshot.get("toolAllowlist") or []),
                     enabled=bool(snapshot.get("enabled", True)),
                     workflow_uuid=workflow_uuid,
@@ -1649,12 +1658,12 @@ class AgentTools(AgentContinuationTools):
         return wf.workflow_uuid
 
     def _agent_limit_for(self, config_attr: str, default: int) -> int:
-        return max(0, int(getattr(self.config.rath, config_attr, default) or 0))
+        return max(0, int(getattr(self.config.agents, config_attr, default) or 0))
 
-    def _model_call_limit_for(self, agent: RathAgentDef) -> int:
+    def _model_call_limit_for(self, agent: AgentDefinition) -> int:
         return self._agent_limit_for("agent_model_call_limit", 40)
 
-    def _tool_call_limit_for(self, agent: RathAgentDef) -> int:
+    def _tool_call_limit_for(self, agent: AgentDefinition) -> int:
         return self._agent_limit_for("agent_tool_call_limit", 80)
 
     def _model_retry_kwargs(self, task_uuid: str) -> dict[str, Any]:
@@ -1682,11 +1691,11 @@ class AgentTools(AgentContinuationTools):
 
     async def _agent_session_for(
         self,
-        agent: RathAgentDef,
+        agent: AgentDefinition,
         *,
         chat_id: int,
         openbear_session_uuid: str,
-    ) -> RathAgentSession:
+    ) -> AgentSession:
         workflow_uuid = agent.workflow_uuid or await self._default_workflow_uuid()
         session_key = openbear_session_uuid or f"chat:{chat_id}"
         return await self.dao.create_agent_instance(
@@ -1698,7 +1707,10 @@ class AgentTools(AgentContinuationTools):
             metadata={"agentName": agent.name},
         )
 
-    async def _mark_task_failed(self, task_uuid: str, exc: Exception, *, current_status: str = "任务失败") -> RathTask | None:
+    async def _mark_task_failed(self, task_uuid: str, exc: Exception, *, current_status: str = "任务失败") -> AgentTask | None:
+        existing = await self.dao.get_task(task_uuid)
+        if existing is not None and existing.status == "stopping":
+            return await self.manager.mark_cancelled(task_uuid)
         changed = await self.dao.update_task(
             task_uuid,
             status="failed",
@@ -1706,8 +1718,12 @@ class AgentTools(AgentContinuationTools):
             current_status=current_status,
             error=f"{type(exc).__name__}: {exc}",
             finish=True,
-            expected_statuses=tuple(_ACTIVE_TASK_STATUSES),
+            expected_statuses=tuple(status for status in _ACTIVE_TASK_STATUSES if status != "stopping"),
         )
+        if not changed:
+            current = await self.dao.get_task(task_uuid)
+            if current is not None and current.status == "stopping":
+                return await self.manager.mark_cancelled(task_uuid)
         if changed:
             await self.dao.append_event(
                 task_uuid,
@@ -1718,7 +1734,7 @@ class AgentTools(AgentContinuationTools):
 
     def _agent_tool_foreground_wait_s(self) -> float:
         try:
-            return max(0.0, float(getattr(self.config.rath, "agent_tool_foreground_wait_s", 0.0) or 0.0))
+            return max(0.0, float(getattr(self.config.agents, "agent_tool_foreground_wait_s", 0.0) or 0.0))
         except (TypeError, ValueError):
             return 0.0
 
@@ -1852,7 +1868,7 @@ class AgentTools(AgentContinuationTools):
 
     async def _run_one(
         self,
-        agent: RathAgentDef,
+        agent: AgentDefinition,
         *,
         instruction: str,
         title: str,
@@ -1867,7 +1883,7 @@ class AgentTools(AgentContinuationTools):
         inherit_from_task_uuid: str = "",
         inherited_plan_context: dict[str, Any] | None = None,
         plan_mode: str = _AGENT_PLAN_MODE_DIRECT,
-        instance: RathAgentSession | None = None,
+        instance: AgentSession | None = None,
         context_source: dict[str, Any] | None = None,
         preset_ceiling: list[str] | None = None,
         continuation_request_id: str = "",
@@ -1899,10 +1915,10 @@ class AgentTools(AgentContinuationTools):
             chat_id=resolved_chat_id,
             openbear_session_uuid=resolved_openbear_session_uuid,
         )
-        runtime = await self._resolve_agent_runtime(
-            agent, chat_id=resolved_chat_id,
-            frozen=(agent_session.metadata or {}).get("agentSnapshot") if instance else None,
-        )
+        # _run_one always creates a new task, including AgentContinue rounds.
+        # Re-resolve current defaults; continue_task restores an unfinished task
+        # separately using that task's frozen runtime snapshot.
+        runtime = await self._resolve_agent_runtime(agent, chat_id=resolved_chat_id)
         await self.dao.freeze_agent_instance(
             agent_session.session_uuid, agentSnapshot=agent_to_snapshot(agent, runtime=runtime),
             presetToolCeiling=list(preset_ceiling or []),
@@ -1951,17 +1967,6 @@ class AgentTools(AgentContinuationTools):
             parent_turn_uuid=lineage_parent_turn_uuid,
             run_root_turn_uuid=lineage_root_turn_uuid,
         )
-        if inherit_from_task_uuid and inherited_plan_context:
-            await self.dao.append_event(
-                task_uuid,
-                "agent_plan_inherited",
-                summary=f"Inherited durable Plan facts from {inherit_from_task_uuid[:8]}",
-                detail={
-                    "sourceTaskUuid": inherit_from_task_uuid,
-                    "completedStepCount": len(inherited_plan_context.get("completedSteps") or []),
-                    "evidenceCount": len(inherited_plan_context.get("evidence") or []),
-                },
-            )
         progress_cb = getattr(ctx, "progress_update", None) if progress_tool_name else None
         progress_payload_cb = getattr(ctx, "progress_update_payload", None) if progress_tool_name else None
         notification_cb = getattr(ctx, "task_notification", None)
@@ -2053,11 +2058,22 @@ class AgentTools(AgentContinuationTools):
             return _events_public(await self.dao.events(task_uuid, limit=limit))
 
         progress_task: asyncio.Task | None = None
-        if progress_cb is not None or progress_payload_cb is not None or progress_payload_update is not None:
-            await _emit_progress_and_maybe_stop()
-            progress_task = asyncio.create_task(_progress_loop())
         child_task: asyncio.Task | None = None
         try:
+            if inherit_from_task_uuid and inherited_plan_context:
+                await self.dao.append_event(
+                    task_uuid,
+                    "agent_plan_inherited",
+                    summary=f"Inherited durable Plan facts from {inherit_from_task_uuid[:8]}",
+                    detail={
+                        "sourceTaskUuid": inherit_from_task_uuid,
+                        "completedStepCount": len(inherited_plan_context.get("completedSteps") or []),
+                        "evidenceCount": len(inherited_plan_context.get("evidence") or []),
+                    },
+                )
+            if progress_cb is not None or progress_payload_cb is not None or progress_payload_update is not None:
+                await _emit_progress_and_maybe_stop()
+                progress_task = asyncio.create_task(_progress_loop())
             backend, model_id, max_tokens = self.llm_factory.backend_for(model_name)
             agent_base_system_prompt = await render_agent_base_system_prompt(
                 self.dao.db,
@@ -2080,9 +2096,10 @@ class AgentTools(AgentContinuationTools):
                     protocol=str(getattr(backend, "protocol", "") or ""),
                     detail=detail,
                 )
-                await _emit_progress()
+                # Presentation is driven by _on_runner_event, never awaited
+                # inside the model accounting transaction (writer -> publish).
 
-            runner = SingleAgentWorkflowRunner(
+            runner = AgentExecutor(
                 self.dao,
                 task_uuid,
                 agent=agent,
@@ -2110,14 +2127,14 @@ class AgentTools(AgentContinuationTools):
                 **self._model_retry_kwargs(task_uuid),
                 model_call_limit=self._model_call_limit_for(agent),
                 tool_call_limit=self._tool_call_limit_for(agent),
-                plan_control_call_limit=int(getattr(self.config.rath, "plan_control_call_limit", 200) or 200),
+                plan_control_call_limit=int(getattr(self.config.agents, "plan_control_call_limit", 200) or 200),
                 poll_interval_s=0.5,
                 on_model_call=_on_agent_model_call,
                 on_event=_on_runner_event,
                 task_notification=notification_cb,
                 conversation_event=conversation_event_cb,
                 plan_protocol_enabled=(
-                    bool(getattr(self.config.rath, "agent_plan_enabled", True))
+                    bool(getattr(self.config.agents, "agent_plan_enabled", True))
                     and plan_mode == _AGENT_PLAN_MODE_MANAGED
                 ),
                 plan_prompts=self._plan_prompts(),
@@ -2130,7 +2147,22 @@ class AgentTools(AgentContinuationTools):
 
             child_task = asyncio.create_task(_run_registered_child(), name=f"agent-tool-{task_uuid[:8]}")
             self.manager.register(task_uuid, resolved_chat_id, child_task, occupies_chat=False)
+        except asyncio.CancelledError:
+            if child_task is not None:
+                child_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await child_task
+            await self.manager.mark_cancelled(task_uuid)
+            if progress_task is not None:
+                progress_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await progress_task
+            raise
         except Exception as exc:
+            if child_task is not None:
+                child_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await child_task
             task = await self._mark_task_failed(task_uuid, exc, current_status="任务启动失败")
             with contextlib.suppress(Exception):
                 await _emit_progress()
@@ -2237,11 +2269,11 @@ class AgentTools(AgentContinuationTools):
             payload["next"] = "This Agent round has ended. Review and integrate its result without redoing the package; continue controller-owned work if the root objective is not yet complete. Use AgentContinue for a new authorized assignment to this same instance."
         return payload
 
-    def _agent_session_public(self, session: RathAgentSession) -> dict[str, Any]:
+    def _agent_session_public(self, session: AgentSession) -> dict[str, Any]:
         return agent_session_public(session)
 
 
-    async def _prepare_agent_result(self, output: dict[str, Any], *, task: RathTask | None) -> dict[str, Any]:
+    async def _prepare_agent_result(self, output: dict[str, Any], *, task: AgentTask | None) -> dict[str, Any]:
         """Return the complete Agent result verbatim.
 
         Agent conclusions are protected controller input. Context pressure is
@@ -2256,8 +2288,8 @@ def register_agent_tools(
     reg: ToolRegistry,
     *,
     config: Config,
-    dao: RathDAO,
-    manager: RathTaskManager,
+    dao: AgentDAO,
+    manager: AgentControlService,
     llm_factory: BackendFactory,
     model_selection: ModelSelection,
     messages: MessageDAO | None = None,

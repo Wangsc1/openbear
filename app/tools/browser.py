@@ -4,6 +4,7 @@ import json
 
 from app.browser.contract import ACTIONS
 from app.tools.base import current_tool_context
+from app.runtime.tool_result import ToolOutcome
 
 
 def register_browser_tool(registry, service):
@@ -13,7 +14,16 @@ def register_browser_tool(registry, service):
 
     async def browser(args):
         result = await service.call(args, current_tool_context())
-        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        # BrowserService owns this contract; do not infer state from rendered text.
+        reported = result.get("outcome")
+        status = {"completed": "completed", "not_started": "denied",
+                  "failed": "failed", "unknown": "unknown"}.get(reported)
+        if status is None:
+            status = "completed" if result.get("status") == "ok" else "unknown"
+        return ToolOutcome(json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+            status=status,
+            effect_state="not_started" if reported == "not_started" else "reported" if status == "completed" else "unknown",
+            business_success=True if status == "completed" else False if status in {"failed", "denied"} else None)
 
     registry.add(
         "Browser",

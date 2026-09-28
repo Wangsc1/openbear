@@ -6,10 +6,17 @@ import { createBuildInfo } from "./buildIdentity.mjs";
 const webRoot = fileURLToPath(new URL(".", import.meta.url));
 const buildInfo = createBuildInfo(webRoot);
 
+// Android OS and browser versions are independent. Chrome 87 is an explicit
+// older-engine build target, not a claim about every Android 11 installation.
+export const browserTargets = ["safari15", "chrome87"];
+
 // Monaco has its own dynamic language imports. Do not let its manual chunk
 // absorb Vite's shared preload helper: that would make every lazy page (and
 // the chat entry itself) statically import the full editor again.
 export function manualChunk(id) {
+  // Keep API patches independent and ahead of vendor evaluation. Shared CJS
+  // helpers must not pull vendor/Monaco back into this compatibility chunk.
+  if (id.includes("/node_modules/core-js/") || id.endsWith("/src/browserCompatibility.js") || id === "\0commonjsHelpers.js") return "compatibility";
   if (id === "\0vite/preload-helper.js") return "vendor";
   if (id.includes("/node_modules/monaco-editor/") && !id.includes("?worker")) return "monaco";
   if (/\/node_modules\/(?:vue|element-plus)\//.test(id)) return "vendor";
@@ -37,6 +44,8 @@ export default defineConfig({
     proxy: { "/api": "http://127.0.0.1:8899" },
   },
   build: {
+    target: browserTargets,
+    cssTarget: browserTargets,
     outDir: "dist",
     emptyOutDir: true,
     chunkSizeWarningLimit: 40000,

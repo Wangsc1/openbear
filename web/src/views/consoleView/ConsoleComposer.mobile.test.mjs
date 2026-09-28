@@ -17,15 +17,45 @@ const sendTemplate = ast.find(node => node.type === 1 && node.props.some(prop =>
 async function render(template, bindings) {
   let tree; const slotTrees = [];
   const compiled = compile(template.loc.source), app = createSSRApp({ render() { tree = compiled.call(this, bindings, []); return tree; } });
-  for (const name of ['Close', 'Document', 'Promotion']) app.component(name, { render: () => h('svg') });
+  for (const name of ['Close', 'Document', 'Promotion', 'Layers', 'Coins', 'Clock3', 'ArrowDown']) app.component(name, { render: () => h('svg') });
   app.component('ElImage', { render: () => h('img') });
   app.component('ElTooltip', { inheritAttrs: false, render() { const nodes = this.$slots.default?.() || []; slotTrees.push(...nodes); return nodes; } });
   app.component('ReferenceEditor', { render: () => h('div') });
+  app.component('ContextUsageMeter', { props: ['usage'], render() { return h('button', {class: 'context-usage-trigger'}, `${this.usage?.used ?? '待实测'}`); } });
   const html = await renderToString(app); return { html, nodes: walk([tree, ...slotTrees]) };
 }
 
+test('mobile footer keeps context, then icon-only Tokens/cache, cost and duration in order with accessible labels', async () => {
+  const template = ast.find(node => node.type === 1 && node.props.some(prop => prop.name === 'class' && prop.value?.content === 'composer-usage-summary'));
+  const props = {contextUsage:{used:125000},tokensText:'75.5M',cachePercentText:'96.0%',durationText:'12m34s',costText:'$3.45678'};
+  for (const values of [{}, {durationText:'250m08s',costText:'$106.91340'}, {durationText:'—',costText:'—'}]) {
+    Object.assign(props, values);
+    const {html} = await render(template, {props});
+    assert.ok(html.includes(`总耗时 ${props.durationText}`));
+    assert.ok(html.includes(`总花费 ${props.costText}`));
+    assert.match(html, /context-usage-trigger/);
+    assert.match(html, /125000/);
+    assert.match(html, /75\.5M（96\.0%）/);
+    assert.match(html, /aria-label="总 Tokens 75\.5M；缓存命中率 96\.0%"/);
+    assert.equal((html.match(/<svg/g)||[]).length,3);
+    const visibleText=html.replace(/<[^>]*>/g,'');
+    assert.doesNotMatch(visibleText,/Tokens|总耗时|总花费|压缩/);
+    assert.ok(visibleText.indexOf('125000')<visibleText.indexOf('75.5M'));
+    assert.ok(visibleText.indexOf('75.5M')<visibleText.indexOf(props.costText));
+    if(props.costText!==props.durationText) assert.ok(visibleText.indexOf(props.costText)<visibleText.indexOf(props.durationText));
+  }
+});
+
+test('model link retains compression strategy immediately after the model name for both strategies', async () => {
+  const template=ast.find(node=>node.type===1 && node.tag==='button' && node.props.some(prop=>prop.name==='class' && prop.value?.content.includes('run-config-chip')));
+  for(const [contextStrategy,label] of [['sliding_window','滑窗压缩'],['model_summary','摘要压缩']]) {
+    const {html}=await render(template,{props:{contextStrategy},runConfigStrategyText:label,runConfigModelText:'GPT-6 Astra',runConfigMetaText:''});
+    assert.ok(html.indexOf('GPT-6 Astra')<html.indexOf(`>${label}</span>`));
+  }
+});
+
 test('actual attachment remove button has a filename, stops preview bubbling and emits only the selected attachment', async () => {
-  const calls = [], props = { pendingAttachments: [{ id: 'one', file: { name: 'photo.png', size: 123, type: 'image/png' } }, { id: 'two', file: { name: 'notes.txt', size: 24, type: 'text/plain' } }] };
+  const calls = [], props = { uploadProgress: {}, pendingAttachments: [{ id: 'one', file: { name: 'photo.png', size: 123, type: 'image/png' } }, { id: 'two', file: { name: 'notes.txt', size: 24, type: 'text/plain' } }] };
   const { html, nodes } = await render(attachmentTemplate, { props, emit: (...args) => calls.push(args), attachmentPreviewUrl: () => '', fmtBytes: value => `${value} B` });
   assert.match(html, /移除附件：photo.png/); assert.match(html, /移除附件：notes.txt/);
   const buttons = nodes.filter(node => node.type === 'button'); let stopped = 0;
@@ -42,16 +72,26 @@ test('actual send entry retains disabled state and ReferenceEditor canSend guard
   rendered = await render(sendTemplate, bindings); assert.equal(rendered.nodes[0].props.disabled, false);
 });
 
-test('actual composer paste and file chooser retain files, draft text and focus semantics', async () => {
-  const emitted = [], inserts = [], focuses = [], props = { draft: 'draft', running: false, pendingAttachments: [], attachmentPreviews: {} };
+test('actual composer paste and file chooser retain files, mixed text and focus semantics; rejected files warn', async () => {
+  const emitted = [], inserts = [], focuses = [], warnings = [], props = { draft: 'draft', running: false, pendingAttachments: [], attachmentPreviews: {} };
   let picked = 0;
-  const c = vm.createContext({ props, nextTick, File, emit: (...args) => emitted.push(args), fileInput: ref({ click() { picked++; } }), composerTextarea: ref({ insertText: text => inserts.push(text), adjustHeight() {}, focus: options => focuses.push(options), value: 'draft', setSelectionRange() {} }) });
+  const c = vm.createContext({ props, nextTick, File, ElMessage: {warning: text => warnings.push(text)}, emit: (...args) => emitted.push(args), fileInput: ref({ click() { picked++; } }), composerTextarea: ref({ insertText: text => inserts.push(text), adjustHeight() {}, focus: options => focuses.push(options), value: 'draft', setSelectionRange() {} }) });
   vm.runInContext(between(source, 'function openFilePicker()', 'function interactionAction('), c);
   vm.runInContext('openFilePicker()', c); assert.equal(picked, 1);
   const file = new File(['image'], 'image.png', { type: 'image/png' }); let prevented = 0;
   c.event = { clipboardData: { items: [{ kind: 'file', getAsFile: () => file }], getData: () => 'pasted text' }, preventDefault() { prevented++; } };
   vm.runInContext('onPaste(event)', c); assert.equal(prevented, 1); assert.equal(emitted[0][0], 'attachment-change'); assert.equal(emitted[0][1][0], file); assert.deepEqual(inserts, ['pasted text']);
-  props.running = true; vm.runInContext('onPaste(event)', c); assert.equal(emitted.length, 1, 'running still prohibits new attachment paste');
+  props.running = true; vm.runInContext('onPaste(event)', c);
+  assert.equal(emitted.length, 1, 'running still prohibits new attachment paste');
+  assert.deepEqual(inserts, ['pasted text', 'pasted text'], 'text survives a rejected mixed file/text paste');
+  assert.deepEqual(warnings, ['运行中暂不能添加附件']);
+  c.event = {clipboardData:{items:[{kind:'file',getAsFile:()=>file}],getData:()=>''},preventDefault(){this.prevented=true;}};
+  vm.runInContext('onPaste(event)',c);
+  assert.equal(c.event.prevented,true,'file-only paste is intercepted');
+  assert.equal(emitted.length,1);assert.equal(inserts.length,2);
+  assert.deepEqual(warnings,['运行中暂不能添加附件','运行中暂不能添加附件']);
+  c.event = {clipboardData:{items:[],getData:()=> 'native text'},preventDefault(){this.prevented=true;}};
+  vm.runInContext('onPaste(event)',c);assert.equal(c.event.prevented,undefined,'ordinary text retains native paste');
   await vm.runInContext('focus()', c); assert.equal(focuses[0].preventScroll, true);
   const input = { files: [file], value: 'old-file' }; c.change = { target: input }; vm.runInContext('onAttachmentChange(change)', c); assert.equal(input.value, '');
 });
@@ -74,12 +114,39 @@ test('touch keyboard Enter inserts a hard break before ReferenceEditor sends; de
   for (const variant of [{ shiftKey: true }, { ctrlKey: true }, { metaKey: true }, { altKey: true }, { isComposing: true }, { keyCode: 229 }, { key: 'Tab' }, { target: { closest: () => null } }]) {
     event = key(variant); assert.equal(event.prevented, undefined); assert.equal(event.stopped, undefined);
   }
+  const reference = vm.createContext({emit:(name)=>{if(name==='send'&&props.canSend)calls.push(['send']);},editor:ref(null),mention:ref(null),picker:ref(null)});
+  vm.runInContext(between(editor,'function onKey(','function onPaste('),reference);
+  for (const modifier of ['ctrlKey','metaKey']) {
+    event = key({[modifier]:true});
+    assert.equal(event.prevented,undefined,'hardware shortcut reaches ReferenceEditor');
+    reference.event=event;reference.view={composing:false};
+    assert.equal(vm.runInContext('onKey(view,event)',reference),true);
+  }
+  assert.deepEqual(calls,[['send'],['send']],'both hardware shortcuts send on a touch device');
+  props.canSend=false;event=key({metaKey:true});reference.event=event;vm.runInContext('onKey(view,event)',reference);
+  assert.equal(calls.length,2,'hardware shortcut still respects canSend');props.canSend=true;
+  for(const composing of [{isComposing:true},{keyCode:229}]) {
+    event=key({ctrlKey:true,...composing});reference.event=event;
+    assert.equal(vm.runInContext('onKey(view,event)',reference),false);
+  }
+  assert.equal(calls.length,2,'IME confirmation cannot send via the shortcut');
   composerTextarea.value.editor.view.composing = true; assert.equal(key().prevented, undefined);
   composerTextarea.value.editor.view.composing = false;
   suggestion = true; assert.equal(key().prevented, undefined);
   suggestion = false; touch = false; assert.equal(key().prevented, undefined);
   assert.equal(breaks.length, 1, 'only plain mobile Enter inserts a break');
-  nodes[0].props.onSend(); assert.deepEqual(calls, [['send']], 'explicit send is still available on phones');
+  touch=true;event=key();reference.event=event;
+  assert.equal(event.prevented,true,'plain touch Enter stays a newline');
+  touch=false;event=key();reference.event=event;
+  assert.equal(vm.runInContext('onKey(view,event)',reference),true,'desktop Enter still sends');
+  nodes[0].props.onSend(); assert.deepEqual(calls, [['send'], ['send'], ['send'], ['send']], 'explicit send is still available on phones');
+});
+
+test('mobile composer hides the bottom hints and leaves the shell owning safe-area padding', () => {
+  assert.match(source, /@media \(max-width: 760px\), \(hover: none\) and \(pointer: coarse\) \{\s*\.composer-hints \{ display: none; \}/);
+  assert.match(source, /class="composer-desktop-shortcut">Enter 发送 · Ctrl\/⌘\+Enter 也可发送/);
+  assert.match(source, /\.composer-shell \{ padding: \.5rem \.75rem 8px; \}/);
+  assert.doesNotMatch(source, /\.composer-shell \{ padding:[^}]*safe-area-inset-bottom/);
 });
 
 test('open run-config popover follows the composer through keyboard blur and visual viewport changes, then detaches', async () => {

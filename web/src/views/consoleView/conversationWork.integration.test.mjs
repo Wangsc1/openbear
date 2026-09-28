@@ -7,7 +7,7 @@ import {compileScript, compileStyle, compileTemplate, parse} from '@vue/compiler
 import {createRenderer, h, nextTick, reactive, ref} from 'vue';
 import {conversationTimelineEntries} from './conversationTimeline.js';
 import {projectOperationMessages} from '../../timelineProjection.js';
-import {contextMeter, conversationWorkChunks, isInlineProcess, lastAnswerIndex, latestReasoningLine, reasoningDuration, workDurationLabel, WORK_MOTION} from './conversationWork.js';
+import {contextMeter, conversationWorkChunks, isInlineProcess, lastAnswerIndex, reasoningDuration, workDurationLabel, WORK_MOTION} from './conversationWork.js';
 
 // Execute the real Vue components in memory, without a browser/layout engine.
 const files = ['ConversationWorkBlock.vue', 'ConversationProcessEvent.vue', 'ConversationRetryEvent.vue', 'WorkDisclosure.vue', 'ContextUsageMeter.vue', 'ConsoleToolEvent.vue', 'TurnList.vue', 'TurnEvent.vue'];
@@ -36,6 +36,9 @@ Api.conversationOperationDetail = async () => { reads++; throw new Error('unexpe
 after(() => {Api.conversationOperationDetail = originalApi; assert.equal(reads, 0);});
 
 const node = (type, text = '') => ({type, text, props: {}, children: [], parent: null, style: {}, scrollTop: 0, scrollHeight: 600, clientHeight: 100,
+  get firstElementChild() {return this.children.find(c=>!c.type.startsWith('#')) || null;},
+  get textContent() {return this.text;}, set textContent(value) {this.text=value;this.children=[];},
+  get scrollWidth() {return Array.from(this.text).length * 10;}, clientWidth: 200, scrollLeft: 0,
   listeners: new Map(), addEventListener(name, fn) {this.listeners.set(name, fn);}, removeEventListener(name) {this.listeners.delete(name);}, classList: {add() {}, remove() {}}, dataset: {},
   contains(n) { return n === this || this.children.some(c => c.contains(n)); }});
 const renderer = createRenderer({
@@ -138,6 +141,27 @@ test('real TurnList obeys hidden operations and restores process visibility with
   assert.match(text(root),/思考/); assert.match(text(root),/读取/);
 });
 
+test('phone hide buttons sit after copy and open the existing menu for the correct user/reply, without taking native long press', async t => {
+  const user={id:'u',content:'用户原文'},reply=answer('a','模型原文'),tail=tool('tail');
+  const turn={id:'mobile',user,events:[reply,tail]};
+  const calls=[],visibility={hiddenIds:ref(new Set()),selecting:ref(false),selected:ref(new Set()),busy:ref(false),mobileMenu:ref(null),isHidden:()=>false,canTarget:()=>true,assistantTargets:()=>[reply,tail],openMobileMenu:(target,round)=>calls.push([target,round])};
+  const root=mount(t,'TurnList.vue',{turns:[turn],running:false,detailKey:()=>'',isDetailOpen:()=>false,activeToolResultIndex:()=>0},null,[[MESSAGE_VISIBILITY,visibility]]);
+  for(const [cls,target] of [['user-message-meta',user],['assistant-message-meta',reply]]) {
+    const footer=find(root,cls),buttons=walk(footer).filter(n=>n.type==='button');
+    const copy=buttons.findIndex(n=>n.props['aria-label']==='复制消息');
+    assert.ok(copy>=0);assert.ok(hasClass(buttons[copy+1],'message-hide-action'));
+    buttons[copy+1].props.onClick({stopPropagation(){}});
+    assert.equal(calls.at(-1)[0],target);assert.equal(calls.at(-1)[1],turn);
+  }
+  for(const row of walk(root).filter(n=>hasClass(n,'timed-row'))) {
+    assert.equal(row.props.onPointerdown,undefined);assert.equal(row.props.onContextmenu,undefined);
+    assert.equal(row.listeners.has('pointerdown'),false);assert.equal(row.listeners.has('contextmenu'),false);
+  }
+  visibility.busy.value=true;await nextTick();
+  assert.equal(find(root,'message-hide-action').props.disabled,true);
+  visibility.selecting.value=true;await nextTick();assert.equal(find(root,'message-hide-action'),undefined);
+});
+
 test('running indicator in the real TurnList retains the original three-dot animation', t => {
   const event = {kind:'live_status',id:'running',persistentRunIndicator:true,active:true};
   assert.equal(isInlineProcess({event}),false);
@@ -175,59 +199,107 @@ test('reasoning disclosure retains every character, scroll-up stops follow and r
   scroll.scrollHeight = 1200; scroll._workSync(); assert.equal(scroll.scrollTop,1200);
 });
 
-test('latest reasoning line is refreshed in place; duration is never invented from missing timestamps', () => {
-  assert.deepEqual(latestReasoningLine('old\nnew\n '),{key:1,text:'new'});
-  assert.equal(latestReasoningLine('old\nnew tokens').key,1);
-  assert.deepEqual(latestReasoningLine('旧行\r\n  最新思考\t\r\n \t\r\n\u3000'),{key:1,text:'最新思考'});
-  assert.equal(latestReasoningLine(' \t\r\n\u3000').text,'');
+test('reasoning duration is never invented from missing timestamps', () => {
   assert.equal(reasoningDuration(reasoning),0);
   assert.equal(workDurationLabel(reasoningDuration(reasoning)),'');
   assert.equal(workDurationLabel(21000),'21 秒');
 });
 
-test('reasoning summary follows actual text width and releases replaced text observers', t => {
+test('reasoning summary observes its text and viewport, and resizing keeps the latest tail', async t => {
   const previousObserver=globalThis.ResizeObserver;
   const observers=[];
   globalThis.ResizeObserver=class {
     constructor(sync) {this.sync=sync;this.targets=new Set();observers.push(this);}
     observe(el) {this.targets.add(el);}
-    unobserve(el) {this.targets.delete(el);}
     disconnect() {this.targets.clear();}
   };
   t.after(()=>{globalThis.ResizeObserver=previousObserver;});
-  const root=mount(t,'ConversationProcessEvent.vue',{event:{...reasoning,reasoningActive:true},part:'reasoning'});
+  const props=reactive({event:{...reasoning,reasoningActive:true,message:{reasoning:'abc def\n g'}},part:'reasoning'});
+  const root=mount(t,'ConversationProcessEvent.vue',props);
   const viewport=find(root,'reasoning-preview');
   const observer=observers.find(o=>o.targets.has(viewport));
-  const oldText=find(root,'reasoning-preview-line');
-  viewport.firstElementChild=oldText;viewport.clientWidth=200;viewport.scrollWidth=900;
-  viewport._workSync();
-  assert.ok(observer.targets.has(oldText));assert.equal(viewport.scrollLeft,900);
-  const incoming=node('span','新行');viewport.firstElementChild=incoming;viewport.scrollWidth=140;
-  viewport._workSync();
-  assert.equal(observer.targets.has(oldText),false);assert.ok(observer.targets.has(incoming));
-  assert.equal(viewport.dataset.overflow,'false');
-  viewport.scrollWidth=1200;observer.sync();
-  assert.equal(viewport.scrollLeft,1200);assert.equal(viewport.dataset.overflow,'true');
+  const track=find(root,'reasoning-preview-line');
+  assert.ok(observer.targets.has(track));
+  viewport.clientWidth=30;observer.sync();
+  assert.equal(track.textContent,'abc def g');
+  assert.equal(viewport.scrollLeft,60,'three-character viewport shows f-space-g, not just g');
+  assert.equal(viewport.dataset.overflow,'true');
+  viewport.clientWidth=200;observer.sync();
+  assert.equal(viewport.scrollLeft,0);assert.equal(viewport.dataset.overflow,'false');
+  props.event.reasoningActive=false;await nextTick();
+  assert.equal(observer.targets.size,0);
 });
 
-test('reasoning tokens and rapid newlines update one visible node immediately; completion drops the preview', async t => {
-  const props=reactive({event:{...reasoning,reasoningActive:true,message:{reasoning:'第一行'}}});
+test('reasoning bursts advance one stable text strip; opening/completion cancels animation and retains raw detail', async t => {
+  const frames=new Map();let serial=0,now=0;
+  const previousWindow=globalThis.window;
+  globalThis.window={...previousWindow,requestAnimationFrame:fn=>{frames.set(++serial,fn);return serial;},cancelAnimationFrame:id=>frames.delete(id)};
+  const props=reactive({event:{...reasoning,reasoningActive:true,message:{reasoning:'abc def'}}});
   const root=mount(t,'ConversationProcessEvent.vue',props);
+  t.after(()=>{globalThis.window=previousWindow;});
   const preview=find(root,'reasoning-preview-line');
-  let content='第一行';
-  for (let i=0;i<30;i++) {
-    const latest=`实时摘要${i}`;
-    content+=`\n${latest}`;
-    props.event.message.reasoning=content;
-    await nextTick();
-    assert.equal(find(root,'reasoning-preview-line'),preview,'keep the sweep and visible text node alive');
-    assert.equal(text(preview),latest,'no timer or pending-line playback');
-    props.event.message.reasoning+=' 新的字符';await nextTick();
-    assert.equal(text(preview),`${latest} 新的字符`);
-  }
+  props.event.message.reasoning+='\n g';await nextTick();
+  assert.equal(text(preview),'abc def','network packet does not jump directly to the new tail');
+  for(let i=0;i<80 && frames.size;i++) {const jobs=[...frames.values()];frames.clear();now+=16;for(const fn of jobs)fn(now);}
+  assert.equal(find(root,'reasoning-preview-line'),preview);
+  assert.equal(text(preview),'abc def g');
+  props.event.message.reasoning+='\n a large incoming packet';await nextTick();
+  assert.ok(frames.size);
+  find(root,'process-summary').props.onClick();await nextTick();
+  assert.equal(frames.size,0);assert.equal(find(root,'reasoning-preview'),undefined);
+  assert.equal(text(find(root,'process-reasoning-scroll')),props.event.message.reasoning,'detail keeps original spaces and newlines');
+  find(root,'process-summary').props.onClick();await nextTick();
+  assert.equal(text(find(root,'reasoning-preview-line')),'abc def g a large incoming packet','reopening does not replay old history');
+  props.event.message.reasoning+=' more';await nextTick();assert.ok(frames.size);
   props.event.reasoningActive=false;await nextTick();
-  assert.equal(find(root,'reasoning-preview'),undefined);
+  assert.equal(frames.size,0);assert.equal(find(root,'reasoning-preview'),undefined);
   assert.equal(find(root,'work-status-sweep'),undefined);
+});
+
+for (const desktop of [false,true]) for (const reduced of [false,true]) for (const boundaryType of ['assistant_message','tool','model_retry']) test(`encrypted preview (desktop=${desktop}, reduced=${reduced}) stops immediately at ${boundaryType} without waiting to finish its queue`, async t => {
+  const frames=new Map();let serial=0,now=0;
+  const previousWindow=globalThis.window;
+  globalThis.window={...previousWindow,requestAnimationFrame:fn=>{frames.set(++serial,fn);return serial;},cancelAnimationFrame:id=>frames.delete(id)};
+  t.after(()=>{globalThis.window=previousWindow;});
+  globalThis.window.matchMedia=query=>({matches:query.includes('prefers-reduced-motion') ? reduced : desktop});
+  const expected='abcd'.repeat((20+(desktop ? 64 : 32)/(reduced ? 2 : 1))/4);
+  const raw='加密思考（不可读）\n'+'ab cd\n'.repeat(1000);
+  const op={opId:'encrypted',opType:'reasoning',turnUuid:'encrypted-turn',displaySeq:1,status:'running',lifecycle:'active',createdAtMs:1000,updatedAtMs:2000,payload:{text:raw,complete:false}};
+  const project=ops=>projectOperationMessages(ops).flatMap(m=>m.localTimeline||[]).find(e=>e.id===op.opId);
+  const props=reactive({event:project([op])});
+  const root=mount(t,'ConversationProcessEvent.vue',props);
+  const track=find(root,'reasoning-preview-line');
+  assert.equal(text(track),'abcd'.repeat(5),'first measured line is visible immediately');assert.ok(frames.size);
+  for(let i=0;i<63;i++) {const jobs=[...frames.values()];frames.clear();now+=16;for(const fn of jobs)fn(now);}
+  assert.equal(text(track),expected);
+  op.payload.text+='\n ef gh';props.event=project([op]);await nextTick();
+  assert.equal(find(root,'reasoning-preview-line'),track);assert.equal(text(track),expected);
+  const next={opId:'next',opType:boundaryType,turnUuid:'encrypted-turn',displaySeq:2,status:'running',lifecycle:'active',createdAtMs:3000,updatedAtMs:3000,payload:{text:'正文',name:'Read',toolName:'Read',arguments:'{}',complete:false}};
+  props.event=project([op,next]);await nextTick();
+  assert.equal(props.event.reasoningActive,false);assert.equal(frames.size,0);
+  assert.equal(find(root,'reasoning-preview'),undefined);
+  assert.equal(text(track),expected,'unmount must not flush the undisplayed encrypted tail');
+  find(root,'process-summary').props.onClick();await nextTick();
+  assert.equal(text(find(root,'process-reasoning-scroll')),op.payload.text,'full original data including marker and whitespace remains intact');
+});
+
+test('opening encrypted detail cancels playback; closing while active queues it again; terminal state cancels it', async t => {
+  const frames=new Map();let serial=0;
+  const previousWindow=globalThis.window;
+  globalThis.window={...previousWindow,requestAnimationFrame:fn=>{frames.set(++serial,fn);return serial;},cancelAnimationFrame:id=>frames.delete(id)};
+  t.after(()=>{globalThis.window=previousWindow;});
+  const raw='加密思考（不可读）\n'+ 'ab cd\n'.repeat(1000);
+  const props=reactive({event:{...reasoning,reasoningActive:true,message:{reasoning:raw}}});
+  const root=mount(t,'ConversationProcessEvent.vue',props);
+  assert.ok(frames.size);
+  find(root,'process-summary').props.onClick();await nextTick();
+  assert.equal(frames.size,0);assert.equal(find(root,'reasoning-preview'),undefined);
+  assert.equal(text(find(root,'process-reasoning-scroll')),raw);
+  find(root,'process-summary').props.onClick();await nextTick();
+  assert.equal(text(find(root,'reasoning-preview-line')),'abcd'.repeat(5));assert.ok(frames.size);
+  props.event.reasoningActive=false;await nextTick();
+  assert.equal(frames.size,0);assert.equal(find(root,'reasoning-preview'),undefined);
+  assert.equal(props.event.message.reasoning,raw);
 });
 
 for (const boundaryType of ['assistant_message','tool','model_retry']) test(`reasoning duration freezes at ${boundaryType} start through ongoing snapshots and late finalization`, async t => {
@@ -353,7 +425,7 @@ test('reasoning and grouped tools stop sweeping when their real execution states
   const props=reactive({event:{...reasoning,reasoningActive:true},part:'reasoning'});
   const root=mount(t,'ConversationProcessEvent.vue',props);
   assert.ok(hasClass(find(root,'process-icon'),'lucide-brain'));
-  assert.ok(hasClass(find(root,'reasoning-preview-line'),'work-status-sweep'));
+  assert.equal(hasClass(find(root,'reasoning-preview-line'),'work-status-sweep'),false);
   assert.equal(hasClass(find(root,'reasoning-preview'),'work-status-sweep'),false);
   assert.ok(hasClass(find(root,'process-kind'),'work-status-sweep'));
   assert.equal(hasClass(find(root,'process-copy'),'work-status-sweep'),false);
@@ -502,8 +574,8 @@ test('disclosure keeps content through the height/fade animation, restores readi
 test('small phone toolbar reserves separate tracks rather than hiding controls; reduced-motion and shared theme roles remain', () => {
   const composer=fs.readFileSync(new URL('./ConsoleComposer.vue',import.meta.url),'utf8');
   assert.match(composer,/@media \(max-width: 360px\)[\s\S]*?grid-template-columns: minmax\(0, 1fr\) 44px/);
-  assert.match(composer,/\.composer-toolbar \:deep\(\.context-usage-trigger\) \{ position: absolute; left: 50%; bottom: -34px/);
-  assert.match(composer,/\.composer-box \{[^}]*margin-bottom: 32px/);
+  assert.match(composer,/\.composer-usage-summary \{ display: flex; flex-wrap: wrap/);
+  assert.doesNotMatch(composer,/\.composer-box \{[^}]*margin-bottom: 32px/);
   assert.match(composer,/\.composer-toolbar \.send-button \{ grid-row: 2; grid-column: 2/);
   // At 320px the shell (24), box padding/border (16) and send column (44)
   // leave 236px for four 44px actions. Context has its own reserved row below.

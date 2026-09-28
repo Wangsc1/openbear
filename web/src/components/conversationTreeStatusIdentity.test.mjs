@@ -1,4 +1,5 @@
 import test from 'node:test';
+import {useRecentConversationRows} from './conversationRecentRows.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -9,7 +10,7 @@ const source = fs.readFileSync(new URL('./ConversationTree.vue', import.meta.url
 const script = source.match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import[\s\S]*?;\n/gm, '');
 function harness() {
   const context = vm.createContext({
-    computed, nextTick, reactive, ref, rowId, treeItemParent, compareTreeItems, resolveTreeDrop,
+    useRecentConversationRows, computed, nextTick, reactive, ref, rowId, treeItemParent, compareTreeItems, resolveTreeDrop,
     Api: {}, apiError: String, referenceCatalog: {connected: false, ready: false},
     defineLazyView: () => ({}), defineProps: () => ({activeConversationUuid: '', draftConversation: null}),
     defineEmits: () => () => {}, defineExpose() {}, watch() {}, onMounted() {}, onBeforeUnmount() {},

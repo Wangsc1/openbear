@@ -12,9 +12,9 @@ from app.context.store import ContextOwner, WindowStore
 from app.db.dao import MessageDAO, SummaryDAO
 from app.llm.base import AgentResult
 from app.llm.events import StreamEvent, ToolCall
-from app.rath.builtin_workflows import ensure_builtin_workflows
-from app.rath.continuity import agent_session_public
-from app.rath.manager import RathTaskManager
+from app.agents.profiles import ensure_builtin_workflows
+from app.agents.continuity import agent_session_public
+from app.agents.control import AgentControlService
 from app.task_memory import (
     TaskMemoryDAO,
     is_task_memory_runtime_message,
@@ -286,7 +286,7 @@ async def test_deleted_agent_rounds_cannot_reenter_continue(web_env, monkeypatch
     await seed_turn(env, row, "surviving-root", "SAFE_CONTROLLER")
     await seed_turn(env, row, "future-1", "FUTURE_CONTROLLER_1")
     await seed_turn(env, row, "future-2", "FUTURE_CONTROLLER_2")
-    dao = env.server.rath_dao
+    dao = env.server.agent_dao
     await ensure_builtin_workflows(dao)
     reg, backend = ToolRegistry(), RecordingAgentBackend()
     register_agent_history_tool(reg, env.db)
@@ -294,7 +294,7 @@ async def test_deleted_agent_rounds_cannot_reenter_continue(web_env, monkeypatch
     cfg.agent = cfg.agent.model_copy(deep=True)
     cfg.agent.keep_recent_messages = 1
     cfg.agent.compact_max_retries = 0
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
     register_agent_tools(reg, config=cfg, dao=dao, manager=manager, llm_factory=_FakeFactory(backend),
                          model_selection=_FakeSelection(), workspace_dir=str(Path(env.db.path).parent))
     async def call(name, args, root):
@@ -404,7 +404,7 @@ async def test_deleted_agent_callback_cannot_revive_removed_turn(web_env, monkey
     conv = row["conversation_uuid"]
     await seed_turn(env, row, "survivor", "keep", answer="kept answer")
     await seed_turn(env, row, "future-1", "delete", answer="deleted answer")
-    task_uuid = await env.server.rath_dao.create_task(
+    task_uuid = await env.server.agent_dao.create_task(
         chat_id=row["internal_chat_id"], parent_session_uuid=conv, workflow_uuid="wf-delete",
         title="deleted agent", status="completed", turn_uuid="future-1",
         parent_turn_uuid="future-1", run_root_turn_uuid="future-1",
@@ -412,7 +412,7 @@ async def test_deleted_agent_callback_cannot_revive_removed_turn(web_env, monkey
     late = {"taskUuid": task_uuid, "rootTurnUuid": "future-1", "status": "completed",
             "summary": "late result", "content": "DELETED_AGENT_REPLY"}
     await truncate(env, row)
-    assert await env.server.rath_dao.get_task(task_uuid) is None
+    assert await env.server.agent_dao.get_task(task_uuid) is None
     assert task_uuid in env.server._web_stopped_task_uuids[conv]
     assert await env.server._persist_web_task_notification(row, late) is None
     # A later user request clears transient stop markers; the durable absence
@@ -512,16 +512,16 @@ async def test_suffix_cache_reset_is_committed_and_owner_scoped(web_env, monkeyp
         return await env.server.tools.dispatch("Read", json.dumps({"path": str(path)}), context=ctx)
     for ctx in contexts:
         assert "CURRENT_FILE_BODY" in await read(ctx)
-    real = env.server.rath_dao.delete_task_records
+    real = env.server.agent_dao.delete_task_records
     async def fail(ids):
         raise RuntimeError("rollback cache test")
-    monkeypatch.setattr(env.server.rath_dao, "delete_task_records", fail)
+    monkeypatch.setattr(env.server.agent_dao, "delete_task_records", fail)
     response = await env.client.delete(f"/api/conversations/{conv}/turns/future-1/suffix",
                                        cookies={"openbear_web_session": await _login_cookie(env)})
     assert response.status == 500
     for ctx in contexts:
         assert "文件未变化" in await read(ctx)
-    monkeypatch.setattr(env.server.rath_dao, "delete_task_records", real)
+    monkeypatch.setattr(env.server.agent_dao, "delete_task_records", real)
     await truncate(env, row)
     assert "CURRENT_FILE_BODY" in await read(contexts[0])
     for ctx in contexts[1:]:

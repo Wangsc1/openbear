@@ -13,7 +13,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from app.agent import steering
 from app.agent.result import RunResult
-from app.agent.runs import RunRegistry
+from app.runtime.scheduler import ControllerRuns
 from app.config import Config
 from app.control_actions import ControlActionQueue
 from app.db.dao import MessageDAO, SummaryDAO
@@ -22,8 +22,8 @@ from app.llm.base import AgentResult, OpenBearLLMError
 from app.llm.events import StreamEvent, ToolCall, Usage
 from app.llm.openai_responses import _to_responses_input
 from app.media.attachments import InboundMedia
-from app.rath.manager import RathTaskManager
-from app.rath.plan import AgentPlanCoordinator
+from app.agents.control import AgentControlService
+from app.agents.plan import AgentPlanCoordinator
 from app.task_memory import (
     SCOPE_AGENT_TASK,
     SCOPE_CONVERSATION,
@@ -191,7 +191,7 @@ async def web_env(tmp_path, monkeypatch):
 
 
 async def test_run_registry_shutdown_waits_for_cancel_cleanup():
-    registry = RunRegistry()
+    registry = ControllerRuns()
     cleanup_finished = asyncio.Event()
 
     async def run():
@@ -335,6 +335,8 @@ async def test_web_artifacts_rewrite_and_auth_scoped_content(web_env, tmp_path):
     assert download.status == 200
     assert download.headers["Content-Type"] == "text/plain; charset=utf-8"
     assert download.headers["Content-Disposition"].startswith("attachment;")
+    assert "filename*=UTF-8''hello.txt" in download.headers["Content-Disposition"]
+    assert await download.read() == source.read_bytes()
 
 
 async def test_web_artifact_metadata_only_shares_valid_existing_workspace_paths(web_env, tmp_path):
@@ -708,7 +710,7 @@ async def test_task_memory_duplicate_maps_tasks_isolates_copy_and_hard_delete_cl
     source = await web_env.server._create_web_conversation(123, title="task memory source")
     source_uuid = str(source["conversation_uuid"])
     source_chat_id = int(source["internal_chat_id"])
-    source_task = await web_env.server.rath_dao.create_task(
+    source_task = await web_env.server.agent_dao.create_task(
         chat_id=source_chat_id,
         parent_session_uuid=source_uuid,
         workflow_uuid="wf-task-memory-duplicate",
@@ -736,7 +738,7 @@ async def test_task_memory_duplicate_maps_tasks_isolates_copy_and_hard_delete_cl
 
     # inheritFromTaskUuid is Plan context only: a newly created task starts with
     # an empty Task Memory scope even when it shares the long-lived Agent session.
-    inherited_task = await web_env.server.rath_dao.create_task(
+    inherited_task = await web_env.server.agent_dao.create_task(
         chat_id=source_chat_id,
         parent_session_uuid=source_uuid,
         workflow_uuid="wf-task-memory-duplicate",
@@ -832,7 +834,7 @@ async def test_web_conversation_duplicate_suppresses_only_copied_terminal_task_n
 
     source_task_uuids = []
     for status in ("completed", "failed"):
-        task_uuid = await web_env.server.rath_dao.create_task(
+        task_uuid = await web_env.server.agent_dao.create_task(
             chat_id=source_chat_id,
             parent_session_uuid=source_uuid,
             workflow_uuid="wf-duplicate-terminal-history",
@@ -843,7 +845,7 @@ async def test_web_conversation_duplicate_suppresses_only_copied_terminal_task_n
             run_root_turn_uuid=f"turn-{status}",
         )
         source_task_uuids.append(task_uuid)
-        await web_env.server.rath_dao.append_event(
+        await web_env.server.agent_dao.append_event(
             task_uuid,
             f"task_{status}",
             summary=f"historical {status} result",
@@ -1035,7 +1037,7 @@ async def test_duplicate_notification_suppression_batches_more_than_999_without_
 async def test_web_conversation_duplicate_rejects_active_or_control_source(web_env, task_status):
     cookie = {"openbear_web_session": await _login_cookie(web_env)}
     source = await web_env.server._create_web_conversation(123, title=f"active {task_status}")
-    await web_env.server.rath_dao.create_task(
+    await web_env.server.agent_dao.create_task(
         chat_id=int(source["internal_chat_id"]),
         parent_session_uuid=str(source["conversation_uuid"]),
         workflow_uuid="wf-duplicate-active",
@@ -1136,7 +1138,7 @@ async def test_web_turn_suffix_delete_removes_model_ui_agent_artifact_and_summar
     task_ids = {}
     task_memories = TaskMemoryDAO(web_env.db)
     for turn_uuid in ("turn-1", "turn-2", "turn-3"):
-        task_ids[turn_uuid] = await web_env.server.rath_dao.create_task(
+        task_ids[turn_uuid] = await web_env.server.agent_dao.create_task(
             chat_id=chat_id,
             parent_session_uuid=conv_uuid,
             workflow_uuid="wf-delete",
@@ -1189,9 +1191,9 @@ async def test_web_turn_suffix_delete_removes_model_ui_agent_artifact_and_summar
     latest_summary = await summaries.latest(chat_id)
     assert latest_summary is not None and latest_summary["summary"] == "valid summary"
     assert {op["turnUuid"] for op in await web_env.server._web_operations(conv_uuid)} == {"turn-1"}
-    assert await web_env.server.rath_dao.get_task(task_ids["turn-1"]) is not None
-    assert await web_env.server.rath_dao.get_task(task_ids["turn-2"]) is None
-    assert await web_env.server.rath_dao.get_task(task_ids["turn-3"]) is None
+    assert await web_env.server.agent_dao.get_task(task_ids["turn-1"]) is not None
+    assert await web_env.server.agent_dao.get_task(task_ids["turn-2"]) is None
+    assert await web_env.server.agent_dao.get_task(task_ids["turn-3"]) is None
     assert (await task_memories.list(
         conversation_uuid=conv_uuid,
         scope_type=SCOPE_AGENT_TASK,
@@ -1235,7 +1237,7 @@ async def test_web_turn_suffix_delete_rejects_active_or_untraceable_turn(web_env
     assert busy.status == 409
     assert (await busy.json())["error"] == "conversation_is_active"
 
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     untraceable = await web_env.client.delete(
         f"/api/conversations/{conv_uuid}/turns/turn-old/suffix",
         cookies=cookie,
@@ -1269,7 +1271,7 @@ async def test_web_turn_suffix_delete_rolls_back_all_stores_on_failure(web_env, 
     async def fail_delete(_task_uuids):
         raise RuntimeError("forced suffix delete failure")
 
-    monkeypatch.setattr(web_env.server.rath_dao, "delete_task_records", fail_delete)
+    monkeypatch.setattr(web_env.server.agent_dao, "delete_task_records", fail_delete)
     response = await web_env.client.delete(
         f"/api/conversations/{conv_uuid}/turns/{turn_uuid}/suffix",
         cookies=cookie,
@@ -2118,7 +2120,7 @@ async def test_web_conversation_internal_chat_id_allocation_is_concurrency_safe(
 
 
 async def test_web_task_notification_starts_internal_followup_turn(web_env, monkeypatch):
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="notify")
     live = web_env.server._live_for(row)
     calls: list[dict] = []
@@ -2190,7 +2192,7 @@ async def test_terminal_web_run_cannot_be_restarted_with_same_execution_id(web_e
 
 
 async def test_web_ignores_legacy_bash_completion_notification(web_env, monkeypatch):
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="bash notify")
     calls: list[dict] = []
 
@@ -2216,7 +2218,7 @@ async def test_web_ignores_legacy_bash_completion_notification(web_env, monkeypa
 
 
 async def test_web_task_notification_outbox_recovers_pending_after_restart_boundary(web_env, monkeypatch):
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="durable notification")
     queued = await web_env.server._persist_web_task_notification(row, {
         "taskUuid": "task-durable",
@@ -2264,7 +2266,7 @@ async def test_web_task_notification_outbox_recovers_pending_after_restart_bound
 async def test_plan_notification_outbox_requires_exact_plan_decision_ack(web_env):
     row = await web_env.server._create_web_conversation(123, title="plan outbox ack")
     chat_id = int(row["internal_chat_id"])
-    task_uuid = await web_env.server.rath_dao.create_task(
+    task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=chat_id,
         parent_session_uuid=row["conversation_uuid"],
         workflow_uuid="wf-plan-outbox",
@@ -2272,8 +2274,8 @@ async def test_plan_notification_outbox_requires_exact_plan_decision_ack(web_env
         status="running",
     )
     coordinator = AgentPlanCoordinator(
-        web_env.server.rath_dao,
-        RathTaskManager(web_env.server.rath_dao),
+        web_env.server.agent_dao,
+        AgentControlService(web_env.server.agent_dao),
     )
     plan = {
         "title": "Plan outbox test",
@@ -2335,7 +2337,7 @@ async def test_plan_notification_outbox_requires_exact_plan_decision_ack(web_env
 
 async def test_plan_notification_outbox_suppresses_terminal_task(web_env):
     row = await web_env.server._create_web_conversation(123, title="plan outbox suppress")
-    task_uuid = await web_env.server.rath_dao.create_task(
+    task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=int(row["internal_chat_id"]),
         parent_session_uuid=row["conversation_uuid"],
         workflow_uuid="wf-plan-suppress",
@@ -2354,7 +2356,7 @@ async def test_plan_notification_outbox_suppresses_terminal_task(web_env):
     assert queued is not None
     _token, claimed = await web_env.server._claim_web_task_notifications([queued])
     assert claimed
-    assert await web_env.server.rath_dao.update_task(
+    assert await web_env.server.agent_dao.update_task(
         task_uuid,
         status="cancelled",
         finish=True,
@@ -2370,7 +2372,7 @@ async def test_plan_notification_outbox_suppresses_terminal_task(web_env):
 
 async def test_restart_recovery_suppresses_interrupted_plan_notification(web_env):
     row = await web_env.server._create_web_conversation(123, title="interrupted plan suppress")
-    task_uuid = await web_env.server.rath_dao.create_task(
+    task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=int(row["internal_chat_id"]),
         parent_session_uuid=row["conversation_uuid"],
         workflow_uuid="wf-plan-interrupted",
@@ -2387,7 +2389,7 @@ async def test_restart_recovery_suppresses_interrupted_plan_notification(web_env
         "summary": "stale after restart",
     })
     assert queued is not None
-    assert await web_env.server.rath_dao.mark_interrupted_running() == 1
+    assert await web_env.server.agent_dao.mark_interrupted_running() == 1
     web_env.server._web_task_notification_pending.clear()
     web_env.server._web_task_notification_workers.clear()
 
@@ -2402,10 +2404,10 @@ async def test_restart_recovery_suppresses_interrupted_plan_notification(web_env
 
 
 async def test_rath_terminal_trigger_survives_missing_python_notification_callback(web_env, monkeypatch):
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="atomic terminal outbox")
     chat_id = int(row["internal_chat_id"])
-    await web_env.server.rath_dao.create_task(
+    await web_env.server.agent_dao.create_task(
         chat_id=chat_id,
         parent_session_uuid=row["conversation_uuid"],
         workflow_uuid="wf-test",
@@ -2413,7 +2415,7 @@ async def test_rath_terminal_trigger_survives_missing_python_notification_callba
         status="running",
         task_uuid="task-atomic-outbox",
     )
-    changed = await web_env.server.rath_dao.update_task(
+    changed = await web_env.server.agent_dao.update_task(
         "task-atomic-outbox",
         status="completed",
         current_status="任务完成",
@@ -2464,13 +2466,13 @@ async def test_rath_terminal_trigger_survives_missing_python_notification_callba
 @pytest.mark.parametrize("concurrent", [False, True])
 async def test_web_task_notification_persist_snapshot_batches_and_acks_only_resolved(web_env, monkeypatch, concurrent):
     server = web_env.server
-    server.runs = RunRegistry()
+    server.runs = ControllerRuns()
     row = await server._create_web_conversation(123, title="notification persist snapshot")
     conv_uuid = row["conversation_uuid"]
     chat_id = int(row["internal_chat_id"])
     task_uuids = ("task-persist-resolved-a", "task-persist-unresolved-b")
     for task_uuid in task_uuids:
-        await server.rath_dao.create_task(
+        await server.agent_dao.create_task(
             chat_id=chat_id, parent_session_uuid=conv_uuid, workflow_uuid="wf-persist-snapshot",
             title=task_uuid, status="needs_openbear_control", task_uuid=task_uuid,
         )
@@ -2491,7 +2493,7 @@ async def test_web_task_notification_persist_snapshot_batches_and_acks_only_reso
 
     async def fake_run_web_turn(chat_id, user_text, renderer, media=None, *, task_notification_payload=None, **kwargs):
         calls.append(task_notification_payload)
-        changed = await server.rath_dao.update_task(
+        changed = await server.agent_dao.update_task(
             task_uuids[0], status="resuming", control_state="continuation_claimed",
             current_status="A resumed", expected_statuses=("needs_openbear_control",),
         )
@@ -2638,7 +2640,7 @@ async def test_web_task_notification_recovery_reclaims_only_expired_processing_l
 async def test_web_task_notification_dedupes_all_outbox_rows_and_rejects_stale_terminal_status(web_env):
     row = await web_env.server._create_web_conversation(123, title="notification ordering")
     chat_id = int(row["internal_chat_id"])
-    await web_env.server.rath_dao.create_task(
+    await web_env.server.agent_dao.create_task(
         chat_id=chat_id,
         parent_session_uuid=row["conversation_uuid"],
         workflow_uuid="wf-test",
@@ -2803,7 +2805,7 @@ async def test_agent_continuation_generation_has_new_notification_identity_and_b
 
 
 async def test_web_task_notifications_are_batched_into_one_followup_turn(web_env, monkeypatch):
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="batch notify")
     calls: list[dict] = []
 
@@ -2856,7 +2858,7 @@ async def test_web_task_notifications_are_batched_into_one_followup_turn(web_env
 
 
 async def test_web_task_notification_defers_partial_results_until_related_agents_terminal(web_env, monkeypatch):
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="defer partial notify")
     chat_id = int(row["internal_chat_id"])
     live = web_env.server._live_for(row)
@@ -2878,7 +2880,7 @@ async def test_web_task_notification_defers_partial_results_until_related_agents
     })
     await live.publish({"type": "final", "turnUuid": "turn-root", "text": "原始回答：我会等全部 Agent 完成后汇总"})
     await live.publish({"type": "done", "turnUuid": "turn-root"})
-    await web_env.server.rath_dao.create_task(
+    await web_env.server.agent_dao.create_task(
         chat_id=chat_id,
         parent_session_uuid=row["conversation_uuid"],
         workflow_uuid="wf-test",
@@ -2887,7 +2889,7 @@ async def test_web_task_notification_defers_partial_results_until_related_agents
         status="running",
         task_uuid="task-b-active",
     )
-    await web_env.server.rath_dao.create_task(
+    await web_env.server.agent_dao.create_task(
         chat_id=chat_id,
         parent_session_uuid=row["conversation_uuid"],
         workflow_uuid="wf-other",
@@ -2927,7 +2929,7 @@ async def test_web_task_notification_defers_partial_results_until_related_agents
     assert hidden_notes
     assert hidden_notes[-1]["remainingTaskUuids"] == ["task-b-active"]
 
-    await web_env.server.rath_dao.update_task("task-b-active", status="completed", finish=True)
+    await web_env.server.agent_dao.update_task("task-b-active", status="completed", finish=True)
     await web_env.server._schedule_web_task_notification(row, {
         "taskUuid": "task-b-active",
         "status": "completed",
@@ -2955,7 +2957,7 @@ async def test_web_task_notification_defers_partial_results_until_related_agents
 
 
 async def test_web_task_notification_budget_wait_does_not_finish_batch(web_env, monkeypatch):
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="budget wait notify")
     chat_id = int(row["internal_chat_id"])
     live = web_env.server._live_for(row)
@@ -2969,7 +2971,7 @@ async def test_web_task_notification_budget_wait_does_not_finish_batch(web_env, 
             "name": "Agent",
             "payload": {"status": "running", "detached": True, "task": {"taskUuid": task_uuid, "status": "running", "currentStatus": "running"}},
         })
-        await web_env.server.rath_dao.create_task(
+        await web_env.server.agent_dao.create_task(
             chat_id=chat_id,
             parent_session_uuid=row["conversation_uuid"],
             workflow_uuid="wf-test",
@@ -2995,7 +2997,7 @@ async def test_web_task_notification_budget_wait_does_not_finish_batch(web_env, 
     monkeypatch.setattr(web_env.server, "_run_web_turn", fake_run_web_turn)
 
     for task_uuid, content in [("task-a", "A evidence"), ("task-b", "B evidence")]:
-        await web_env.server.rath_dao.update_task(task_uuid, status="completed", finish=True)
+        await web_env.server.agent_dao.update_task(task_uuid, status="completed", finish=True)
         await web_env.server._schedule_web_task_notification(row, {
             "taskUuid": task_uuid,
             "status": "completed",
@@ -3009,7 +3011,7 @@ async def test_web_task_notification_budget_wait_does_not_finish_batch(web_env, 
     assert calls == []
     assert {item["taskUuid"] for item in web_env.server._web_task_notification_deferred[row["conversation_uuid"]]} == {"task-a", "task-b"}
 
-    await web_env.server.rath_dao.update_task(
+    await web_env.server.agent_dao.update_task(
         "task-c",
         status="needs_openbear_control",
         current_status="预算达到上限，等待 OpenBear 裁决",
@@ -3035,7 +3037,7 @@ async def test_web_task_notification_budget_wait_does_not_finish_batch(web_env, 
     agent_c = [op for op in ops if op.get("opId") == "agent:task-c"][-1]
     assert agent_c["lifecycle"] == "waiting_control"
 
-    await web_env.server.rath_dao.update_task("task-c", status="completed", finish=True)
+    await web_env.server.agent_dao.update_task("task-c", status="completed", finish=True)
     await web_env.server._schedule_web_task_notification(row, {
         "taskUuid": "task-c",
         "status": "completed",
@@ -3059,7 +3061,7 @@ async def test_web_task_notification_budget_wait_does_not_finish_batch(web_env, 
 
 
 async def test_web_task_notification_control_wait_wakes_controller_despite_running_sibling(web_env, monkeypatch):
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="control wait wakes controller")
     chat_id = int(row["internal_chat_id"])
     live = web_env.server._live_for(row)
@@ -3073,7 +3075,7 @@ async def test_web_task_notification_control_wait_wakes_controller_despite_runni
             "name": "Agent",
             "payload": {"status": "running", "detached": True, "task": {"taskUuid": task_uuid, "status": "running"}},
         })
-        await web_env.server.rath_dao.create_task(
+        await web_env.server.agent_dao.create_task(
             chat_id=chat_id,
             parent_session_uuid=row["conversation_uuid"],
             workflow_uuid="wf-test",
@@ -3083,7 +3085,7 @@ async def test_web_task_notification_control_wait_wakes_controller_despite_runni
             task_uuid=task_uuid,
         )
     await live.publish({"type": "done", "turnUuid": "turn-root"})
-    await web_env.server.rath_dao.update_task("task-waiting", status="needs_openbear_control", finish=True)
+    await web_env.server.agent_dao.update_task("task-waiting", status="needs_openbear_control", finish=True)
     calls = []
 
     async def fake_run_web_turn(chat_id, user_text, renderer, media=None, *, task_notification=False, task_notification_payload=None, **kwargs):
@@ -3111,7 +3113,7 @@ async def test_web_task_notification_control_wait_wakes_controller_despite_runni
 
 
 async def test_web_task_notification_two_control_waits_are_batched_without_deadlock(web_env, monkeypatch):
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="two control waits")
     chat_id = int(row["internal_chat_id"])
     live = web_env.server._live_for(row)
@@ -3122,7 +3124,7 @@ async def test_web_task_notification_two_control_waits_are_batched_without_deadl
             "type": "tool_progress", "turnUuid": "turn-root", "toolCallId": f"call-{task_uuid}", "name": "Agent",
             "payload": {"status": "running", "detached": True, "task": {"taskUuid": task_uuid, "status": "running"}},
         })
-        await web_env.server.rath_dao.create_task(
+        await web_env.server.agent_dao.create_task(
             chat_id=chat_id, parent_session_uuid=row["conversation_uuid"], workflow_uuid="wf-test",
             title=task_uuid, input_data={"agentSnapshot": {"name": task_uuid}}, status="needs_openbear_control", task_uuid=task_uuid,
         )
@@ -3179,7 +3181,7 @@ async def test_active_controller_generation_hands_late_control_to_post_turn_work
     web_env.server.config = cfg
     web_env.server.llm_factory = FakeRunFactory(backend, context_window=128000)
     web_env.server.model_selection = SimpleNamespace(current="openai/gpt")
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     callbacks = []
     tools = ToolRegistry()
 
@@ -3187,7 +3189,7 @@ async def test_active_controller_generation_hands_late_control_to_post_turn_work
         callback = current_tool_context().task_notification
         assert callback is not None
         callbacks.append(callback)
-        changed = await web_env.server.rath_dao.update_task(
+        changed = await web_env.server.agent_dao.update_task(
             "task-active-a", status="resuming", control_state="continuation_claimed",
             current_status="A resumed", expected_statuses=("needs_openbear_control",),
         )
@@ -3225,11 +3227,11 @@ async def test_active_controller_generation_hands_late_control_to_post_turn_work
         MessageDAO(web_env.db), chat_id, "user", original, conversation_uuid=row["conversation_uuid"],
         turn_uuid=root, run_root_turn_uuid=root, op_ids=["msg:late-control-input"],
     )
-    await web_env.server.rath_dao.create_task(
+    await web_env.server.agent_dao.create_task(
         chat_id=chat_id, parent_session_uuid=row["conversation_uuid"], workflow_uuid="wf-late-active",
         title="A waiting control", status="needs_openbear_control", task_uuid="task-active-a",
     )
-    await web_env.server.rath_dao.create_task(
+    await web_env.server.agent_dao.create_task(
         chat_id=chat_id, parent_session_uuid=row["conversation_uuid"], workflow_uuid="wf-late-active",
         title="B waiting control", status="needs_openbear_control", task_uuid="task-active-b",
     )
@@ -3280,11 +3282,11 @@ async def test_active_controller_generation_hands_late_control_to_post_turn_work
 
 
 async def test_control_notification_acknowledges_only_tasks_resolved_by_model_turn(web_env, monkeypatch):
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="partial control resolution")
     chat_id = int(row["internal_chat_id"])
     for task_uuid in ("task-resolved-a", "task-unresolved-b"):
-        await web_env.server.rath_dao.create_task(
+        await web_env.server.agent_dao.create_task(
             chat_id=chat_id, parent_session_uuid=row["conversation_uuid"], workflow_uuid="wf-resolution-aware",
             title=task_uuid, status="needs_openbear_control", task_uuid=task_uuid,
         )
@@ -3292,7 +3294,7 @@ async def test_control_notification_acknowledges_only_tasks_resolved_by_model_tu
 
     async def fake_run_web_turn(chat_id, user_text, renderer, media=None, *, task_notification_payload=None, **kwargs):
         calls.append(task_notification_payload)
-        changed = await web_env.server.rath_dao.update_task(
+        changed = await web_env.server.agent_dao.update_task(
             "task-resolved-a", status="resuming", control_state="continuation_claimed",
             current_status="A resumed", expected_statuses=("needs_openbear_control",),
         )
@@ -3335,7 +3337,7 @@ async def test_control_notification_acknowledges_only_tasks_resolved_by_model_tu
 
 
 async def test_task_notification_summary_run_keeps_conversation_running(web_env, monkeypatch):
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="summary running")
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -3529,7 +3531,7 @@ async def test_web_merged_steering_message_links_every_source_user_operation(web
 
 
 async def test_web_image_upload_renders_as_attachment_not_path_text(web_env, monkeypatch):
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="image upload")
     live = web_env.server._live_for(row)
     media = [InboundMedia(kind="image", upload_type="websocket_upload", file_name="image.png", mime_type="image/png", size=1234, path="/opt/src-space/openbear/data/media/inbound/web/test/image.png")]
@@ -3570,7 +3572,7 @@ async def test_web_image_upload_renders_as_attachment_not_path_text(web_env, mon
 
 
 async def test_web_send_serializes_concurrent_starts_into_steering(web_env, monkeypatch):
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="send race")
     live = web_env.server._live_for(row)
     release = asyncio.Event()
@@ -3597,7 +3599,7 @@ async def test_web_send_serializes_concurrent_starts_into_steering(web_env, monk
 
 
 async def test_web_list_does_not_reconcile_run_during_startup_registration_window(web_env, monkeypatch):
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="startup reconcile race")
     conv_uuid = str(row["conversation_uuid"])
     chat_id = int(row["internal_chat_id"])
@@ -3664,10 +3666,10 @@ async def test_web_list_does_not_reconcile_run_during_startup_registration_windo
 
 async def test_background_agent_interruption_queues_to_same_root_controller_without_steering_agent(web_env, monkeypatch):
     steering.clear(-1)
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="background interrupt")
     chat_id = int(row["internal_chat_id"])
-    task_uuid = await web_env.server.rath_dao.create_task(
+    task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=chat_id,
         parent_session_uuid=row["conversation_uuid"],
         workflow_uuid="wf-test",
@@ -3676,9 +3678,9 @@ async def test_background_agent_interruption_queues_to_same_root_controller_with
         status="running",
         task_uuid="task-bg-main",
     )
-    await web_env.server.rath_dao.update_task(task_uuid, current_agent_key="general-purpose", current_status="执行中")
+    await web_env.server.agent_dao.update_task(task_uuid, current_agent_key="general-purpose", current_status="执行中")
     sleeper = asyncio.create_task(asyncio.sleep(30))
-    web_env.server.rath.register(task_uuid, chat_id, sleeper)
+    web_env.server.agents.register(task_uuid, chat_id, sleeper)
     calls = []
 
     async def fake_run_web_turn(chat_id_arg, user_text, renderer, media=None, *, conversation=None, background_control_payload=None, **kwargs):
@@ -3703,7 +3705,7 @@ async def test_background_agent_interruption_queues_to_same_root_controller_with
         assert calls == []
         # The main controller decides whether AgentMessage is appropriate; Web
         # input itself must never be routed directly to the child Agent.
-        assert await web_env.server.rath_dao.pending_controls(task_uuid) == []
+        assert await web_env.server.agent_dao.pending_controls(task_uuid) == []
         state = await web_env.server._chat_payload(chat_id, row)
         user_ops = [op for op in state["operations"] if op["opType"] == "user_message"]
         interruption_ops = [op for op in user_ops if (op.get("payload") or {}).get("interruption")]
@@ -3718,10 +3720,10 @@ async def test_background_agent_interruption_queues_to_same_root_controller_with
 
 async def test_background_agent_interruption_with_waiting_control_queues_to_same_root(web_env, monkeypatch):
     steering.clear(-1)
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="background continue")
     chat_id = int(row["internal_chat_id"])
-    task_uuid = await web_env.server.rath_dao.create_task(
+    task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=chat_id,
         parent_session_uuid=row["conversation_uuid"],
         workflow_uuid="wf-test",
@@ -3730,7 +3732,7 @@ async def test_background_agent_interruption_with_waiting_control_queues_to_same
         status="needs_openbear_control",
         task_uuid="task-bg-waiting-control",
     )
-    await web_env.server.rath_dao.update_task(task_uuid, current_agent_key="general-purpose", current_status="等待 OpenBear 裁决")
+    await web_env.server.agent_dao.update_task(task_uuid, current_agent_key="general-purpose", current_status="等待 OpenBear 裁决")
     calls = []
 
     async def fake_run_web_turn(chat_id_arg, user_text, renderer, media=None, *, conversation=None, background_control_payload=None, **kwargs):
@@ -3746,18 +3748,18 @@ async def test_background_agent_interruption_with_waiting_control_queues_to_same
     assert result["queued"] is True
     assert [item["text"] for item in steering.pending_items(chat_id)] == ["继续，但只看最后三行"]
     assert calls == []
-    assert await web_env.server.rath_dao.pending_controls(task_uuid) == []
+    assert await web_env.server.agent_dao.pending_controls(task_uuid) == []
 
 
 async def test_background_agent_interruption_with_multiple_tasks_queues_to_same_root(web_env, monkeypatch):
     steering.clear(-1)
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="multi background interrupt")
     chat_id = int(row["internal_chat_id"])
     task_uuids = []
     sleepers = []
     for idx in range(2):
-        task_uuid = await web_env.server.rath_dao.create_task(
+        task_uuid = await web_env.server.agent_dao.create_task(
             chat_id=chat_id,
             parent_session_uuid=row["conversation_uuid"],
             workflow_uuid="wf-test",
@@ -3766,9 +3768,9 @@ async def test_background_agent_interruption_with_multiple_tasks_queues_to_same_
             status="running",
             task_uuid=f"task-bg-main-{idx}",
         )
-        await web_env.server.rath_dao.update_task(task_uuid, current_agent_key=f"agent-{idx}", current_status="执行中")
+        await web_env.server.agent_dao.update_task(task_uuid, current_agent_key=f"agent-{idx}", current_status="执行中")
         sleeper = asyncio.create_task(asyncio.sleep(30))
-        web_env.server.rath.register(task_uuid, chat_id, sleeper)
+        web_env.server.agents.register(task_uuid, chat_id, sleeper)
         task_uuids.append(task_uuid)
         sleepers.append(sleeper)
     calls = []
@@ -3787,7 +3789,7 @@ async def test_background_agent_interruption_with_multiple_tasks_queues_to_same_
         assert [item["text"] for item in steering.pending_items(chat_id)] == ["让它忽略 amazon"]
         assert calls == []
         for task_uuid in task_uuids:
-            assert await web_env.server.rath_dao.pending_controls(task_uuid) == []
+            assert await web_env.server.agent_dao.pending_controls(task_uuid) == []
     finally:
         for sleeper in sleepers:
             sleeper.cancel()
@@ -3797,7 +3799,7 @@ async def test_background_agent_interruption_with_multiple_tasks_queues_to_same_
 
 async def test_background_agent_status_request_queues_to_same_root_controller(web_env, monkeypatch):
     steering.clear(-1)
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="background status")
     chat_id = int(row["internal_chat_id"])
     live = web_env.server._live_for(row)
@@ -3805,7 +3807,7 @@ async def test_background_agent_status_request_queues_to_same_root_controller(we
     await live.publish({"type": "user", "turnUuid": "turn-root", "messageUuid": "msg-root", "text": "请调查"})
     await live.publish({"type": "final", "turnUuid": "turn-root", "text": "原始回答：我会在后台继续查"})
     await live.publish({"type": "done", "turnUuid": "turn-root"})
-    task_uuid = await web_env.server.rath_dao.create_task(
+    task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=chat_id,
         parent_session_uuid=row["conversation_uuid"],
         workflow_uuid="wf-test",
@@ -3814,7 +3816,7 @@ async def test_background_agent_status_request_queues_to_same_root_controller(we
         status="running",
         task_uuid="task-status-active",
     )
-    await web_env.server.rath_dao.update_task(task_uuid, current_agent_key="general-purpose", current_status="正在查代码")
+    await web_env.server.agent_dao.update_task(task_uuid, current_agent_key="general-purpose", current_status="正在查代码")
     calls = []
 
     async def fake_run_web_turn(chat_id_arg, user_text, renderer, media=None, *, conversation=None, background_control_payload=None, **kwargs):
@@ -3829,13 +3831,13 @@ async def test_background_agent_status_request_queues_to_same_root_controller(we
     assert result["queued"] is True
     assert [item["text"] for item in steering.pending_items(chat_id)] == ["看下现在进度"]
     assert calls == []
-    assert await web_env.server.rath_dao.pending_controls(task_uuid) == []
+    assert await web_env.server.agent_dao.pending_controls(task_uuid) == []
     ops = await web_env.server._web_operations(row["conversation_uuid"])
     assert [op for op in ops if op.get("opType") == "agent_control"] == []
 
 
 async def test_active_background_process_send_stays_on_backend_root_turn(web_env, monkeypatch):
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="process active round")
     chat_id = int(row["internal_chat_id"])
     steering.clear(chat_id)
@@ -3865,14 +3867,14 @@ async def test_active_background_process_send_stays_on_backend_root_turn(web_env
 
 async def test_needs_openbear_control_agent_send_queues_to_same_root_controller(web_env, monkeypatch):
     steering.clear(-1)
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="needs control active round")
     chat_id = int(row["internal_chat_id"])
     live = web_env.server._live_for(row)
     await live.publish({"type": "accepted", "turnUuid": "turn-root"})
     await live.publish({"type": "user", "turnUuid": "turn-root", "messageUuid": "msg-root", "text": "请调查"})
     await live.publish({"type": "done", "turnUuid": "turn-root"})
-    task_uuid = await web_env.server.rath_dao.create_task(
+    task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=chat_id,
         parent_session_uuid=row["conversation_uuid"],
         workflow_uuid="wf-test",
@@ -3894,7 +3896,7 @@ async def test_needs_openbear_control_agent_send_queues_to_same_root_controller(
     assert result["queued"] is True
     assert [item["text"] for item in steering.pending_items(chat_id)] == ["继续，但只看后端路径"]
     assert calls == []
-    assert await web_env.server.rath_dao.pending_controls(task_uuid) == []
+    assert await web_env.server.agent_dao.pending_controls(task_uuid) == []
 
 
 async def test_web_operation_target_columns_are_persisted(web_env):
@@ -3998,7 +4000,7 @@ async def test_web_stop_waits_for_run_cancel_cleanup_before_publishing_stopped(w
             raise
 
     task = asyncio.create_task(controller_run())
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     web_env.server.runs.register(chat_id, task)
     await started.wait()
     await live.publish({"type": "accepted", "chatId": chat_id, "turnUuid": "turn-cleanup"})
@@ -4182,7 +4184,7 @@ async def test_web_running_send_keeps_pending_steering_on_backend_root_turn(web_
     live = web_env.server._live_for(row)
     chat_id = int(row["internal_chat_id"])
     steering.clear(chat_id)
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     blocker = asyncio.Event()
     task = asyncio.create_task(blocker.wait())
     web_env.server.runs.register(chat_id, task)
@@ -4216,7 +4218,7 @@ async def test_web_stop_clears_pending_steering_without_injecting_user(web_env, 
     killed_chats: list[int] = []
     monkeypatch.setattr("app.web_console.chat_api.processes.active", lambda: [SimpleNamespace(chat_id=chat_id, task_uuid="bash-stop-task")])
     monkeypatch.setattr("app.web_console.chat_api.processes.kill_for_chat", lambda cid: killed_chats.append(int(cid)) or 1)
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     blocker = asyncio.Event()
     task = asyncio.create_task(blocker.wait())
     web_env.server.runs.register(chat_id, task)
@@ -4728,6 +4730,92 @@ async def test_live_stats_duration_ticks_broadcast_without_persisting_frames(web
         live.unsubscribe(subscriber)
 
 
+async def test_encrypted_reasoning_sse_reaches_websocket_before_answer_and_reloads_final(web_env):
+    import httpx
+
+    from app.agent.loop import Agent
+    from app.llm.openai_responses import OpenAIResponsesBackend
+    from app.web_console.live_stream import _WebDBPersister
+    from tests.conftest import make_client
+
+    release = asyncio.Event()
+    initial, final = "opaque-start", "opaque-complete-replacement"
+
+    def event(name, **payload):
+        return f"event: {name}\ndata: {json.dumps({'type': name, **payload})}\n\n".encode()
+
+    class GatedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield event("response.output_item.added", output_index=0, item={
+                "type": "reasoning", "id": "rs_display", "summary": [], "encrypted_content": initial,
+            })
+            await release.wait()
+            yield event("response.output_item.done", output_index=0, item={
+                "type": "reasoning", "id": "rs_display", "summary": [], "encrypted_content": final,
+            })
+            yield event("response.output_text.delta", delta="完成")
+            yield event("response.output_item.done", output_index=1, item={
+                "type": "message", "id": "msg_display",
+                "content": [{"type": "output_text", "text": "完成"}],
+            })
+            yield event("response.completed", response={"status": "completed"})
+
+    client = make_client(lambda _r: httpx.Response(
+        200, stream=GatedStream(), headers={"content-type": "text/event-stream"},
+    ))
+    backend = OpenAIResponsesBackend(client, "https://x/v1", "k")
+    cookie = await _login_cookie(web_env)
+    row = await web_env.server._create_web_conversation(123, title="encrypted reasoning")
+    live = web_env.server._live_for(row)
+    renderer = _WebStreamRenderer(live)
+    await live.publish({"type": "accepted", "turnUuid": "encrypted-display"})
+    ws = await web_env.client.ws_connect(
+        f"/api/conversations/{row['conversation_uuid']}/ws",
+        headers={"Cookie": f"openbear_web_session={cookie}"},
+    )
+    persister = _WebDBPersister(MessageDAO(web_env.db), int(row["internal_chat_id"]))
+    task = None
+    try:
+        assert (await ws.receive_json(timeout=2))["type"] == "state"
+        task = asyncio.create_task(Agent(backend, ToolRegistry()).run(
+            [{"role": "user", "content": "hi"}], renderer, model="gpt-test",
+            show_thinking=True, persister=persister,
+        ))
+        while True:
+            packet = await ws.receive_json(timeout=2)
+            frame = packet.get("frame") or {}
+            if frame.get("opType") == "reasoning":
+                break
+        payload = frame["payload"]
+        assert payload.get("text", payload.get("delta")) == f"加密思考（不可读）\n{initial}"
+        assert not payload.get("complete")
+        assert not task.done()  # The upstream has not sent done or answer text yet.
+
+        release.set()
+        result = await asyncio.wait_for(task, timeout=3)
+        assert result.text == "完成" and result.reasoning == ""
+        while True:
+            packet = await ws.receive_json(timeout=2)
+            frame = packet.get("frame") or {}
+            if frame.get("opType") == "reasoning" and frame.get("action") == "end":
+                break
+        assert frame["payload"]["text"] == f"加密思考（不可读）\n{final}"
+        operation = next(op for op in await web_env.server._web_operations(row["conversation_uuid"])
+                         if op["opType"] == "reasoning")
+        assert operation["payload"]["text"] == f"加密思考（不可读）\n{final}"
+        assert operation["lifecycle"] == "terminal"
+        messages = await MessageDAO(web_env.db).recent(int(row["internal_chat_id"]))
+        assert any(message.content == "完成" for message in messages)
+        assert all(not message.reasoning for message in messages)
+    finally:
+        release.set()
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await ws.close()
+        await client._http.aclose()
+
+
 async def test_reasoning_ui_cadence_reaches_real_websocket_without_waiting_for_text_persistence(web_env, monkeypatch):
     from app.web_console import live_stream as stream_module
 
@@ -5025,8 +5113,8 @@ async def test_agent_plan_api_returns_immutable_launch_context_and_enforces_conv
     cookie = {"openbear_web_session": await _login_cookie(web_env)}
     owner = await web_env.server._create_web_conversation(123, title="plan launch context", model="openai/gpt")
     other = await web_env.server._create_web_conversation(123, title="other conversation", model="openai/gpt")
-    web_env.server.rath.plan_coordinator = AgentPlanCoordinator(web_env.server.rath_dao, web_env.server.rath)
-    task_uuid = await web_env.server.rath_dao.create_task(
+    web_env.server.agents.plan_coordinator = AgentPlanCoordinator(web_env.server.agent_dao, web_env.server.agents)
+    task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=int(owner["internal_chat_id"]),
         parent_session_uuid=owner["conversation_uuid"],
         workflow_uuid="wf-plan-launch-context",
@@ -5067,7 +5155,7 @@ async def test_agent_events_api_pages_from_latest_and_enforces_conversation_scop
     cookie = {"openbear_web_session": await _login_cookie(web_env)}
     owner = await web_env.server._create_web_conversation(123, title="agent event paging", model="openai/gpt")
     other = await web_env.server._create_web_conversation(123, title="event paging wrong conversation", model="openai/gpt")
-    task_uuid = await web_env.server.rath_dao.create_task(
+    task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=int(owner["internal_chat_id"]),
         parent_session_uuid=owner["conversation_uuid"],
         workflow_uuid="wf-agent-event-paging",
@@ -5078,7 +5166,7 @@ async def test_agent_events_api_pages_from_latest_and_enforces_conversation_scop
     await web_env.db.conn.commit()
     for index in range(1, 46):
         is_read = index in {25, 41}
-        await web_env.server.rath_dao.append_event(
+        await web_env.server.agent_dao.append_event(
             task_uuid,
             "tool_call_started" if is_read else "model_call_finished",
             summary="调用工具 Read" if is_read else f"模型调用完成 {index}",
@@ -5204,7 +5292,7 @@ async def test_web_state_reuses_existing_session_snapshot_without_ensure_writes(
 async def test_web_state_reconciles_terminal_agent_even_when_conversation_row_still_running(web_env):
     row = await web_env.server._create_web_conversation(123, title="agent stale running reconcile")
     chat_id = int(row["internal_chat_id"])
-    task_uuid = await web_env.server.rath_dao.create_task(
+    task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=chat_id,
         workflow_uuid="wf-test",
         title="simple agent",
@@ -5226,7 +5314,7 @@ async def test_web_state_reconciles_terminal_agent_even_when_conversation_row_st
         "payload": {"status": "running", "detached": True, "task": {"taskUuid": task_uuid, "status": "running", "currentStatus": "模型调用中"}},
     })
     await live.publish({"type": "done", "turnUuid": "turn-agent-reconcile"})
-    await web_env.server.rath_dao.update_task(
+    await web_env.server.agent_dao.update_task(
         task_uuid,
         status="completed",
         current_status="任务完成",
@@ -5472,7 +5560,7 @@ async def test_agent_wait_plan_notification_wakes_immediately_and_requeues_if_un
     row = await web_env.server._create_web_conversation(123, title="plan wait wake", model="openai/gpt")
     chat_id = int(row["internal_chat_id"])
     root_turn_uuid = "turn-plan-wake"
-    task_uuid = await web_env.server.rath_dao.create_task(
+    task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=chat_id,
         parent_session_uuid=row["conversation_uuid"],
         workflow_uuid="wf-plan-wake",
@@ -5482,8 +5570,8 @@ async def test_agent_wait_plan_notification_wakes_immediately_and_requeues_if_un
         run_root_turn_uuid=root_turn_uuid,
     )
     coordinator = AgentPlanCoordinator(
-        web_env.server.rath_dao,
-        RathTaskManager(web_env.server.rath_dao),
+        web_env.server.agent_dao,
+        AgentControlService(web_env.server.agent_dao),
     )
     plan = {
         "title": "Wake plan",
@@ -5525,7 +5613,7 @@ async def test_agent_wait_plan_notification_wakes_immediately_and_requeues_if_un
         "content": "review plan",
         "runRootTurnUuid": root_turn_uuid,
     })
-    second_task_uuid = await web_env.server.rath_dao.create_task(
+    second_task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=chat_id,
         parent_session_uuid=row["conversation_uuid"],
         workflow_uuid="wf-plan-wake",
@@ -5640,7 +5728,7 @@ async def test_agent_wait_user_interruption_returns_stable_instruction_id(web_en
     row = await web_env.server._create_web_conversation(123, title="user plan ruling", model="openai/gpt")
     chat_id = int(row["internal_chat_id"])
     root_turn_uuid = "turn-user-ruling"
-    await web_env.server.rath_dao.create_task(
+    await web_env.server.agent_dao.create_task(
         chat_id=chat_id,
         parent_session_uuid=row["conversation_uuid"],
         workflow_uuid="wf-user-ruling",
@@ -5737,7 +5825,7 @@ async def test_agent_wait_event_only_wakes_when_last_sibling_terminal_notificati
         return "sys"
 
     monkeypatch.setattr(web_env.server, "_build_system_prompt_for_chat", _fake_system_prompt)
-    # The production worker waits on RunRegistry. This test exercises the live
+    # The production worker waits on ControllerRuns. This test exercises the live
     # same-root controller bridge directly and keeps the fallback worker inert.
     monkeypatch.setattr(web_env.server, "_ensure_web_task_notification_worker", lambda *_a, **_k: None)
 
@@ -5747,7 +5835,7 @@ async def test_agent_wait_event_only_wakes_when_last_sibling_terminal_notificati
     root_turn_uuid = "turn-last-sibling-wake"
     task_uuids = []
     for index in range(2):
-        task_uuids.append(await web_env.server.rath_dao.create_task(
+        task_uuids.append(await web_env.server.agent_dao.create_task(
             chat_id=chat_id,
             parent_session_uuid=conversation_uuid,
             workflow_uuid="wf-last-sibling-wake",
@@ -5779,7 +5867,7 @@ async def test_agent_wait_event_only_wakes_when_last_sibling_terminal_notificati
         else:
             raise AssertionError("AgentWait did not enter event_only supervision")
 
-        await web_env.server.rath_dao.update_task(
+        await web_env.server.agent_dao.update_task(
             task_uuids[0],
             status="completed",
             current_status="任务完成",
@@ -5793,7 +5881,7 @@ async def test_agent_wait_event_only_wakes_when_last_sibling_terminal_notificati
         await asyncio.sleep(0.05)
         assert run.done() is False
 
-        await web_env.server.rath_dao.update_task(
+        await web_env.server.agent_dao.update_task(
             task_uuids[1],
             status="completed",
             current_status="任务完成",
@@ -8379,7 +8467,7 @@ async def test_agent_final_compaction_output_stays_task_scoped_and_out_of_root_o
     web_env.client.session.cookie_jar.clear()
     owner = await web_env.server._create_web_conversation(123, title="agent compaction owner")
     other = await web_env.server._create_web_conversation(123, title="agent compaction other")
-    task_uuid = await web_env.server.rath_dao.create_task(
+    task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=int(owner["internal_chat_id"]),
         parent_session_uuid=str(owner["conversation_uuid"]),
         workflow_uuid="wf-agent-compaction-output",
@@ -8387,7 +8475,7 @@ async def test_agent_final_compaction_output_stays_task_scoped_and_out_of_root_o
         status="running",
     )
     compacted_output = "actual private task summary"
-    await web_env.server.rath_dao.append_event(
+    await web_env.server.agent_dao.append_event(
         task_uuid,
         "model_context_pre_compacted",
         summary="Agent context compacted",

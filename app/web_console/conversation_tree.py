@@ -373,7 +373,7 @@ class WebAdminConversationTreeMixin:
         )
         rows = [dict(row) for row in await cur.fetchall()]
         # The one-time legacy backfill above preserves the exact historical
-        # definition; steady-state selection is now an indexed five-row lookup.
+        # definition; steady-state selection is now an indexed fifteen-row lookup.
         cur = await self.db.conn.execute(
             """
             SELECT conversation_uuid,last_interaction_at_ms
@@ -381,7 +381,7 @@ class WebAdminConversationTreeMixin:
             WHERE owner_chat_id=? AND COALESCE(archived_at,0)=0
               AND last_interaction_at_ms>0
             ORDER BY last_interaction_at_ms DESC,conversation_uuid ASC
-            LIMIT 5
+            LIMIT 15
             """,
             (int(owner_chat_id),),
         )

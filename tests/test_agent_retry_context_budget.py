@@ -8,7 +8,7 @@ import pytest
 from app.agent.native_continuation import validate_model_context
 from app.context.window import estimate_request
 from app.llm.events import StreamEvent, ToolCall
-from app.rath.single_agent import SingleAgentWorkflowRunner
+from app.agents.execution import AgentExecutor
 from app.tools.base import ToolRegistry
 from tests.test_agent_window_runtime import env as agent_fixture
 from tests.test_context_strategies import env as strategy_fixture
@@ -62,7 +62,7 @@ async def test_retry_full_request_obeys_threshold_and_preserves_partial(agent_en
                 yield StreamEvent(kind="finish", finish_reason="stop")
 
     backend = Backend()
-    runner = SingleAgentWorkflowRunner(dao, tid, agent=agent, backend=backend, model="main", model_label="p/main",
+    runner = AgentExecutor(dao, tid, agent=agent, backend=backend, model="main", model_label="p/main",
         max_tokens=16384, tools=tools, context_window=128000, rollover_trigger_tokens=8000,
         max_retries=1, retry_backoff_s=0, retry_max_delay_s=0,
         context_config=cfg, context_llm_factory=strategy_env.factory)
@@ -103,7 +103,7 @@ async def test_budget_includes_reasoning_progress_and_role_bridges(agent_env, pr
         pass
     backend = Backend()
     backend.protocol = protocol
-    runner = SingleAgentWorkflowRunner(dao, tid, agent=agent, backend=backend, model="main",
+    runner = AgentExecutor(dao, tid, agent=agent, backend=backend, model="main",
         max_tokens=1024, tools=ToolRegistry(), context_window=128000, rollover_trigger_tokens=8000)
     # Establish the route first; adopting a new route intentionally strips old
     # native reasoning. This test targets later requests on the same route.

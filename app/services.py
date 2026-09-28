@@ -12,7 +12,7 @@ from typing import Any
 from aiogram import Bot
 
 from app.admin.skills_web import SkillsWebAdminServer
-from app.agent.runs import RunRegistry
+from app.runtime.scheduler import ControllerRuns, ExecutionScheduler
 from app.browser.service import BrowserService
 from app.config import Config, config_path, load_config
 from app.config_store import ConfigStore
@@ -29,9 +29,9 @@ from app.memory.client import MemoryClient
 from app.models.selection import ModelSelection
 from app.models_dev import ModelsDevCatalog, catalog_cache_dir
 from app.operation_locks import ChatOperationLocks
-from app.rath.builtin_workflows import ensure_builtin_workflows
-from app.rath.dao import RathDAO
-from app.rath.manager import RathTaskManager
+from app.agents.profiles import ensure_builtin_workflows
+from app.agents.dao import AgentDAO
+from app.agents.control import AgentControlService
 from app.task_memory import TaskMemoryDAO
 from app.tools.agent_history import register_agent_history_tool
 from app.tools.agents import register_agent_tools
@@ -78,10 +78,11 @@ class Services:
         self.mem = self._make_memory_client(config)
         self.factory = BackendFactory(config.models, self.http)
         self.selection = ModelSelection(config.models, config_path())
-        self.runs = RunRegistry()
-        self.rath_dao = RathDAO(self.db)
+        self.runtime = ExecutionScheduler(max_concurrent_agents=config.agents.max_concurrent_tasks)
+        self.runs = ControllerRuns(self.runtime)
+        self.agent_dao = AgentDAO(self.db)
         self.task_memories = TaskMemoryDAO(self.db)
-        self.rath = RathTaskManager(self.rath_dao, max_concurrent_tasks=config.rath.max_concurrent_tasks)
+        self.agents = AgentControlService(self.agent_dao, scheduler=self.runtime)
         # workspace: 默认为运行目录下的 workspace/，不存在则自动创建
         self.workspace_dir = str(Path(os.getcwd(), "workspace").resolve())
         Path(self.workspace_dir).mkdir(parents=True, exist_ok=True)
@@ -107,7 +108,7 @@ class Services:
             runs=self.runs,
             llm_factory=self.factory,
             model_selection=self.selection,
-            rath=self.rath,
+            agents=self.agents,
             tools=None,
             messages=self.messages,
             config_store=self.config_store,
@@ -148,8 +149,8 @@ class Services:
         register_agent_tools(
             self.tools,
             config=config,
-            dao=self.rath_dao,
-            manager=self.rath,
+            dao=self.agent_dao,
+            manager=self.agents,
             llm_factory=self.factory,
             model_selection=self.selection,
             messages=self.messages,
@@ -169,7 +170,7 @@ class Services:
 
         self.context = ContextBuilder(
             self.mem, self.messages, self.summaries, self.skills,
-            self.tools, self.workspace_dir, self.rath_dao, self.mcp,
+            self.tools, self.workspace_dir, self.agent_dao, self.mcp,
         )
 
         # 累计用量（本进程内，/status 用）
@@ -191,6 +192,8 @@ class Services:
 
     async def startup(self) -> None:
         await self.db.connect()
+        from app.runtime.store import RuntimeStore
+        await RuntimeStore(self.db).interrupt_open_runs()
         if isinstance(self.mem, BuiltinMemoryClient):
             await self.mem._bootstrap()
         # Starts an immediate background conditional GET.  Startup and model
@@ -199,7 +202,7 @@ class Services:
         await self._mark_interrupted_operations()
         # Rath/controller coroutines are process-local even when Rath is disabled
         # in the new config.  Always close durable leftovers from the old process.
-        interrupted = await self.rath_dao.mark_interrupted_running()
+        interrupted = await self.agent_dao.mark_interrupted_running()
         if interrupted:
             log.warning("启动时标记未完成 Rath 任务为 interrupted", 数量=interrupted)
         reconciled = await self._mark_interrupted_web_agent_operations()
@@ -208,8 +211,8 @@ class Services:
         reconciled_runtime = await self._mark_interrupted_web_runtime_operations()
         if reconciled_runtime:
             log.warning("启动时同步终结未完成 Web 运行操作", 数量=reconciled_runtime)
-        if self.config.rath.enabled:
-            await ensure_builtin_workflows(self.rath_dao)
+        if self.config.agents.enabled:
+            await ensure_builtin_workflows(self.agent_dao)
         if self.config.browser.enabled:
             result = await self.browser.validate_connection()
             if not result["ok"]:
@@ -669,8 +672,8 @@ class Services:
         register_agent_tools(
             self.tools,
             config=config,
-            dao=self.rath_dao,
-            manager=self.rath,
+            dao=self.agent_dao,
+            manager=self.agents,
             llm_factory=self.factory,
             model_selection=self.selection,
             messages=self.messages,
@@ -689,7 +692,7 @@ class Services:
         self.web_admin.workspace_dir = self.workspace_dir
         self.context = ContextBuilder(
             self.mem, self.messages, self.summaries, self.skills,
-            self.tools, self.workspace_dir, self.rath_dao, self.mcp,
+            self.tools, self.workspace_dir, self.agent_dao, self.mcp,
         )
 
     def reload_skills_from_disk(self) -> dict[str, Any]:
@@ -941,7 +944,7 @@ class Services:
             asyncio.get_running_loop().create_task(old_mem.close())
         self.factory = BackendFactory(config.models, self.http)
         self.selection = ModelSelection(config.models, config_path())
-        self.rath.configure(max_concurrent_tasks=config.rath.max_concurrent_tasks)
+        self.agents.configure(max_concurrent_tasks=config.agents.max_concurrent_tasks)
         self.web_admin.apply_config(
             config,
             llm_factory=self.factory,

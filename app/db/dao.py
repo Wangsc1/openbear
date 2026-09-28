@@ -595,6 +595,8 @@ class MessageDAO:
         chat_id: int,
         *,
         commit: bool = True,
+        attempt_id: str = "",
+        usage_known: bool | None = None,
         session_uuid: str = "",
         model: str = "",
         protocol: str = "",
@@ -629,8 +631,8 @@ class MessageDAO:
               expert_input_tokens, expert_output_tokens, expert_cache_read_tokens, expert_cache_write_tokens,
               expert_tool_calls, cost_usd, connect_ms, first_token_ms, total_time_ms, peak_tps, min_tps,
               status, model_call_count, model_ok_count, model_retry_count, model_fail_count,
-              error_type, created_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+              error_type, created_at, attempt_id, usage_known
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (chat_id, session_uuid, model, protocol, think_level, str(call_kind or ""),
              u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens,
@@ -640,7 +642,7 @@ class MessageDAO:
              max(0.0, float(peak_tps or 0.0)), max(0.0, float(min_tps or 0.0)),
              status, max(0, int(model_call_count)), max(0, int(model_ok_count)),
              max(0, int(model_retry_count)), max(0, int(model_fail_count)),
-             error_type, now_ts()))
+             error_type, now_ts(), attempt_id, None if usage_known is None else int(usage_known)))
         if commit:
             await self._conn.commit()
         return cur.lastrowid or 0
@@ -1460,7 +1462,7 @@ class MessageDAO:
             cid = c.get("id")
             if cid and cid not in have:
                 await self.add(chat_id, "tool",
-                               "[openbear] 工具调用被中止,未返回结果。",
+                               "[openbear] 工具调用被中止,未返回结果。可能已发生副作用；不得视为未执行或自动重放。",
                                tool_call_id=cid, name=c.get("name", ""))
                 added += 1
         return added

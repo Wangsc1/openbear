@@ -8,6 +8,8 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 
+import pytest
+
 from app.agent.loop import Agent
 from app.agent.transcript_repair import MISSING_TOOL_RESULT_TEXT
 from app.llm.base import Message, OpenBearLLMError
@@ -134,6 +136,44 @@ async def test_plain_answer():
     assert r.usage.total_tokens == 10
 
 
+
+
+@pytest.mark.parametrize("show_thinking,readable", [(True, ""), (False, ""), (True, "可读思考")])
+async def test_encrypted_reasoning_display_respects_toggle_summary_and_round_boundary(show_thinking, readable):
+    class ThoughtRenderer(RecordRenderer):
+        def __init__(self):
+            super().__init__()
+            self.thoughts = []
+            self.final_thought = None
+
+        async def on_delta(self, full_text, reasoning=""):
+            self.thoughts.append(reasoning)
+            await super().on_delta(full_text, reasoning)
+
+        async def finalize(self, full_text, reasoning=""):
+            self.final_thought = reasoning
+            await super().finalize(full_text, reasoning)
+
+    backend = FakeBackend([
+        [StreamEvent(kind="encrypted_reasoning", text="opaque-start"),
+         *([StreamEvent(kind="reasoning", text=readable)] if readable else []),
+         StreamEvent(kind="encrypted_reasoning", text="opaque-final"),
+         StreamEvent(kind="tool_call", tool_calls=[ToolCall(id="c1", name="echo", arguments='{"x":"hi"}')]),
+         StreamEvent(kind="finish", finish_reason="tool_calls")],
+        [StreamEvent(kind="content", text="完成"), StreamEvent(kind="finish", finish_reason="stop")],
+    ])
+    renderer = ThoughtRenderer()
+    result = await Agent(backend, _echo_registry()).run(
+        [{"role": "user", "content": "hi"}], renderer, model="m", show_thinking=show_thinking,
+    )
+    if show_thinking:
+        assert renderer.thoughts[0] == "加密思考（不可读）\nopaque-start"
+        assert renderer.thoughts[-2] == (readable or "加密思考（不可读）\nopaque-final")
+    else:
+        assert all(not text for text in renderer.thoughts)
+    assert renderer.thoughts[-1] == renderer.final_thought == ""
+    assert result.reasoning == readable
+    assert "opaque" not in json.dumps(backend.seen_convos, ensure_ascii=False, default=str)
 
 
 async def test_tool_then_answer():

@@ -29,6 +29,7 @@ function harness({folderId = "project", getDefaults} = {}) {
   const ref = value => ({value});
   const state = {
     props, DEFAULT_NEW_CONVERSATION_THINKING: "",
+    get pending() {return {conversationUuid: props.conversationUuid, localRunConfig: null, localFolderId: props.folderId};},
     primaryModelKey: ref("cheap"), currentPrimaryModelKey: ref("cheap"),
     modelOptions: ref([
       {key: "cheap", thinkingLevels: ["low", "medium"], defaultThinkingLevel: "low", supportsFast: false},
@@ -60,6 +61,8 @@ function harness({folderId = "project", getDefaults} = {}) {
   const context = vm.createContext(state);
   vm.runInContext(actual, context);
   const run = code => vm.runInContext(code, context);
+  // The fixture exposes the local send's captured owner through `pending`.
+  // An empty object takes the early non-local return path.
   return {state, requests, patches, creates, resets, migrations, run, config: () => JSON.parse(run("JSON.stringify(completeLocalRunConfig())"))};
 }
 
@@ -67,7 +70,7 @@ test("folder defaults populate all six controls and are the exact create payload
   const h = harness();
   await h.run("loadLocalRunDefaults()");
   assert.deepEqual(h.config(), paid);
-  await h.run("ensureServerConversationForSend('hello', {})");
+  await h.run("ensureServerConversationForSend('hello', pending)");
   assert.equal(h.requests.length, 1);
   assert.equal(h.requests[0].folderId, "project");
   assert.deepEqual(JSON.parse(JSON.stringify(h.creates[0].runConfig)), paid);
@@ -146,7 +149,7 @@ test("create waits for folder defaults and refuses to send using stale values on
   const response = deferred();
   const h = harness({getDefaults: () => response.promise});
   const loading = h.run("loadLocalRunDefaults()");
-  const creating = h.run("ensureServerConversationForSend('hello', {})");
+  const creating = h.run("ensureServerConversationForSend('hello', pending)");
   await flush();
   assert.equal(h.creates.length, 0);
   assert.equal(h.requests.length, 1);
@@ -155,7 +158,7 @@ test("create waits for folder defaults and refuses to send using stale values on
   await creating;
   assert.equal(h.creates[0].runConfig.mainModel, "paid");
   const bad = harness({getDefaults: () => {throw new Error("network unavailable");}});
-  await assert.rejects(bad.run("ensureServerConversationForSend('hello', {})"), /无法读取会话默认配置/);
+  await assert.rejects(bad.run("ensureServerConversationForSend('hello', pending)"), /无法读取会话默认配置/);
   assert.equal(bad.creates.length, 0);
 });
 
@@ -173,14 +176,14 @@ test("temporary overrides populate creation, remain draft-only, and refresh afte
   h.run("handleFolderPropertiesChanged({detail:{folderId:'project'}})");
   await flush();
   assert.equal(h.requests.length, count);
-  await h.run("ensureServerConversationForSend('temporary', {})");
+  await h.run("ensureServerConversationForSend('temporary', pending)");
   assert.deepEqual(JSON.parse(JSON.stringify(h.creates[0].runConfig)), {...current, mainThinkingLevel: 'medium'});
   assert.equal(h.creates[0].folderId, '');
 });
 
 test("temporary defaults failure blocks creation instead of falling back to an unrelated model", async () => {
   const h = harness({folderId: '', getDefaults: () => {throw new Error('offline');}});
-  await assert.rejects(h.run("ensureServerConversationForSend('hello', {})"), /无法读取会话默认配置/);
+  await assert.rejects(h.run("ensureServerConversationForSend('hello', pending)"), /无法读取会话默认配置/);
   assert.equal(h.creates.length, 0);
 });
 

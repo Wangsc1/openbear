@@ -68,7 +68,7 @@ async def test_status_text_contains_only_process_and_total_stats(monkeypatch):
         config=SimpleNamespace(models=_Models()),
         selection=SimpleNamespace(current="openai/gpt"),
         runs=_Runs(),
-        rath=None,
+        agents=None,
         tools=_Tools(),
         skills=[object()],
         started_at=0,

@@ -1362,6 +1362,14 @@ class WebAdminOperationsMixin:
                 # External notification bookkeeping must never fail the Agent run
                 # whose durable operation has already been committed above.
                 log.exception("记录 Web 长任务 Telegram 通知事件失败", 会话=conv_uuid, 事件=kind)
+        push = getattr(self, "browser_push", None)
+        if push is not None:
+            try:
+                await push.observe(payload, owner_chat_id=owner_chat_id, internal_chat_id=internal_chat_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("记录浏览器通知事件失败", error_type=type(exc).__name__)
         return payload
 
 __all__ = [name for name in globals() if not name.startswith("__")]

@@ -57,7 +57,7 @@ async def test_config_store_migrates_legacy_plan_limit_keys_only(tmp_path: Path)
 
     cfg = await store.load_config()
 
-    assert cfg.rath.agent_plan_max_revision_rounds == 4
+    assert cfg.agents.agent_plan_max_revision_rounds == 4
     raw = json.loads(path.read_text(encoding="utf-8"))
     assert raw["rath"]["planMaxRevisionRounds"] == 4
     assert raw["rath"]["planMaxSteps"] == 40

@@ -18,7 +18,7 @@ from app.context.window import (
     source_of,
 )
 from app.db.dao import MessageDAO
-from app.rath.controller_projection import project_history_message_for_controller
+from app.agents.controller_projection import project_history_message_for_controller
 
 
 async def controller_restart_selection(

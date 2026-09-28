@@ -16,7 +16,7 @@ from app.context.window import (
     select_window,
     source_of,
 )
-from app.rath.single_agent import SingleAgentWorkflowRunner
+from app.agents.execution import AgentExecutor
 from app.tools.base import ToolRegistry
 from tests.test_agent_window_runtime import env as shared_agent_env
 from tests.test_context_strategies import env as shared_strategy_env
@@ -85,7 +85,7 @@ def make_runner(env, managed=False):
     registry = ToolRegistry()
     for name in ["Read", "Write", "AgentHistory", "AgentControlAck"]:
         registry.add(name, name, {"type": "object"}, lambda _: "unused")
-    return SingleAgentWorkflowRunner(dao, task, agent=agent, backend=SimpleNamespace(protocol="chat"),
+    return AgentExecutor(dao, task, agent=agent, backend=SimpleNamespace(protocol="chat"),
         model="isolated", max_tokens=1024, tools=registry, plan_protocol_enabled=managed,
         context_window=128000, rollover_trigger_tokens=30000)
 

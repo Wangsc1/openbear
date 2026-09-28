@@ -4,7 +4,8 @@ import {Brain, SquareTerminal, Search, FileText, FilePenLine, PencilLine, Globe,
 import ConsoleToolEvent from './ConsoleToolEvent.vue';
 import WorkDisclosure from './WorkDisclosure.vue';
 import {eventPrimaryToolName, toolDisplayState, toolPreview as argumentToolPreview, toolStatus} from './display.js';
-import {latestReasoningLine, processToolLabel, reasoningDuration, workDurationLabel} from './conversationWork.js';
+import {processToolLabel, reasoningDuration, workDurationLabel} from './conversationWork.js';
+import {reasoningPreviewState, reasoningPreviewDirective as vReasoningPreview} from './reasoningPreview.js';
 
 const props = defineProps({event: {type: Object, required: true}, part: {type: String, default: ''},
 	conversationUuid: {type: String, default: ''}, activeIndex: {type: Number, default: 0}});
@@ -21,7 +22,7 @@ const state = computed(() => {
 	return {...value, status: statuses.includes('running') ? 'running' : statuses.includes('error') ? 'error' : 'ok'};
 });
 const running = computed(() => isReasoning.value ? Boolean(props.event.reasoningActive) : state.value.status === 'running');
-const line = computed(() => latestReasoningLine(reasoning.value));
+const preview = computed(() => reasoningPreviewState(reasoning.value));
 const duration = computed(() => workDurationLabel(reasoningDuration(props.event)));
 const toolName = computed(() => {
 	const primary = eventPrimaryToolName(props.event);
@@ -61,54 +62,18 @@ const vReasoningScroll = {
 	updated(el) { el._workSync?.(); },
 	beforeUnmount(el) { el._workCleanup?.(); },
 };
-const vSummaryTail = {
-	mounted(el) {
-		let observedText;
-		const sync = () => {
-			// Track text width too, as ZCode does, not only the fixed viewport.
-			const text = el.firstElementChild;
-			if (observedText !== text) {
-				if (observedText) observer?.unobserve(observedText);
-				observedText = text;
-				if (text) observer?.observe(text);
-			}
-			el.scrollLeft = el.scrollWidth;
-			el.dataset.overflow = String(el.scrollWidth > el.clientWidth + 1);
-		};
-		const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(sync) : null;
-		observer?.observe(el);
-		el._workSync = sync;
-		el._workCleanup = () => { observer?.disconnect(); el._workLineAnimation?.cancel(); };
-		sync();
-	},
-	updated(el, {value, oldValue}) {
-		// Keep the same visible node and sweep animation. New tokens never queue;
-		// only a new line gets a short motion, without fading through blank space.
-		if (value?.key !== oldValue?.key) {
-			el._workLineAnimation?.cancel();
-			if (!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
-				el._workLineAnimation = el.firstElementChild?.animate?.(
-					[{transform: 'translateY(.25em)'}, {transform: 'translateY(0)'}],
-					{duration: 120, easing: 'cubic-bezier(.2,.7,.2,1)'},
-				);
-			}
-		}
-		el._workSync?.();
-	},
-	beforeUnmount(el) { el._workCleanup?.(); },
-};
 </script>
 
 <template>
-	<div class="conversation-process" :class="{'is-running': running, 'is-open': open}">
+	<div class="conversation-process" :class="{'is-running': running, 'is-open': open, 'is-reasoning': isReasoning}">
 		<button type="button" class="process-summary" :aria-expanded="open" @click="open = !open">
 			<component :is="processIcon" class="process-icon" :stroke-width="1.75" aria-hidden="true"/>
 			<span class="process-copy">
 			<span class="process-kind" :class="{'work-status-sweep': running}">{{ isReasoning ? (running ? '正在思考' : '思考') : toolLabel }}</span>
 			<template v-if="isReasoning">
-				<span v-if="running && !open && line.text" class="process-separator">·</span>
-				<span v-if="running && !open && line.text" v-summary-tail="line" class="reasoning-preview">
-					<span class="reasoning-preview-line work-status-sweep">{{ line.text }}</span>
+				<span v-if="running && !open && preview.text" class="process-separator">·</span>
+				<span v-if="running && !open && preview.text" v-reasoning-preview="preview" class="reasoning-preview">
+					<span class="reasoning-preview-line"></span>
 				</span>
 				<span v-else-if="!running && duration" class="process-meta">· 持续了 {{ duration }}</span>
 			</template>
@@ -144,8 +109,10 @@ const vSummaryTail = {
 .process-chevron { width: 13px; height: 13px; flex: none; align-self: center; opacity: 0; color: var(--work-faint); transition: opacity 160ms ease, transform 200ms ease; }
 .process-summary:hover .process-chevron, .process-summary:focus-visible .process-chevron, .is-open > .process-summary .process-chevron { opacity: 1; }
 .is-open > .process-summary .process-chevron { transform: rotate(90deg); }
-.reasoning-preview { display: block; min-width: 0; overflow: hidden; white-space: nowrap; height: 1.65em; color: var(--work-muted); }
-.reasoning-preview[data-overflow="true"] { mask-image: linear-gradient(to right, transparent, #000 14px, #000 calc(100% - 14px), transparent); }
+.is-reasoning > .process-summary { width: 100%; }
+.is-reasoning > .process-summary > .process-copy { flex: 1; }
+.reasoning-preview { display: block; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; height: 1.65em; color: var(--work-muted); }
+.reasoning-preview[data-overflow="true"] { mask-image: linear-gradient(to right, transparent, #000 14px); }
 .reasoning-preview-line { display: inline-block; white-space: nowrap; }
 .process-reasoning-detail { padding-top: 12px; }
 .process-reasoning-scroll { max-height: min(260px, 42vh); overflow: auto; margin-left: 7px; border-left: 1px solid var(--work-rule); padding: 2px 14px; color: var(--work-muted); white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-width: thin; overscroll-behavior: contain; }

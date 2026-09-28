@@ -86,6 +86,17 @@ def native_items_for_tool_calls(
     if not items:
         return []
     types = {str(item.get("type") or "") for item in items}
+    # Claude stores *only* its thinking/redacted blocks here: visible text and
+    # tool_use live in neutral fields. Do not mistake mixed/unknown native items
+    # for a complete Claude turn, or keep a subset of the emitted tool calls.
+    if types <= {"thinking", "redacted_thinking"}:
+        emitted = [_tool_call_id(call, index) for index, call in enumerate(emitted_tool_calls or [])]
+        accepted = [_tool_call_id(call, index) for index, call in enumerate(accepted_tool_calls or [])]
+        return items if (len(emitted) == len(set(emitted))
+                         and len(accepted) == len(set(accepted))
+                         and set(accepted) == set(emitted)) else []
+    if types & {"thinking", "redacted_thinking"}:
+        return []  # No partial replay of an unknown/mixed native turn.
     if has_content and "message" not in types:
         return []
     if has_reasoning and "reasoning" not in types:

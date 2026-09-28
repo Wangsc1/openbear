@@ -48,6 +48,7 @@ class ContextManager:
         active_run_root_turn_uuid: str = "",
         model_label: str = "",
         restored_controller_anchor: dict[str, Any] | None = None,
+        frozen_system: bool = False,
     ) -> None:
         self.store = store
         self.policy = policy
@@ -67,6 +68,7 @@ class ContextManager:
         self.strategies = {"sliding_window": SlidingWindowStrategy(), **(strategies or {})}
         self.active_strategy = "sliding_window"
         self.system = ""
+        self.frozen_system = frozen_system
         self.pending = False
         self._lock = asyncio.Lock()
         self.on_state = on_state
@@ -220,7 +222,8 @@ class ContextManager:
         self.bind_sources(messages)
         archived = await self.store.archive(messages, controller_boundary=controller_boundary)
         saved = await self.store.load(fresh=True)
-        system = effective_context_prompt(system, self.active_strategy)
+        if not self.frozen_system:
+            system = effective_context_prompt(system, self.active_strategy)
         self.system = system
         self.request_options = copy.deepcopy(request_options or {})
         route = self.request_route(system, tools)

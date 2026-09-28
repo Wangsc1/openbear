@@ -10,7 +10,7 @@ from app.context.store import ContextOwner, WindowStore
 from app.context.window import InputEstimate, WindowPolicy
 from app.llm.base import AgentResult
 from app.llm.events import StreamEvent, Usage
-from app.rath.single_agent import SingleAgentWorkflowRunner
+from app.agents.execution import AgentExecutor
 from app.tools.base import ToolRegistry
 from app.web_admin import _WebLiveStream, _WebStreamRenderer
 from tests.test_context_strategies import env as shared_strategy_env
@@ -137,7 +137,7 @@ async def test_web_first_request_reaches_model_with_unchanged_output_limit(web_e
 async def test_agent_first_request_keeps_model_output_limit(agent_env):
     dao, task_uuid, agent = agent_env
     backend = RecordingBackend()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao, task_uuid, agent=agent, backend=backend, model="gpt", max_tokens=500000,
         tools=ToolRegistry(), context_window=500000, rollover_trigger_tokens=250000,
         plan_protocol_enabled=False,

@@ -30,7 +30,6 @@ function touchOpen(event) {
 			<button ref="trigger" type="button" class="context-usage-trigger" :class="[`is-${meter.tone}`, {'is-unknown': meter.triggerPercent === null}]" :aria-label="triggerSummary" :aria-expanded="open" @pointerdown="touchOpen" @focus="open = true" @blur="open = false" @keydown.esc.stop="open = false" @keydown.enter.prevent="open = !open" @keydown.space.prevent="open = !open">
 				<svg viewBox="0 0 24 24" aria-hidden="true"><circle class="context-ring-track" cx="12" cy="12" r="9"/><circle class="context-ring-fill" cx="12" cy="12" r="9" pathLength="100" :stroke-dasharray="`${triggerFill} 100`"/></svg>
 				<span class="context-inline-value">{{ usedLabel }} / {{ triggerLabel }}</span><span class="context-inline-percent">{{ triggerPercentLabel }}</span>
-				<span class="context-inline-strategy">· {{ props.strategy === 'model_summary' ? '摘要压缩' : '滑窗压缩' }}</span>
 			</button>
 		</template>
 		<section class="context-usage-content" :aria-label="triggerSummary" @keydown.esc.stop="open = false">
@@ -54,7 +53,6 @@ function touchOpen(event) {
 .context-usage-trigger svg { width: 12px; height: 12px; flex: none; transform: rotate(-90deg); }
 .context-inline-value { color: var(--ob-chat-subtle); }
 .context-inline-percent { color: var(--ob-chat-muted); }
-.context-inline-strategy { display: none; }
 .context-ring-track, .context-ring-fill { fill: none; stroke: currentColor; stroke-width: 3; }
 .context-ring-track { opacity: .22; }
 .context-ring-fill { stroke-linecap: round; opacity: .85; transition: stroke-dasharray 250ms ease; }
@@ -75,7 +73,6 @@ function touchOpen(event) {
 .context-usage-content p { margin: 12px 0 0; border-top: 1px solid var(--work-rule); padding-top: 10px; color: var(--work-faint); font-size: 11px; }
 @media (max-width: 760px) {
 	.context-usage-trigger { width: max-content; max-width: 100%; height: 32px; font-size: 9px; gap: 6px; }
-	.context-inline-strategy { display: inline; color: var(--ob-chat-muted); }
 }
 @media (prefers-reduced-motion: reduce) { .context-usage-trigger, .context-ring-fill, .context-capacity-track > span { transition: none; } }
 </style>

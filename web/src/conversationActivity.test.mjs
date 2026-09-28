@@ -1,3 +1,4 @@
+import {useRecentConversationRows} from './components/conversationRecentRows.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -116,7 +117,7 @@ test("real recent folder renders one compact list and keeps just-read selected r
   const {descriptor} = parse(source);
   assert.deepEqual(compileTemplate({source: descriptor.template.content, filename: "activity.vue", id: "activity"}).errors, []);
   const props = reactive({items: [row("completed", {activityAtMs: Date.now() - 180000}), row("working", {running: true, activityUnread: false})], activeConversationUuid: "completed", readVersions: new Map(), titleGenerating: new Set(), busy: false});
-  const ctx = vm.createContext({computed, ref, onMounted() {}, onBeforeUnmount() {}, watch: (...args) => {const stop = watch(...args); t.after(stop); return stop;}, activityLabel, activityState, groupActivityItems,
+  const ctx = vm.createContext({useRecentConversationRows, computed, ref, onMounted() {}, onBeforeUnmount() {}, watch: (...args) => {const stop = watch(...args); t.after(stop); return stop;}, activityLabel, activityState, groupActivityItems,
     referenceItem: () => null, defineProps: () => props, defineEmits: () => () => {}});
   vm.runInContext(descriptor.scriptSetup.content.replace(/^import .*?;\n/gm, ""), ctx);
   for (const icon of ["ArrowRight", "Folder", "FolderOpened", "Check", "MoreFilled"]) ctx[icon] = {render: () => h("svg")};
@@ -154,7 +155,7 @@ test("real recent folder renders one compact list and keeps just-read selected r
   assert.ok(tree.indexOf("<ConversationActivityFolder") < tree.indexOf('<div ref="listRef"'));
 });
 
-test("phone and touch activity styles give separate 44px actions, wrapping titles and bounded scrolling without changing desktop rows", () => {
+test("phone and touch activity styles keep 44px single-line rows and separate actions with bounded scrolling", () => {
   const {descriptor} = parse(read("./components/ConversationActivityFolder.vue"));
   const css = postcss.parse(descriptor.styles[0].content);
   const mobile = css.nodes.find(node => node.type === "atrule" && node.params === "(max-width: 760px), (pointer: coarse)");
@@ -176,16 +177,16 @@ test("phone and touch activity styles give separate 44px actions, wrapping title
   });
   assert.equal(rule(css, ".activity-row-copy").display, "contents");
   assert.equal(rule(css, ".activity-touch-label").display, "none");
-  assert.equal(rule(mobile, ".activity-row-copy")["flex-direction"], "column");
-  assert.equal(rule(mobile, ".activity-row-title")["-webkit-line-clamp"], "2");
-  assert.equal(rule(mobile, ".activity-row-title")["overflow-wrap"], "anywhere");
+  assert.equal(rule(mobile, ".activity-row-copy")["flex-direction"], "row");
+  assert.equal(rule(mobile, ".activity-row-title")["white-space"], "nowrap");
+  assert.equal(rule(mobile, ".activity-row-title")["text-overflow"], "ellipsis");
   assert.equal(rule(mobile, ".activity-row-read").width, "44px");
   assert.equal(rule(mobile, ".activity-row-read").height, "44px");
   assert.equal(rule(mobile, ".activity-row-read").opacity, "1");
   assert.equal(rule(mobile, ".activity-read-all").height, "44px");
-  assert.equal(rule(mobile, ".activity-row-open")["min-height"], "56px");
-  assert.equal(rule(mobile, ".activity-folder")["max-height"], "50%");
-  assert.equal(rule(mobile, ".activity-folder-content")["max-height"], "min(36dvh, 300px)");
+  assert.equal(rule(mobile, ".activity-row-open")["min-height"], "44px");
+  assert.equal(rule(mobile, ".activity-folder")["max-height"], "40%");
+  assert.equal(rule(mobile, ".activity-folder-content")["max-height"], "min(28dvh, 220px)");
   assert.equal(rule(css, ".activity-folder-content")["overflow-y"], "auto");
   const template = descriptor.template.content;
   assert.match(template, /emit\('read-all'\)[\s\S]*?全部已读/);
@@ -221,7 +222,7 @@ test("real tree alias opens the same row without moving/expanding folders; stale
   const emitted = [], sent = [];
   let resolve;
   const catalog = {connected: false, ready: false, activityReadVersions: new Map()};
-  const ctx = vm.createContext({computed, nextTick, reactive, ref, rowId, treeItemParent, compareTreeItems, resolveTreeDrop, activityLabel, activityReadRequests,
+  const ctx = vm.createContext({useRecentConversationRows, computed, nextTick, reactive, ref, rowId, treeItemParent, compareTreeItems, resolveTreeDrop, activityLabel, activityState, activityReadRequests,
     // UI import seam only; alias navigation and read-receipt behavior remain real.
     defineLazyView: () => ({}),
     clearTimeout, defineProps: () => ({activeConversationUuid: "", draftConversation: null}), defineEmits: () => (...args) => emitted.push(args), defineExpose() {},

@@ -5,6 +5,7 @@ import {
 	ChatLineRound,
 	Hide,
 	Loading,
+	Search,
 	Lock,
 	Unlock,
 } from "@element-plus/icons-vue";
@@ -15,6 +16,7 @@ import {createActivityReadTracker, withActivityReadVersion} from "../../conversa
 import {initialConversationTitle} from "../../conversationTitle.js";
 import ConsoleHeader from "./ConsoleHeader.vue";
 import MobileConversationTools from "./MobileConversationTools.vue";
+import ConversationSearch from "./ConversationSearch.vue";
 import TurnList from "./TurnList.vue";
 import {WORK_MOTION} from './conversationWork.js';
 import HiddenMessagesDrawer from "./HiddenMessagesDrawer.vue";
@@ -23,6 +25,7 @@ import MessageVisibilityMobileMenu from "./MessageVisibilityMobileMenu.vue";
 import {createMessageVisibility, MESSAGE_VISIBILITY} from "./messageVisibility.js";
 import TurnMinimap from "./TurnMinimap.vue";
 import TaskMemoryDrawer from "./TaskMemoryDrawer.vue";
+import ContextEditor from "./ContextEditor.vue";
 import {chooseActiveTurnIndex} from "./activeTurn.js";
 import {
 	decideAgentAutoOpen,
@@ -38,6 +41,7 @@ import {
 	agentSummary,
 	agentTasks,
 	callName,
+	cachePct,
 	fmtCost,
 	fmtMs,
 	fmtTokens,
@@ -118,7 +122,7 @@ import {
 	mayRetireRunConfigOverride,
 	runConfigForDisplay,
 } from "./runConfigState.js";
-import {createAttachmentDraftStorage} from "./attachmentDraftStorage.js";
+import {createAttachmentDraftStorage, planAttachmentDraftRecord} from "./attachmentDraftStorage.js";
 import {captureTranscriptContentAnchor, transcriptContentAnchorDelta} from "./transcriptContentAnchor.js";
 
 const DEFAULT_NEW_CONVERSATION_THINKING = "";
@@ -179,10 +183,18 @@ const autoScrollLocked = ref(true);
 const scrollerOverflow = ref(false);
 const activeTurnIndex = ref(0);
 const taskMemoryDrawer = ref(null);
+const contextEditor = ref(null);
+const contextEditorOpen = ref(false);
 const composer = ref(null);
 const composerHeight = ref(135);
 const pendingAttachments = ref([]);
 const attachmentPreviews = ref({});
+// Transient upload UI is keyed by the conversation owning the files, never by the visible tab.
+const uploadProgressByConversation = ref({});
+const activeUploadProgress = computed(() => uploadProgressByConversation.value[draftKey(props.conversationUuid)] || {});
+function setUploadProgress(uuid, entries) {
+	uploadProgressByConversation.value = {...uploadProgressByConversation.value, [draftKey(uuid)]: entries};
+}
 const modelMenuOpen = ref(false);
 const optionsLoading = ref(false);
 const modelOptions = ref([]);
@@ -217,6 +229,14 @@ provide(TOOL_DETAIL_CACHE_KEY, toolDetailCache);
 const hasMoreBefore = ref(false);
 const nextBeforeDisplaySeq = ref(null);
 const timelinePageInFlight = ref(null);
+const searchOpen = ref(false);
+const searchWindowActive = ref(false);
+const searchLocating = ref(false);
+let searchNavigationGeneration = 0;
+const searchReturnPosition = ref(null);
+const searchBaseOperationIds = new Set();
+const searchAddedOperationIds = new Set();
+let searchHighlightTimer = 0;
 const retryActionPending = ref({});
 const deletingTurnUuid = ref("");
 let ws = null;
@@ -572,13 +592,16 @@ function setDraftForConversation(uuid, text) {
 function persistComposerDraft(value) {
 	const pending = outboundSends.current;
 	const preparing = pending && !pending.storageReleased && draftKey(pending.conversationUuid) === draftKey(props.conversationUuid);
+	if (pending && draftKey(pending.conversationUuid) === draftKey(props.conversationUuid)) pending.editorDraft = value;
 	setDraftForConversation(props.conversationUuid, preparing ? restoreOutboundDraft(pending.draftText, value) : value);
 }
 
 function restoreDraftForConversation(uuid = props.conversationUuid) {
 	if (!componentMounted || draftKey(uuid) !== draftKey(props.conversationUuid)) return;
 	restoringDraft.value = true;
-	draft.value = String(draftByConversation.value[draftKey(uuid)] || "");
+	const pending = outboundSends.current;
+	draft.value = pending && draftKey(pending.conversationUuid) === draftKey(uuid)
+		? String(pending.editorDraft || "") : String(draftByConversation.value[draftKey(uuid)] || "");
 	void restoreAttachmentsForConversation(uuid);
 	nextTick(() => {
 		restoringDraft.value = false;
@@ -817,6 +840,15 @@ function mergeStatsUsageIntoState(opId, stats = {}) {
 }
 
 function resetTimelinePagination(conversationUuid = "") {
+	searchNavigationGeneration += 1;
+	searchWindowActive.value = false;
+	searchReturnPosition.value = null;
+	searchBaseOperationIds.clear();
+	searchAddedOperationIds.clear();
+	searchLocating.value = false;
+	searchOpen.value = false;
+	if (searchHighlightTimer) window.clearTimeout(searchHighlightTimer);
+	searchHighlightTimer = 0;
 	timelinePageGeneration += 1;
 	timelinePageInFlight.value = null;
 	timelinePageConversationUuid = String(conversationUuid || "");
@@ -1092,6 +1124,23 @@ function addAttachment(file) {
 	persistActiveAttachments();
 }
 
+const warnedMemoryOnlyDraftIds = new Map();
+function warnMemoryOnlyDrafts(key, attachments) {
+	const skipped = planAttachmentDraftRecord(key, attachments).skipped;
+	if (!skipped.length) { warnedMemoryOnlyDraftIds.delete(key); return; }
+	let warned = warnedMemoryOnlyDraftIds.get(key);
+	if (!warned) warnedMemoryOnlyDraftIds.set(key, warned = new Set());
+	const skippedIds = new Set(skipped.map(item => item.id));
+	for (const id of warned) if (!skippedIds.has(id)) warned.delete(id);
+	const newlySkipped = skipped.filter(item => !warned.has(item.id));
+	if (!newlySkipped.length) return;
+	for (const item of newlySkipped) warned.add(item.id);
+	ElMessage.warning({
+		message: `${newlySkipped.length} 个未发送附件超过草稿存储上限，仅在当前页面有效；刷新或系统回收页面后需重新选择：${newlySkipped.map(item => item.fileName).join("、")}`,
+		duration: 8000,
+	});
+}
+
 async function removeAttachment(id) {
 	const key = activeAttachmentKey();
 	const item = pendingAttachments.value.find((entry) => entry.id === id);
@@ -1135,16 +1184,18 @@ function activeAttachmentKey() {
 }
 
 function persistAttachmentList(key, attachments) {
+	const pending = outboundSends.current;
+	const sent = pending?.storageReleased && draftKey(pending.conversationUuid) === key
+		? new Set(pending.attachments.map(item => item.id)) : new Set();
+	const unsent = attachments.filter(item => !sent.has(item.id));
+	warnMemoryOnlyDrafts(key, unsent);
 	const hydration = attachmentHydrations.get(key);
 	if (hydration) {
 		// Do not overwrite the durable files with a not-yet-hydrated partial list.
 		hydration.dirty = true;
 		return;
 	}
-	const pending = outboundSends.current;
-	const sent = pending?.storageReleased && draftKey(pending.conversationUuid) === key
-		? new Set(pending.attachments.map(item => item.id)) : new Set();
-	void attachmentDrafts.save(key, attachments.filter(item => !sent.has(item.id)));
+	void attachmentDrafts.save(key, unsent);
 }
 
 function persistActiveAttachments() {
@@ -1252,6 +1303,12 @@ function migrateAttachmentDraft(from, to) {
 		attachmentsByConversation.set(toKey, stash);
 	}
 	if (attachmentsLoadedKey === fromKey) attachmentsLoadedKey = toKey;
+	if (uploadProgressByConversation.value[fromKey]) {
+		const entries = {...uploadProgressByConversation.value};
+		entries[toKey] = entries[fromKey];
+		delete entries[fromKey];
+		uploadProgressByConversation.value = entries;
+	}
 	void attachmentDrafts.move(fromKey, toKey);
 }
 
@@ -1351,7 +1408,14 @@ function adjustComposerHeight() {
 
 function onComposerHeightChange(height) {
 	const next = Math.ceil(Number(height || 0));
-	if (next > 0) composerHeight.value = next;
+	if (!Number.isFinite(next) || next <= 0 || next === composerHeight.value) return;
+	composerHeight.value = next;
+	// Mobile keyboard/editor reflow can settle after the viewport callback.
+	// Follow that final composer height only while the reader still wants the tail.
+	if (componentMounted && autoScrollLocked.value
+		&& window.matchMedia('(max-width: 760px), (hover: none) and (pointer: coarse)').matches) {
+		scheduleScrollBottom();
+	}
 }
 
 async function focusComposer() {
@@ -2063,9 +2127,12 @@ function replaceOperationSnapshots(operations = [], {frameSeq = null} = {}) {
 	return ops;
 }
 
-function loadOperationsFromState(state = {}, {merge = false} = {}) {
+function loadOperationsFromState(state = {}, {merge = false, replace = false} = {}) {
 	const incoming = normalizeOperations(Array.isArray(state.operations) ? state.operations : []);
-	const ops = merge
+	if (searchWindowActive.value && !replace) for (const op of incoming) searchBaseOperationIds.add(op.opId);
+	// A recovery/bootstrap snapshot is authoritative for recent rows, but its
+	// tail page cannot erase the searched historical window being read.
+	const ops = (merge || (searchWindowActive.value && !replace))
 		? mergeOperationSnapshots(orderedOperationsList(), incoming)
 		: incoming;
 	// HTTP owns this baseline. Frames crossing the snapshot boundary are replayed
@@ -2403,6 +2470,7 @@ function applyOperationFrameMessage(frame, options = {}) {
 	operationsById.value = store.operationsById;
 	orderedOpIds.value = store.orderedOpIds;
 	revisionByOpId.value = store.revisionByOpId;
+	if (changed && searchWindowActive.value && !searchAddedOperationIds.has(frame.opId)) searchBaseOperationIds.add(frame.opId);
 	lastFrameSeq.value = Number(store.lastFrameSeq || 0) || lastFrameSeq.value;
 	if (changed && frame.opType === "stats" && frame.payload) {
 		mergeStatsUsageIntoState(frame.opId, operationsById.value.get(frame.opId)?.payload || frame.payload);
@@ -2568,16 +2636,20 @@ function toggleAutoScrollLock() {
 	else lockAutoScroll();
 }
 
-// App calls these only around mobile shell geometry changes. Reuse the existing
-// reading anchor; never turn a viewport/keyboard change into a scroll-to-bottom.
+// App calls these around mobile shell geometry changes. Preserve both reading
+// intents: keep a history anchor, or keep the latest content above the composer
+// after the keyboard shrinks the viewport. Neither path changes the user's lock.
 function captureMobileViewportAnchor() {
-	return {uuid: props.conversationUuid, generation: loadRequestGeneration, anchor: autoScrollLocked.value ? null : captureScrollAnchor()};
+	const follow = autoScrollLocked.value;
+	return {uuid: props.conversationUuid, generation: loadRequestGeneration, follow, anchor: follow ? null : captureScrollAnchor()};
 }
 function restoreMobileViewportAnchor(snapshot) {
-	if (!snapshot?.anchor) return;
-	return restoreScrollAnchor(snapshot.anchor, {
-		isCurrent: () => componentMounted && props.conversationUuid === snapshot.uuid && loadRequestGeneration === snapshot.generation && !autoScrollLocked.value,
-	});
+	if (!snapshot) return;
+	const isCurrent = () => componentMounted && props.conversationUuid === snapshot.uuid
+		&& loadRequestGeneration === snapshot.generation && autoScrollLocked.value === snapshot.follow;
+	if (snapshot.follow) return scrollBottom({isCurrent});
+	if (!snapshot.anchor) return;
+	return restoreScrollAnchor(snapshot.anchor, {isCurrent});
 }
 
 // Read every turn's viewport box once; the anchor policy and the active-turn
@@ -2790,6 +2862,137 @@ function scrollToTurnIndex(index) {
 	}, 700);
 }
 
+function searchResultNode(opId) {
+	return Array.from(scroller.value?.querySelectorAll('[data-search-op-id]') || [])
+		.find(node => node.dataset.searchOpId === opId) || null;
+}
+
+function releaseSearchWindow() {
+	if (!searchAddedOperationIds.size) return;
+	const retained = orderedOperationsList().filter(op => searchBaseOperationIds.has(op.opId));
+	searchAddedOperationIds.clear();
+	replaceOperationSnapshots(retained);
+	if (streamFlushPending) pendingProjectionOps = retained;
+	messages.value = projectOperationMessages(retained);
+	if (chatState.value) chatState.value = {...chatState.value, operations: retained};
+}
+
+function highlightSearchNode(node) {
+	if (searchHighlightTimer) window.clearTimeout(searchHighlightTimer);
+	scroller.value?.querySelector('.search-hit-highlight')?.classList.remove('search-hit-highlight');
+	node.classList.add('search-hit-highlight');
+	searchHighlightTimer = window.setTimeout(() => {
+		node.classList.remove('search-hit-highlight');
+		searchHighlightTimer = 0;
+	}, 2600);
+}
+
+async function locateSearchResult(hit) {
+	const uuid = String(activeConversationUuid.value || '');
+	if (!hit?.opId || !uuid || uuid.startsWith('local:') || hit.hidden || messageVisibility.hiddenIds.value.has(hit.opId)) return false;
+	const seq = ++searchNavigationGeneration;
+	if (!searchReturnPosition.value) {
+		const anchor = captureScrollAnchor();
+		searchReturnPosition.value = {
+			uuid, anchor, identity: stableTurnIdentity(turns.value[anchor?.index]),
+			follow: autoScrollLocked.value,
+			savedBeforeDisplaySeq: nextBeforeDisplaySeq.value,
+			savedHasMoreBefore: hasMoreBefore.value,
+		};
+		searchBaseOperationIds.clear();
+		for (const op of orderedOperationsList()) searchBaseOperationIds.add(op.opId);
+		searchAddedOperationIds.clear();
+	}
+	searchWindowActive.value = true;
+	unlockAutoScroll();
+	searchLocating.value = true;
+	const current = () => componentMounted && uuid === String(activeConversationUuid.value || '') && seq === searchNavigationGeneration;
+	try {
+		if (searchBaseOperationIds.has(hit.opId) && searchAddedOperationIds.size) {
+			releaseSearchWindow();
+			await nextTick();
+		}
+		if (!searchResultNode(hit.opId)) {
+			const data = await Api.conversationOperationWindow(uuid, hit.opId);
+			if (!current()) return false;
+			const incoming = normalizeOperations(data?.operations || []);
+			if (!incoming.some(op => op.opId === hit.opId)) throw new Error('目标消息已不存在');
+			// Keep pre-search manual pages and all newer live frames, but replace
+			// the previous seek window instead of accumulating every clicked hit.
+			const baseline = orderedOperationsList().filter(op => searchBaseOperationIds.has(op.opId));
+			const merged = mergeOperationSnapshots(baseline, incoming);
+			searchAddedOperationIds.clear();
+			for (const op of incoming) if (!searchBaseOperationIds.has(op.opId)) searchAddedOperationIds.add(op.opId);
+			replaceOperationSnapshots(merged);
+			if (streamFlushPending) pendingProjectionOps = merged;
+			messages.value = projectOperationMessages(merged);
+			if (chatState.value) chatState.value = {...chatState.value, operations: merged};
+			const before = Number(data.nextBeforeDisplaySeq || 0);
+			nextBeforeDisplaySeq.value = searchReturnPosition.value?.savedBeforeDisplaySeq ?? null;
+			hasMoreBefore.value = Boolean(searchReturnPosition.value?.savedHasMoreBefore);
+			if (before > 0 && (!nextBeforeDisplaySeq.value || before < nextBeforeDisplaySeq.value)) {
+				nextBeforeDisplaySeq.value = before;
+				hasMoreBefore.value = before > 1;
+				timelinePageInitialized = true;
+			}
+			await nextTick();
+		}
+		if (!current()) return false;
+		if (messageVisibility.hiddenIds.value.has(hit.opId)) throw new Error('这条消息已隐藏，请在隐藏内容中预览');
+		const node = searchResultNode(hit.opId);
+		if (!node) throw new Error('目标消息目前无法在历史记录中显示');
+		if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
+		scrollFrame = 0;
+		pinnedActiveTurnIndex = null;
+		runProgrammaticScroll(() => node.scrollIntoView({block: 'center', behavior: 'instant'}), 250);
+		highlightSearchNode(node);
+		updateScrollerOverflow();
+		scheduleActiveTurnFromScroll({force: true});
+		return true;
+	} catch (error) {
+		if (current()) ElMessage.error(apiError(error));
+		return false;
+	} finally {
+		if (current()) searchLocating.value = false;
+	}
+}
+
+async function returnFromSearch() {
+	const position = searchReturnPosition.value;
+	if (!position || position.uuid !== String(activeConversationUuid.value || '')) return;
+	const seq = ++searchNavigationGeneration;
+	searchLocating.value = false;
+	releaseSearchWindow();
+	searchWindowActive.value = false;
+	searchReturnPosition.value = null;
+	searchBaseOperationIds.clear();
+	nextBeforeDisplaySeq.value = position.savedBeforeDisplaySeq;
+	hasMoreBefore.value = position.savedHasMoreBefore;
+	if (position.follow) { lockAutoScroll(); return; }
+	const anchor = position.anchor;
+	if (anchor) {
+		const index = findTurnIndexByIdentity(turns.value, position.identity);
+		await restoreScrollAnchor(index >= 0 ? {...anchor, index} : anchor, {
+			isCurrent: () => componentMounted && position.uuid === activeConversationUuid.value && seq === searchNavigationGeneration,
+		});
+	}
+}
+
+function returnToLatestFromSearch() {
+	searchNavigationGeneration += 1;
+	searchLocating.value = false;
+	const position = searchReturnPosition.value;
+	releaseSearchWindow();
+	searchWindowActive.value = false;
+	searchReturnPosition.value = null;
+	searchBaseOperationIds.clear();
+	if (position) {
+		nextBeforeDisplaySeq.value = position.savedBeforeDisplaySeq;
+		hasMoreBefore.value = position.savedHasMoreBefore;
+	}
+	lockAutoScroll();
+}
+
 async function loadEarlierOperations() {
 	const conversationUuid = String(activeConversationUuid.value || "");
 	const requestedCursor = Number(nextBeforeDisplaySeq.value || 0) || 0;
@@ -2821,6 +3024,7 @@ async function loadEarlierOperations() {
 		const activeTurnWasPinned = pinnedActiveTurnIndex !== null;
 		const anchor = capturePrependAnchor(scroller.value);
 		const incoming = normalizeOperations(Array.isArray(data?.operations) ? data.operations : []);
+		if (searchWindowActive.value) for (const op of incoming) searchBaseOperationIds.add(op.opId);
 		const merged = mergeOperationSnapshots(orderedOperationsList(), incoming);
 		replaceOperationSnapshots(merged);
 		messages.value = projectOperationMessages(merged);
@@ -2830,6 +3034,10 @@ async function loadEarlierOperations() {
 		const cursorProgressed = nextCursor > 0 && nextCursor < requestedCursor;
 		hasMoreBefore.value = Boolean(data?.hasMoreBefore && cursorProgressed);
 		nextBeforeDisplaySeq.value = hasMoreBefore.value ? nextCursor : null;
+		if (searchReturnPosition.value) {
+			searchReturnPosition.value.savedBeforeDisplaySeq = nextBeforeDisplaySeq.value;
+			searchReturnPosition.value.savedHasMoreBefore = hasMoreBefore.value;
+		}
 		timelinePageInitialized = true;
 		const remappedActiveTurnIndex = findTurnIndexByIdentity(turns.value, preservedActiveTurnIdentity);
 		if (remappedActiveTurnIndex >= 0) {
@@ -3054,6 +3262,8 @@ function applyPendingSteeringEvent(data = {}) {
 function finishPendingOutboundSend(requestId) {
 	const pending = outboundSends.take(String(requestId || ""));
 	if (!pending) return false;
+	closeOutboundSocket(pending);
+	setUploadProgress(pending.conversationUuid, {});
 	sendPending.value = false;
 	// Only release attachments belonging to this request. The user may already
 	// have added files for their next message while this ACK was in flight.
@@ -3066,10 +3276,12 @@ function finishPendingOutboundSend(requestId) {
 function restoreReleasedOutboundSend(pending, error = "send_failed", {uncertain = false} = {}) {
 	if (!pending) return false;
 	pending.uploadController?.abort();
+	closeOutboundSocket(pending);
+	if (pending.attachments.length) setUploadProgress(pending.conversationUuid, Object.fromEntries(pending.attachments.map(item => [item.id, {phase: "failed", percent: 0}])));
 	sendPending.value = Boolean(outboundSends.current);
 	const uuid = pending.conversationUuid;
 	const isActive = uuid === activeConversationUuid.value;
-	const currentDraft = isActive ? draft.value : (draftByConversation.value[draftKey(uuid)] || "");
+	const currentDraft = isActive ? draft.value : (pending.editorDraft || "");
 	const restoredDraft = restoreOutboundDraft(pending.draftText, currentDraft);
 	setDraftForConversation(uuid, restoredDraft);
 	// Retain the original files as well as any new draft attachments. Recreate
@@ -3114,11 +3326,54 @@ function recoverUnconfirmedSend(pending) {
 	});
 }
 
-function recoverDisconnectedSend() {
-	const pending = outboundSends.current;
-	if (!pending || pending.phase !== "sent") return false;
-	recoverUnconfirmedSend(outboundSends.take(pending.requestId));
-	return true;
+function closeOutboundSocket(pending) {
+	if (!pending?.sendSocket) return;
+	const socket = pending.sendSocket;
+	pending.sendSocket = null;
+	socket.onmessage = null;
+	socket.onclose = null;
+	socket.onerror = null;
+	socket.close();
+}
+
+// A send owns its socket for the entire ACK window. Navigation may close the
+// visible timeline socket but cannot redirect or drop an in-flight send.
+async function responsiveOutboundSocket(pending, isCurrent) {
+	for (let attempt = 0; attempt < 2; attempt += 1) {
+		if (!isCurrent()) throw new Error("send_cancelled");
+		// Reuse the last known cursor of this send's own conversation. The
+		// timeline may now show B, so its current lastFrameSeq is not A's cursor.
+		const cursor = timelinePageInitialized && timelinePageConversationUuid === pending.conversationUuid
+			? lastFrameSeq.value : pending.sendFrameSeq;
+		const socket = new WebSocket(conversationWsUrl(pending.conversationUuid, cursor, {bootstrap: "incremental"}));
+		pending.sendSocket = socket;
+		socket.onmessage = (event) => {
+			let data;
+			try { data = JSON.parse(event.data || "{}"); } catch { return; }
+			if (data.requestId !== pending.requestId) return;
+			if (data.type === "ack") finishPendingOutboundSend(data.requestId);
+			else if (data.type === "error") {
+				const restored = restorePendingOutboundSend(data.requestId, data.error);
+				if (restored) ElMessage.error(String(data.error || "发送失败"));
+			}
+		};
+		const recoverSendSocket = () => {
+			if (pending.sendSocket !== socket || pending.phase !== "sent") return;
+			recoverUnconfirmedSend(outboundSends.take(pending.requestId));
+		};
+		socket.onerror = recoverSendSocket;
+		socket.onclose = recoverSendSocket;
+		try {
+			await waitForSocketOpen(socket);
+			if (!isCurrent()) throw new Error("send_cancelled");
+			await probeSocket(socket);
+			if (!isCurrent()) throw new Error("send_cancelled");
+			return socket;
+		} catch (error) {
+			if (pending.sendSocket === socket) closeOutboundSocket(pending);
+			if (!isCurrent() || attempt === 1) throw error;
+		}
+	}
 }
 
 function leavePendingSend() {
@@ -3274,12 +3529,11 @@ async function connectWs(conversationUuid = props.conversationUuid) {
 	socket.onerror = () => {
 		if (ws !== socket || wsConversationUuid !== uuid) return;
 		status.value = "连接异常";
-		recoverDisconnectedSend();
+		// The timeline socket is not the send's ACK socket.
 	};
 	socket.onclose = () => {
 		if (ws !== socket || wsConversationUuid !== uuid) return;
 		terminalStateRefreshScheduler.invalidate();
-		if (recoverDisconnectedSend()) return;
 		if (!reconnectTimer) reconnectTimer = window.setTimeout(() => {
 			reconnectTimer = null;
 			void connectWs();
@@ -3288,34 +3542,23 @@ async function connectWs(conversationUuid = props.conversationUuid) {
 	return socket;
 }
 
-async function ensureResponsiveWs(conversationUuid, isCurrent) {
-	for (let attempt = 0; attempt < 2; attempt += 1) {
-		if (!isCurrent()) throw new Error("send_cancelled");
-		const socket = await connectWs(conversationUuid);
-		try {
-			await waitForSocketOpen(socket);
-			if (!isCurrent() || socket !== ws) throw new Error("send_cancelled");
-			await probeSocket(socket);
-			if (!isCurrent() || socket !== ws) throw new Error("send_cancelled");
-			return socket;
-		} catch (error) {
-			if (!isCurrent()) throw error;
-			if (ws === socket) closeWs();
-			if (attempt === 1) throw error;
-		}
-	}
-}
-
 function checkConnectionOnResume() {
-	if (!componentMounted || document.visibilityState !== "visible") return;
+	if (!componentMounted) return;
+	if (document.visibilityState !== "visible") {
+		// A suspended HTTP/probe chain cannot own the next foreground visit.
+		// Its result remains guarded; no send socket or upload is cancelled.
+		connectionResumePromise = null;
+		return;
+	}
 	outboundSends.checkDeadline();
-	if (outboundSends.current || connectionResumePromise || isLocalConversation.value) return;
+	if (connectionResumePromise || isLocalConversation.value) return;
 	const uuid = activeConversationUuid.value;
 	// pageshow/focus may arrive before the first HTTP snapshot (or mid-switch).
 	// Connecting here with the reset cursor would replay all retained history.
 	if (!uuid || !timelinePageInitialized || timelinePageConversationUuid !== uuid) return;
 	const generation = sendAttemptGeneration;
-	const isCurrent = () => componentMounted && uuid === activeConversationUuid.value && generation === sendAttemptGeneration;
+	const isCurrent = () => componentMounted && uuid === activeConversationUuid.value
+		&& generation === sendAttemptGeneration && connectionResumePromise === promise;
 	const promise = (async () => {
 		let socket = null;
 		try {
@@ -3326,9 +3569,12 @@ function checkConnectionOnResume() {
 		} catch {
 			if (!isCurrent() || !socket || socket !== ws) return;
 			closeWs();
-			void connectWs(uuid);
-			await load({conversationUuid: uuid, scrollMode: "preserve", manageLoading: false, isCurrent});
+			socket = await connectWs(uuid);
 		}
+		if (!isCurrent() || socket !== ws) return;
+		// A pong proves transport liveness, not that the suspended page received
+		// every message/terminal frame. Always read a fresh authoritative state.
+		await load({conversationUuid: uuid, scrollMode: "preserve", manageLoading: false, fresh: true, isCurrent});
 	})().finally(() => {
 		if (connectionResumePromise === promise) connectionResumePromise = null;
 	});
@@ -3336,31 +3582,53 @@ function checkConnectionOnResume() {
 }
 
 async function ensureServerConversationForSend(firstText, pending) {
-	if (!isLocalConversation.value) return activeConversationUuid.value;
-	await ensureLocalRunDefaults();
+	// A navigation during the first scroll/async preparation must not retarget A to B.
+	if (!String(pending.conversationUuid).startsWith("local:")) return pending.conversationUuid;
+	if (pending.localRunConfig === null && props.conversationUuid !== pending.conversationUuid)
+		throw new Error("本地会话默认配置尚未读取完成，草稿和附件已保留");
+	if (props.conversationUuid === pending.conversationUuid) await ensureLocalRunDefaults();
 	if (!outboundSends.isCurrent(pending)) return "";
+	if (pending.localRunConfig === null && props.conversationUuid !== pending.conversationUuid)
+		throw new Error("本地会话默认配置尚未读取完成，草稿和附件已保留");
 	const title = initialConversationTitle(referenceDisplayText(firstText || "新会话"));
-	const created = await Api.createConversation({title, runConfig: completeLocalRunConfig(), folderId: props.folderId || ""});
+	const created = await Api.createConversation({title, runConfig: pending.localRunConfig || completeLocalRunConfig(), folderId: pending.localFolderId});
 	if (!outboundSends.isCurrent(pending)) return "";
 	const uuid = created.conversation?.conversationUuid || created.state?.conversationUuid || "";
 	if (!uuid) throw new Error("conversation_create_failed");
+	const sourceUuid = pending.conversationUuid;
 	pending.conversationUuid = uuid;
-	localToServerTransitionUuid.value = uuid;
+	const stillViewingSource = props.conversationUuid === sourceUuid;
+	if (stillViewingSource) localToServerTransitionUuid.value = uuid;
 	// The composer keeps these files until a receipt releases them, so they must
 	// follow the conversation to its server id before any receipt can arrive.
-	migrateAttachmentDraft(props.conversationUuid, uuid);
-	chatState.value = {...(chatState.value || {}), conversationUuid: uuid};
-	emit("conversation-created", uuid);
+	migrateAttachmentDraft(sourceUuid, uuid);
+	if (stillViewingSource) {
+		chatState.value = {...(chatState.value || {}), conversationUuid: uuid};
+		emit("conversation-created", uuid);
+	} else {
+		clearDraftForConversation(sourceUuid);
+		emit("conversations-refresh");
+	}
 	await nextTick();
 	return uuid;
 }
 
 function applyLoadedConversationState(data, conversationUuid, {replaceOperations = false, runConfigVersionAtRequest = null} = {}) {
+	if (replaceOperations && searchWindowActive.value) {
+		// Explicit mutation/reset may have deleted the sought turn. Only normal
+		// recovery snapshots preserve historical search windows.
+		searchNavigationGeneration += 1;
+		searchWindowActive.value = false;
+		searchReturnPosition.value = null;
+		searchBaseOperationIds.clear();
+		searchAddedOperationIds.clear();
+		searchLocating.value = false;
+	}
 	messageVisibility.apply(data.messageVisibility, false);
 	const mergeExisting = !replaceOperations
 		&& timelinePageConversationUuid === String(conversationUuid || "")
 		&& operationsById.value.size > 0;
-	const ops = loadOperationsFromState(data, {merge: mergeExisting});
+	const ops = loadOperationsFromState(data, {merge: mergeExisting, replace: replaceOperations});
 	applyTimelinePageMetadata(data, conversationUuid, {preserve: mergeExisting});
 	const preserveOptimisticMessages = shouldPreserveOptimisticMessages(data) && !ops.length;
 	if (!preserveOptimisticMessages) messages.value = ops.length ? projectOperationMessages(ops) : (Array.isArray(data.messages) ? data.messages : []);
@@ -3404,6 +3672,7 @@ async function load(options = {}) {
 	if (!componentMounted || !conversationUuid || conversationUuid !== String(props.conversationUuid || "").trim()
 		|| (externalIsCurrent && !externalIsCurrent())) return;
 	const requestGeneration = ++loadRequestGeneration;
+	const searchNavigationAtRequest = searchNavigationGeneration;
 	let runConfigVersionAtRequest = runConfigSaves.appliedVersion;
 	if (options?.replaceOperations) pendingLoadReplaceOperations = true;
 	const isCurrent = () => Boolean(
@@ -3420,6 +3689,9 @@ async function load(options = {}) {
 	const scrollMode = bottomScroll ? "bottom" : requestedScrollMode;
 	const lockOnBottom = bottomScroll ? bottomScroll.lock : options?.lock !== false;
 	const preserveAnchor = scrollMode === "preserve" && !autoScrollLocked.value ? captureScrollAnchor() : null;
+	// A search jump made after this HTTP request started owns the reader's new
+	// position; its old pre-request anchor must not drag the reader back.
+	const anchorIsCurrent = () => isCurrent() && searchNavigationAtRequest === searchNavigationGeneration;
 	if (conversationUuid.startsWith("local:")) {
 		if (!modelOptions.value.length) await loadOptions();
 		if (!isCurrent()) return;
@@ -3435,7 +3707,7 @@ async function load(options = {}) {
 			await scrollBottom({force: true, cause: "load-local", isCurrent});
 			if (isCurrent() && bottomScroll === pendingLoadBottomScroll) pendingLoadBottomScroll = null;
 		} else if (preserveAnchor) {
-			await restoreScrollAnchor(preserveAnchor, {isCurrent});
+			await restoreScrollAnchor(preserveAnchor, {isCurrent: anchorIsCurrent});
 		} else {
 			await nextTick();
 			if (!isCurrent()) return;
@@ -3471,7 +3743,7 @@ async function load(options = {}) {
 			await scrollBottom({force: true, cause: "load", isCurrent});
 			if (isCurrent() && bottomScroll === pendingLoadBottomScroll) pendingLoadBottomScroll = null;
 		} else if (preserveAnchor) {
-			await restoreScrollAnchor(preserveAnchor, {isCurrent});
+			await restoreScrollAnchor(preserveAnchor, {isCurrent: anchorIsCurrent});
 		} else {
 			await nextTick();
 			if (!isCurrent()) return;
@@ -3600,11 +3872,16 @@ async function send() {
 		attachments,
 		previewUrls: sentPreviewUrls,
 		wasRunning,
+		editorDraft: "",
+		localFolderId: props.folderId || "",
+		localRunConfig: isLocalConversation.value && localDefaultsFolderId === String(props.folderId || "") ? completeLocalRunConfig() : null,
+		sendFrameSeq: timelinePageInitialized && timelinePageConversationUuid === activeConversationUuid.value ? lastFrameSeq.value : 0,
 		optimisticId: "",
 	});
 	if (!pending) return;
 	const generation = ++sendAttemptGeneration;
 	const isCurrent = () => componentMounted && outboundSends.isCurrent(pending) && generation === sendAttemptGeneration;
+	setUploadProgress(pending.conversationUuid, Object.fromEntries(attachments.map(item => [item.id, {phase: "preparing", percent: 0}])));
 	sendPending.value = true;
 	// The editor can clear immediately, but preparation is still safely unsent.
 	setDraftForConversation(pending.conversationUuid, pending.draftText);
@@ -3635,26 +3912,35 @@ async function send() {
 		if (!isCurrent()) return;
 		const conversationUuid = await ensureServerConversationForSend(finalText, pending);
 		if (!isCurrent()) return;
-		setDraftForConversation(conversationUuid, restoreOutboundDraft(pending.draftText, draft.value));
+		// Do not read B's editor when preparation finishes offscreen. Keep A's
+		// reloadable recovery text even across local draft -> server ID migration.
+		setDraftForConversation(conversationUuid, restoreOutboundDraft(pending.draftText,
+			conversationUuid === activeConversationUuid.value ? draft.value : pending.editorDraft));
 		let uploadedFiles = [];
 		if (files.length) {
 			pending.uploadController = new AbortController();
 			outboundSends.markUploading(pending);
-			status.value = "上传附件中";
+			if (conversationUuid === activeConversationUuid.value) status.value = "上传附件中";
 			uploadedFiles = await Api.uploadConversationFiles(conversationUuid, files, {
 				signal: pending.uploadController.signal,
-				onProgress: ({loaded, total, fileIndex, fileCount}) => {
+				onProgress: ({loaded, total, fileIndex, fileCount, fileLoaded, fileSize, phase}) => {
 					if (!isCurrent()) return;
-					const percent = total ? Math.min(100, Math.floor(loaded * 100 / total)) : 100;
-					status.value = `上传附件 ${fileIndex + 1}/${fileCount} · ${percent}%${loaded >= total ? " · 保存中" : ""}`;
+					const percent = fileSize ? Math.min(100, Math.floor(fileLoaded * 100 / fileSize)) : 100;
+					const progress = {...(uploadProgressByConversation.value[draftKey(conversationUuid)] || {})};
+					progress[attachments[fileIndex].id] = {phase, percent};
+					setUploadProgress(conversationUuid, progress);
+					if (conversationUuid === activeConversationUuid.value) {
+						const overall = total ? Math.min(100, Math.floor(loaded * 100 / total)) : 100;
+						status.value = `上传附件 ${fileIndex + 1}/${fileCount} · ${overall}%${phase === "finalizing" ? " · 保存中" : ""}`;
+					}
 				},
 			});
 			if (!isCurrent()) return;
 			outboundSends.markPrepared(pending);
-			status.value = "提交中";
+			if (conversationUuid === activeConversationUuid.value) status.value = "提交中";
 		}
 		if (!isCurrent()) return;
-		const sock = await ensureResponsiveWs(conversationUuid, isCurrent);
+		const sock = await responsiveOutboundSocket(pending, isCurrent);
 		if (!isCurrent()) return;
 		pending.storageReleased = true;
 		if (attachments.length) {
@@ -3664,13 +3950,15 @@ async function send() {
 			if (!isCurrent()) return;
 			if (!cleared) throw new Error("attachment_draft_clear_failed");
 		}
-		setDraftForConversation(conversationUuid, draft.value);
+		// The preparation copy was kept for recovery; release only its own text.
+		const ownDraft = conversationUuid === activeConversationUuid.value ? draft.value : pending.editorDraft;
+		setDraftForConversation(conversationUuid, ownDraft);
 		sock.send(JSON.stringify({type: "send", requestId, text, files: uploadedFiles, referenceOrder}));
 		outboundSends.markSent(pending);
 		emit("conversations-refresh");
 	} catch (error) {
 		if (!isCurrent()) return;
-		localToServerTransitionUuid.value = "";
+		if (pending.conversationUuid === activeConversationUuid.value) localToServerTransitionUuid.value = "";
 		restorePendingOutboundSend(requestId, "send_failed");
 		ElMessage.error(apiError(error));
 		await load({
@@ -3683,7 +3971,7 @@ async function send() {
 }
 
 async function stop() {
-	if (outboundSends.current?.phase === "uploading") {
+	if (outboundSends.current?.phase === "uploading" && outboundSends.current.conversationUuid === activeConversationUuid.value) {
 		leavePendingSend();
 		status.value = "上传已取消，草稿和附件已保留";
 		return;
@@ -3735,7 +4023,13 @@ async function switchConversation(next, prev) {
 	readingAnchor = null;
 	pendingLoadBottomScroll = null;
 	runConfigInteractionGeneration += 1;
-	if (prev) setDraftForConversation(prev, draft.value);
+	if (prev) {
+		const pending = outboundSends.current;
+		if (pending && draftKey(pending.conversationUuid) === draftKey(prev)) {
+			pending.editorDraft = draft.value;
+			setDraftForConversation(prev, restoreOutboundDraft(pending.draftText, draft.value));
+		} else setDraftForConversation(prev, draft.value);
+	}
 	resetAgentAutoOpenBoundary();
 	const isLocalToServerSend = String(prev || "").startsWith("local:")
 		&& next
@@ -3750,10 +4044,9 @@ async function switchConversation(next, prev) {
 		agentAutoOpenBoundaryConversation = String(next || "");
 		return;
 	}
-	// Park this conversation's files before the released send hands its own files
-	// back, so both end up in the same place.
+	// Park this conversation's files without interrupting its upload/send.
 	if (attachmentsLoadedKey) stashAttachmentsForConversation(attachmentsLoadedKey);
-	leavePendingSend();
+	// Keep the outgoing send alive; it retains its own conversation and socket.
 	runConfigOverride.value = null;
 	pinnedActiveTurnIndex = null;
 	readingAnchor = null;
@@ -3779,7 +4072,7 @@ watch(() => props.conversationUuid, async (next, prev) => {
 
 watch(() => props.folderId, (next, prev) => {
 	if (next === prev || !isLocalConversation.value) return;
-	leavePendingSend();
+	if (outboundSends.current?.conversationUuid === activeConversationUuid.value) leavePendingSend();
 	localDefaultsFolderId = null;
 	localFolderDefaults = {};
 	localDefaultsOverrides = {};
@@ -3870,6 +4163,8 @@ onBeforeUnmount(() => {
 	leavePendingSend();
 	pendingLoadBottomScroll = null;
 	componentMounted = false;
+	searchNavigationGeneration += 1;
+	if (searchHighlightTimer) window.clearTimeout(searchHighlightTimer);
 	conversationStateRequests.invalidate();
 	operationFrameBuffer.reset();
 	toolDetailCache.reset("");
@@ -3901,6 +4196,7 @@ onBeforeUnmount(() => {
 				:context-display="contextDisplay"
 				:tokens-text="totalTokensDisplay"
 				:tokens-detail="totalTokensDetail"
+				:cache-percent-text="cachePct(totalTokenParts.cache, totalTokenParts.input)"
 				:duration-ms="totalDurationMs"
 				:cost-text="totalCostDisplay"
 			>
@@ -3916,7 +4212,9 @@ onBeforeUnmount(() => {
 						:auto-scroll-locked="autoScrollLocked"
 						:hidden-count="hiddenMessageCount"
 						@open-hidden="messageVisibility.managing.value = true"
+						@open-search="searchOpen = true"
 						@open-memory="taskMemoryDrawer?.open()"
+						@open-context="contextEditor?.open()"
 						@toggle-scroll-lock="toggleAutoScrollLock"
 						@scroll-to-turn="scrollToTurnIndex"
 					/>
@@ -3925,7 +4223,12 @@ onBeforeUnmount(() => {
 
 			<div class="console-workspace min-h-0 flex-1">
 				<div class="conversation-column min-w-0">
-					<div
+					<div v-if="searchReturnPosition" class="search-return-bar" role="status">
+					<span>{{ searchLocating ? '正在定位历史消息…' : '正在阅读搜索定位内容' }}</span>
+					<button type="button" @click="returnFromSearch">返回原位置</button>
+					<button type="button" @click="returnToLatestFromSearch">最新消息</button>
+				</div>
+				<div
 						v-if="timelinePageInFlight"
 						class="timeline-page-loading"
 						role="status"
@@ -3935,7 +4238,7 @@ onBeforeUnmount(() => {
 						<span>正在加载更早内容…</span>
 					</div>
 
-			<div ref="scroller" class="min-h-0 flex-1 overflow-y-auto console-scroll"
+			<div ref="scroller" :inert="contextEditorOpen" class="min-h-0 flex-1 overflow-y-auto console-scroll"
 			     @scroll.passive="handleScrollerScroll"
 			     @wheel="handleScrollerWheel"
 			     @touchstart.passive="handleScrollerTouchStart"
@@ -3983,12 +4286,17 @@ onBeforeUnmount(() => {
 				</div>
 			</div>
 			
-			<MessageVisibilityBar/>
-			<aside class="console-controls" aria-label="会话工具与导航">
+			<MessageVisibilityBar v-show="!contextEditorOpen"/>
+			<ConversationSearch :conversation-uuid="activeConversationUuid" v-model:open="searchOpen" @locate="locateSearchResult"/>
+			<ContextEditor v-if="!isLocalConversation" ref="contextEditor" :conversation-uuid="activeConversationUuid" :busy="running" @open-change="contextEditorOpen = $event" @created="emit('conversation-created', $event.conversationUuid)"/>
+			<aside class="console-controls" v-show="!contextEditorOpen" :inert="contextEditorOpen" aria-label="会话工具与导航">
 				<el-tooltip v-if="!isLocalConversation" :content="hiddenMessageCount ? `隐藏内容 · ${hiddenMessageCount} 条` : '隐藏内容'" placement="left" :show-after="260">
 					<button type="button" class="hidden-content-toggle" :class="{populated: hiddenMessageCount > 0}" :aria-label="`管理隐藏内容，${hiddenMessageCount} 条`" @click="messageVisibility.managing.value = true">
 						<Hide/><span v-if="hiddenMessageCount" class="hidden-content-count">{{ hiddenMessageCount > 99 ? '99+' : hiddenMessageCount }}</span>
 					</button>
+				</el-tooltip>
+				<el-tooltip v-if="!isLocalConversation" content="搜索此会话" placement="left" :show-after="260">
+					<button type="button" class="search-content-toggle" aria-label="搜索此会话" @click="searchOpen = true"><Search/></button>
 				</el-tooltip>
 				<TaskMemoryDrawer ref="taskMemoryDrawer" :conversation-uuid="activeConversationUuid"/>
 			<TurnMinimap
@@ -4017,12 +4325,15 @@ onBeforeUnmount(() => {
 			</aside>
 			
 			<ConsoleComposer
+				v-show="!contextEditorOpen"
+				:inert="contextEditorOpen"
 				ref="composer"
 				v-model:draft="draft"
 				:conversation-uuid="activeConversationUuid"
 				v-model:model-query="modelQuery"
 				:pending-attachments="pendingAttachments"
 				:attachment-previews="attachmentPreviews"
+				:upload-progress="activeUploadProgress"
 				:pending-confirmations="pendingConfirmations"
 				:confirmation-submitting="confirmationSubmitting"
 				:confirmation-errors="confirmationErrors"
@@ -4060,6 +4371,9 @@ onBeforeUnmount(() => {
 				:context-threshold-display="contextThresholdDisplay"
 				:context-window-display="contextWindowDisplay"
 				:context-percent-display="contextPercentDisplay"
+				:tokens-text="totalTokensDisplay"
+				:cache-percent-text="cachePct(totalTokenParts.cache, totalTokenParts.input)"
+				:duration-text="totalDurationDisplay"
 				:cost-text="totalCostDisplay"
 				@attachment-change="$event.forEach(addAttachment)"
 				@remove-attachment="removeAttachment"
@@ -4089,8 +4403,20 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.hidden-content-toggle {
+.search-content-toggle {
 	position: fixed; right: var(--console-float-rail-right); top: calc(var(--console-float-rail-top) - var(--console-float-control-size) - var(--console-float-control-gap));
+	z-index: 32; display: grid; place-items: center; width: var(--console-float-control-size); height: var(--console-float-control-size);
+	border: 1px solid transparent; border-radius: 7px; background: var(--ob-chat-bg); color: var(--ob-chat-subtle); cursor: pointer;
+}
+.search-content-toggle:hover { color: var(--ob-chat-text); border-color: var(--ob-chat-line); background: var(--ob-chat-selected); }
+.search-content-toggle:focus-visible { outline: 2px solid var(--ob-chat-subtle); outline-offset: 3px; }
+.search-content-toggle svg { width: 17px; height: 17px; }
+.search-return-bar { position: absolute; z-index: 25; top: 10px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; max-width: calc(100% - 16px); padding: 6px 9px; border: 1px solid var(--ob-chat-line); border-radius: 9px; box-shadow: var(--ob-shadow-panel); background: var(--ob-chat-bg); color: var(--ob-chat-muted); font-size: 12px; white-space: nowrap; }
+.search-return-bar button { min-height: 32px; padding: 0 7px; border: 0; border-radius: 6px; background: var(--ob-chat-selected); color: var(--ob-chat-text); cursor: pointer; }
+.console-scroll :deep(.search-hit-highlight) { outline: 2px solid var(--ob-blue); outline-offset: 3px; border-radius: 8px; }
+@media (max-width: 760px) { .search-return-bar { top: 6px; gap: 3px; font-size: 11px; } .search-return-bar button { padding-inline: 5px; } }
+.hidden-content-toggle {
+	position: fixed; right: var(--console-float-rail-right); top: calc(var(--console-float-rail-top) - 2 * (var(--console-float-control-size) + var(--console-float-control-gap)));
 	z-index: 32; display: grid; place-items: center; width: var(--console-float-control-size); height: var(--console-float-control-size);
 	border: 1px solid transparent; border-radius: 7px; background: var(--ob-chat-bg); color: var(--ob-chat-subtle);
 	box-shadow: none; cursor: pointer; transition: color .15s ease, border-color .15s ease, right .24s ease;
@@ -4114,8 +4440,8 @@ onBeforeUnmount(() => {
 	--console-float-control-gap: 8px;
 	--console-float-minimap-top: calc(
 		var(--console-float-rail-top)
-		+ var(--console-float-control-size)
-		+ var(--console-float-control-gap)
+		+ var(--console-float-control-size) * 2
+		+ var(--console-float-control-gap) * 2
 	);
 	--console-float-rail-bottom: calc(var(--console-composer-height, 135px) + 50px);
 	font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;

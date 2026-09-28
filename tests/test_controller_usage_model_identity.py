@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agent.runs import RunRegistry
+from app.runtime.scheduler import ControllerRuns
 from app.db.dao import MessageDAO
 from app.llm.base import AgentResult
 from app.llm.events import StreamEvent, Usage
@@ -25,7 +25,7 @@ web_env = shared_web_env
 async def test_model_switch_usage_identity_and_manual_gate(web_env, monkeypatch, tmp_path, timing, switches):
     env = web_env
     cookie = {"openbear_web_session": await _login_cookie(env)}
-    env.server.runs = RunRegistry()
+    env.server.runs = ControllerRuns()
     env.server.model_selection = ModelSelection(env.server.config.models, tmp_path / "unused-model-selection.json")
     models = env.server.config.models.providers["openai"].models
     models[0].rollover_trigger_tokens = 64000

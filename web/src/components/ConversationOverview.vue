@@ -138,5 +138,8 @@ onBeforeUnmount(release);
 .overview-counts dd{margin:3px 0 0;font-size:16px;line-height:1.5;font-weight:500;overflow-wrap:anywhere}
 .overview-cost{padding:10px 1px 0}
 .overview-state.has-error{color:var(--ob-text)}
+@media (max-width:760px), (any-pointer:coarse) {
+ .overview-heading button{width:44px;height:44px;margin:-8px -6px 0 0}
+}
 
 </style>

@@ -136,7 +136,7 @@ def _svc(tmp_path=None) -> SimpleNamespace:
         apply_config=apply_config,
         applied=applied,
         runs=SimpleNamespace(count=lambda: 0),
-        rath=SimpleNamespace(count=lambda: 0),
+        agents=SimpleNamespace(count=lambda: 0),
     )
 
 

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import {applyOperationFrame,isRootRunTerminalFrame,isTerminalOperationFrame,normalizeOperations,shouldApplyOperationFrame} from '../../timelineProjection.js';
+import {applyOperationFrame,deriveOperationRunState,projectOperationMessages,isRootRunTerminalFrame,isTerminalOperationFrame,normalizeOperations,shouldApplyOperationFrame} from '../../timelineProjection.js';
 import {mergeOperationSnapshots} from './timelinePagination.js';
 import {createOperationFrameBuffer} from './operationFrameBuffer.js';
 
@@ -17,10 +17,11 @@ const tick=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
 function harness(){
   const requests=[],loads=[],connections=[],flushes=[],timers=new Map();let nextTimer=0;
   const props={conversationUuid:'A'};
-  const snapshot=deferred();
+  const snapshot=deferred(),stateReadStarted=deferred();
   const context=vm.createContext({
     Map,props,console:{warn(){}},applyOperationFrame,normalizeOperations,mergeOperationSnapshots,shouldApplyOperationFrame,
-    stateStatsByOpId:new Map(),chatState:{value:null},
+    deriveOperationRunState,projectOperationMessages,
+    stateStatsByOpId:new Map(),chatState:{value:null},searchWindowActive:{value:false},
     mergeLedgerUsageIntoState(){},operationScrollImpact:()=> 'none',mergeScrollImpact:()=> 'none',
     isRootRunTerminalFrame,isTerminalOperationFrame,scheduleProjectedMessagesFlush:options=>flushes.push(options),
     operationFrameBuffer:createOperationFrameBuffer(),conversationStateRequests:{pending:false},
@@ -31,7 +32,7 @@ function harness(){
     debugFrames(){},operationDebugRow:x=>x,
     outboundSends:{current:null,checkDeadline(){}},
     Api:{conversationFrames:(uuid,after,limit)=>{const request={uuid,after,limit,...deferred()};requests.push(request);return request.promise;}},
-    load:options=>{loads.push(options);return snapshot.promise;},
+    load:options=>{loads.push(options);stateReadStarted.resolve();return snapshot.promise;},
     connectWs:async uuid=>{connections.push(uuid);return vm.runInContext('ws',context);},
     waitForSocketOpen:async()=>{},probeSocket:async()=>{},closeWs(){},
   });
@@ -50,7 +51,7 @@ function harness(){
     ${between('function checkConnectionOnResume()', 'async function ensureServerConversationForSend(')}
   `,context);
   const run=code=>vm.runInContext(code,context);
-  return {context,props,requests,loads,connections,flushes,timers,snapshot,run};
+  return {context,props,requests,loads,connections,flushes,timers,snapshot,stateReadStarted,run};
 }
 const missingFrames=()=>Array.from({length:1000},(_,i)=>({opId:`retained-tool-${i}`,opType:'tool',action:'end',revision:2,frameSeq:i+11,displaySeq:i+60,payload:{status:'completed'}}));
 
@@ -101,6 +102,69 @@ test('old probe failure cannot close the same conversation healthy replacement s
   h.run("ws={id:'healthy-replacement'}");probe.reject(new Error('old lost'));
   await h.run('connectionResumePromise');
   assert.deepEqual(closed,[]);assert.equal(h.loads.length,0);
+});
+
+test('healthy foreground pong still fetches fresh messages and converges a missed terminal state',async()=>{
+  const h=harness();
+  h.run(`loadOperationsFromState({frameSeq:40000,operations:[
+    {opId:'run:root',opType:'run',revision:1,displaySeq:1,status:'running',lifecycle:'active',targetType:'run',turnUuid:'root',runRootTurnId:'root',payload:{status:'running'}}
+  ]})`);
+  assert.equal(h.run('deriveOperationRunState(orderedOperationsList()).running'),true);
+  for(let i=0;i<5;i++)h.run('checkConnectionOnResume()');
+  await tick();assert.equal(h.loads.length,1,'focus/pageshow/visibility bursts share a single fresh read');
+  assert.equal(h.loads[0].fresh,true);assert.equal(h.loads[0].scrollMode,'preserve');
+  assert.equal(h.loads[0].manageLoading,false);
+  // The HTTP seam delivers the missed answer and durable terminal snapshot to
+  // the actual state reducer; a successful pong alone cannot supply either.
+  h.run(`loadOperationsFromState({frameSeq:40003,operations:[
+    {opId:'run:root',opType:'run',revision:2,displaySeq:1,status:'completed',lifecycle:'terminal',targetType:'run',turnUuid:'root',runRootTurnId:'root',payload:{status:'completed'}},
+    {opId:'answer',opType:'assistant_message',revision:1,displaySeq:2,status:'completed',lifecycle:'terminal',turnUuid:'root',runRootTurnId:'root',payload:{text:'后台已完成的回答',complete:true}}
+  ]},{merge:true})`);
+  assert.equal(h.run('deriveOperationRunState(orderedOperationsList()).running'),false);
+  assert.equal(h.run("projectOperationMessages(orderedOperationsList()).find(message=>message.role==='assistant').localTimeline[0].message.content"),'后台已完成的回答');
+  h.snapshot.resolve({applied:true});await h.run('connectionResumePromise');
+  assert.equal(h.run('connectionResumePromise'),null);
+});
+
+test('an upload owned by another conversation no longer suppresses foreground recovery',async()=>{
+  const h=harness(),pending={phase:'uploading',conversationUuid:'B',sendSocket:{id:'send-b'}};
+  h.context.outboundSends.current=pending;
+  h.run('checkConnectionOnResume()');await tick();
+  assert.equal(h.loads.length,1);assert.equal(h.loads[0].conversationUuid,'A');
+  assert.equal(h.context.outboundSends.current,pending);assert.equal(pending.sendSocket.id,'send-b');
+  h.snapshot.resolve({applied:true});await h.run('connectionResumePromise');
+});
+
+test('returning from background supersedes a suspended recovery without stale finalizer ownership',async()=>{
+  const h=harness(),probes=[deferred(),deferred()];let count=0;
+  h.context.probeSocket=()=>probes[count++].promise;
+  h.run('checkConnectionOnResume()');await tick();const old=h.run('connectionResumePromise');
+  h.context.document.visibilityState='hidden';h.run('checkConnectionOnResume()');
+  assert.equal(h.run('connectionResumePromise'),null);
+  h.context.document.visibilityState='visible';h.run('checkConnectionOnResume()');await tick();
+  const current=h.run('connectionResumePromise');assert.notEqual(current,old);
+  probes[0].resolve();await old;assert.equal(h.loads.length,0);assert.equal(h.run('connectionResumePromise'),current);
+  probes[1].resolve();await tick();assert.equal(h.loads.length,1);
+  h.snapshot.resolve({applied:true});await current;
+});
+
+test('failed foreground probe reconnects only the timeline and still requests a fresh state',async()=>{
+  const h=harness(),closed=[];
+  h.context.probeSocket=async()=>{throw new Error('half-open');};
+  h.context.closeWs=()=>closed.push('timeline');
+  h.run('checkConnectionOnResume()');await h.stateReadStarted.promise;
+  assert.deepEqual(closed,['timeline']);assert.deepEqual(h.connections,['A','A']);
+  assert.equal(h.loads.length,1);assert.equal(h.loads[0].fresh,true);
+  h.snapshot.resolve({applied:true});await h.run('connectionResumePromise');
+});
+
+test('foreground refresh response is guarded after navigation or unmount',async()=>{
+  for(const stale of [h=>{h.props.conversationUuid='B';},h=>h.run('componentMounted=false')]) {
+    const h=harness();h.run('checkConnectionOnResume()');await tick();
+    assert.equal(h.loads[0].isCurrent(),true);stale(h);
+    assert.equal(h.loads[0].isCurrent(),false);
+    h.snapshot.resolve({applied:false});await h.run('connectionResumePromise');
+  }
 });
 
 test('1000 retained deltas without their base stop replay and request exactly one full snapshot',async()=>{

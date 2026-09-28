@@ -12,8 +12,8 @@ import pytest
 from app.db.engine import DB
 from app.llm.base import AgentResult
 from app.llm.events import ToolCall
-from app.rath.dao import RathDAO
-from app.rath.plan import PlanError
+from app.agents.dao import AgentDAO
+from app.agents.plan import PlanError
 from app.task_memory import TaskMemoryDAO
 from app.tools.base import ToolRuntimeContext
 from tests.test_agent_continuity import call
@@ -133,8 +133,8 @@ async def test_new_round_keeps_control_facts_but_not_old_ack_or_native_state(env
 async def test_direct_to_managed_is_new_round_with_preapproval_gate(env, monkeypatch):
     dao, reg, backend, ctx, manager = env
     first = await call(reg, "Agent", {"prompt": "investigation", "tools": ["Read"]}, ctx)
-    monkeypatch.setattr(_FakeConfig.rath, "agent_plan_enabled", True)
-    monkeypatch.setattr(_FakeConfig.rath, "agent_model_call_limit", 1)
+    monkeypatch.setattr(_FakeConfig.agents, "agent_plan_enabled", True)
+    monkeypatch.setattr(_FakeConfig.agents, "agent_model_call_limit", 1)
 
     async def notification(payload):
         pass
@@ -222,7 +222,7 @@ async def test_startup_migrates_real_legacy_scope_without_losing_uuid_revision_o
 
 
 async def test_instance_web_endpoint_separates_presets_and_never_exposes_checkpoint(web_env):
-    dao = web_env.server.rath_dao
+    dao = web_env.server.agent_dao
     wf = await dao.workflow_by_slug("single-agent")
     kwargs = dict(openbear_session_uuid="conversation-instance", chat_id=123, workflow_uuid=wf.workflow_uuid, agent_key="same")
     a = await dao.create_agent_instance(**kwargs)
@@ -286,7 +286,7 @@ async def test_window_continuation_keeps_same_instance_memory_without_summary(en
 
 @pytest.mark.parametrize("clean_task_history", [False, True])
 async def test_duplicate_conversation_preserves_instance_head_and_rewrites_private_references(web_env, clean_task_history):
-    dao = web_env.server.rath_dao
+    dao = web_env.server.agent_dao
     source = await web_env.server._create_web_conversation(123, title="instance-copy")
     chat_id, conversation = int(source["internal_chat_id"]), source["conversation_uuid"]
     wf = await dao.workflow_by_slug("single-agent")

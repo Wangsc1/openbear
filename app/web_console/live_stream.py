@@ -816,7 +816,6 @@ class _WebDBPersister:
         self._artifact_rewriter = artifact_rewriter
         self.saved_assistant = False
         self.saved_message_ids: list[int] = []
-        self._pending_tool_assistant: dict[str, Any] | None = None
         self._unbound_sources: list[dict[str, Any]] = []
         self.window_runtime: Any = None
 
@@ -877,74 +876,40 @@ class _WebDBPersister:
             return content
         return await self._artifact_rewriter(content)
 
-    async def _flush_pending_tool_assistant(self) -> None:
-        pending = self._pending_tool_assistant
-        if not pending:
-            return
-        self._pending_tool_assistant = None
-        content = await self._rewrite_assistant_content(str(pending.get("content") or ""))
-        tool_calls = pending.get("tool_calls") or []
-        tool_call_ids = [str(getattr(item, "id", "") or "") for item in tool_calls]
-        tool_call_ids = [item for item in tool_call_ids if item]
-        await self._store_message(
-            "assistant", content,
-            reasoning=str(pending.get("reasoning") or ""),
-            signature=str(pending.get("signature") or ""),
-            tool_calls=tool_calls or None,
-            tokens=estimate_tokens(content) if content else 0,
-            extra={"hasToolCalls": True, "toolCallIds": tool_call_ids},
-        )
-        self.saved_assistant = True
-
     async def save_assistant(self, *, content: str, reasoning: str, signature: str,
                              tool_calls: list[Any],
                              native_output_items: list[dict[str, Any]] | None = None) -> None:
-        # Opaque items must never enter messages or any Web binding metadata.
+        # Transcript acceptance is durable before dispatch, independently of
+        # card creation. Stable tool ids bind projections created later.
         del native_output_items
         if not content and not reasoning and not tool_calls:
             return
         content = await self._rewrite_assistant_content(content)
-        if tool_calls:
-            # Do not persist a bare assistant tool_call before the long-running
-            # Web tool result exists.  During refresh, the browser already has
-            # live tool progress; an early DB row makes the same Agent
-            # render twice (persisted "running" card + live progress card).
-            # Flush it immediately before the first tool result so the stored
-            # transcript still remains a valid assistant/tool pair.
-            self._pending_tool_assistant = {
-                "content": content,
-                "reasoning": reasoning,
-                "signature": signature,
-                "tool_calls": tool_calls,
-            }
-            return
-        await self._flush_pending_tool_assistant()
         await self._store_message(
-            "assistant", content,
-            reasoning=reasoning, signature=signature,
-            tool_calls=None,
+            "assistant", content, reasoning=reasoning, signature=signature,
+            tool_calls=tool_calls or None,
             tokens=estimate_tokens(content) if content else 0,
+            extra={"hasToolCalls": True, "toolCallIds": [c.id for c in tool_calls if c.id]} if tool_calls else None,
         )
         self.saved_assistant = True
 
     async def save_tool_result(self, *, tool_call_id: str, name: str, content: str,
                                duration_ms: int = 0) -> None:
-        await self._flush_pending_tool_assistant()
         await self._store_message(
             "tool", content,
             tool_call_id=tool_call_id, name=name,
             tokens=estimate_tokens(content),
             extra={"toolCallId": tool_call_id, "toolName": name, "durationMs": duration_ms},
         )
+        from app.runtime.lifecycle import current_session
+        session = current_session()
+        outcome = session.tool_outcome if session else None
+        status = getattr(outcome, "status", "unknown")
         await self._m.add_tool_call(
-            self._chat_id,
-            session_uuid=self._session_uuid,
-            tool_name=name,
-            status="error" if (str(content or "").startswith("[错误]") or str(content or "").startswith("error:")) else "ok",
-            duration_ms=duration_ms,
-            result_size=len((content or "").encode("utf-8")),
-            error_type=str(content or "").split("\n", 1)[0][:120]
-            if (str(content or "").startswith("[错误]") or str(content or "").startswith("error:")) else "",
+            self._chat_id, session_uuid=self._session_uuid, tool_name=name,
+            status={"completed": "ok", "failed": "error"}.get(status, status),
+            duration_ms=duration_ms, result_size=len((content or "").encode("utf-8")),
+            error_type=status if status in {"failed", "denied", "cancelled"} else "",
         )
 
     async def save_user(self, *, content: str, metadata: dict[str, Any] | None = None) -> None:

@@ -24,12 +24,19 @@ test("phone memory and other tools are in the header menu, not a permanent rail"
   assert.equal(mobile(minimapSource, ".turn-minimap").display, "none");
   assert.match(consoleSource, /<MobileConversationTools/);
   assert.match(consoleSource, /@open-memory="taskMemoryDrawer\?\.open\(\)"/);
+  assert.match(consoleSource, /@open-context="contextEditor\?\.open\(\)"/);
+  const template = parse(consoleSource).descriptor.template.content;
+  assert.ok(template.indexOf('<ContextEditor') < template.indexOf('class="console-controls"'), 'editor overlay must not be inside the mobile-hidden rail');
+  const editorStyles = readFileSync(new URL('./contextEditor/style.css', import.meta.url), 'utf8');
+  assert.match(editorStyles, /@media\s*\(max-width:\s*760px\)\s*\{\s*\.context-editor-entry\s*\{\s*display:\s*none;/);
+  const menu = readFileSync(new URL('./MobileConversationTools.vue', import.meta.url), 'utf8');
+  assert.match(menu, /chooseAction\('open-context'\)/);
   assert.match(source, /defineExpose\(\{open: openDrawer\}\)/);
   assert.match(source, /async function openDrawer\(\) \{\s*if \(!usableConversationUuid\.value\) return;/);
 });
 
-test("desktop quick navigation follows task memory without an unused work-detail slot", () => {
-  assert.match(consoleSource, /--console-float-minimap-top:\s*calc\(\s*var\(--console-float-rail-top\)\s*\+ var\(--console-float-control-size\)\s*\+ var\(--console-float-control-gap\)\s*\)/);
+test("desktop quick navigation follows task memory and the context editor slot", () => {
+  assert.match(consoleSource, /--console-float-minimap-top:\s*calc\(\s*var\(--console-float-rail-top\)\s*\+ var\(--console-float-control-size\) \* 2\s*\+ var\(--console-float-control-gap\) \* 2\s*\)/);
   assert.match(minimapSource, /top:\s*var\(--console-float-minimap-top/);
 });
 
@@ -39,8 +46,8 @@ test("floating and composer controls use Element Plus tooltips instead of native
   assert.doesNotMatch(consoleSource, /:title="autoScrollLocked/);
   assert.match(minimapSource, /<el-tooltip[\s\S]*?:content="turnNavLabel\(turn, idx\)"[\s\S]*?placement="left"/);
   assert.doesNotMatch(minimapSource, /:title=/);
-  assert.doesNotMatch(composerSource, /\btitle=/);
-  for (const label of ["移除附件", "新话题（Ctrl+N）", "上传图片或附件", "清空草稿", "停止生成", "发送消息（Enter）"]) {
+  assert.doesNotMatch(composerSource, /<button\b[^>]*\btitle=/, 'action buttons use Element Plus tooltips; read-only totals may retain native descriptions');
+  for (const label of ["移除附件", "新话题（Ctrl+N）", "上传图片或附件", "清空草稿", "停止生成", "发送消息（Enter；触屏可用 Ctrl/⌘+Enter）"]) {
     assert.ok(composerSource.includes(`content="${label}"`), `missing Element Plus tooltip: ${label}`);
   }
   assert.match(composerSource, /aria-label="运行配置"/);

@@ -259,7 +259,7 @@ async def test_skill_uninstall_refuses_while_execution_is_active(skills_admin_en
     if active_kind == "openbear":
         env.server.runs = SimpleNamespace(count=lambda: 1)
     elif active_kind == "rath":
-        env.server.rath = SimpleNamespace(count=lambda: 1)
+        env.server.agents = SimpleNamespace(count=lambda: 1)
     else:
         monkeypatch.setattr(
             "app.web_console.system_mcp_api.processes.active",

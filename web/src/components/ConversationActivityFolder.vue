@@ -1,9 +1,10 @@
 <script setup>
-import {computed, onBeforeUnmount, onMounted, ref, watch} from "vue";
+import {computed, onBeforeUnmount, onMounted, ref} from "vue";
 import {ArrowRight, Check, Folder, FolderOpened, MoreFilled} from "@element-plus/icons-vue";
 import {activityLabel, activityState} from "../conversationActivity.js";
 import {referenceItem} from "../references/catalog.js";
 import AnimatedConversationTitle from "./AnimatedConversationTitle.vue";
+import {useRecentConversationRows} from "./conversationRecentRows.js";
 const props = defineProps({
   items: {type: Array, default: () => []},
   recentItems: {type: Array, default: () => []},
@@ -50,39 +51,7 @@ function rowLabel(item) {
 function rowTitle(item) {
   return statusLabel(item) || (interactionAt(item) > 0 ? `最后交互：${new Date(interactionAt(item)).toLocaleString()}` : activityLabel(item));
 }
-const selectedRow = ref(null);
-watch(() => [props.items, props.activeConversationUuid, props.readVersions], () => {
-  const current = props.items.find(item => item.conversationUuid === props.activeConversationUuid);
-  if (current) selectedRow.value = current;
-  else if (selectedRow.value?.conversationUuid !== props.activeConversationUuid
-    || !selectedRow.value?.activityVersion
-    || Number(props.readVersions.get(props.activeConversationUuid) || 0) < selectedRow.value.activityVersion) selectedRow.value = null;
-}, {immediate: true});
-const visibleItems = computed(() => {
-  const items = [...props.items];
-  if (selectedRow.value && !items.some(item => item.conversationUuid === selectedRow.value.conversationUuid)) {
-    items.push({...selectedRow.value, running: false, activityUnread: false, readWhileSelected: true});
-  }
-  return items;
-});
-const recent = computed(() => [...new Map((props.recentItems || [])
-  .filter(item => item?.conversationUuid && !item.archived && !item.local && Number(item.lastInteractionAtMs) > 0)
-  .map(item => [item.conversationUuid, item])).values()]
-  .sort((a, b) => Number(b.lastInteractionAtMs) - Number(a.lastInteractionAtMs) || a.conversationUuid.localeCompare(b.conversationUuid))
-  .slice(0, 5));
-const rows = computed(() => {
-  const unique = new Map(recent.value.map(item => [item.conversationUuid, item]));
-  for (const item of visibleItems.value) {
-    if (!item?.conversationUuid || item.archived || item.local) continue;
-    const current = unique.get(item.conversationUuid);
-    // Current live status wins; a selected-row retention snapshot must never
-    // overwrite a newer recent result or create a second row for it.
-    if (!current || !item.readWhileSelected) unique.set(item.conversationUuid, {...current, ...item});
-  }
-  // The five-item limit applies to ordinary recents, not outstanding work.
-  return [...unique.values()].sort((a, b) => interactionAt(b) - interactionAt(a)
-    || a.conversationUuid.localeCompare(b.conversationUuid));
-});
+const {rows} = useRecentConversationRows(props);
 const unreadCount = computed(() => rows.value.filter(item => item.activityUnread).length);
 const waitingCount = computed(() => rows.value.filter(item => rowState(item) === "waiting").length);
 </script>
@@ -161,7 +130,7 @@ const waitingCount = computed(() => rows.value.filter(item => rowState(item) ===
 @keyframes activity-spin { to { transform: rotate(360deg); } }
 /* Keep the running ring, like the ordinary tree: operational status, not decoration. */
 @media (max-width: 760px), (pointer: coarse) {
-  .activity-folder { max-height: 50%; margin: 0 7px 6px; font-size: 13px; }
+  .activity-folder { max-height: 40%; margin: 0 7px 6px; font-size: 13px; }
   .activity-folder button { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
   .activity-folder-heading, .activity-folder-toggle { min-height: 44px; }
   .activity-folder-toggle { gap: 5px; height: 44px; }
@@ -170,14 +139,14 @@ const waitingCount = computed(() => rows.value.filter(item => rowState(item) ===
   .activity-waiting-count { padding: 2px 4px; font-size: 12px; }
   .activity-touch-label { display: inline; white-space: nowrap; font-size: 12px; }
   .activity-read-all { display: flex; flex: 0 0 auto; gap: 4px; width: auto; min-width: 44px; height: 44px; padding: 0 6px; align-items: center; justify-content: center; }
-  .activity-folder-content { max-height: min(36vh, 300px); max-height: min(36dvh, 300px); overflow-x: hidden; -webkit-overflow-scrolling: touch; }
+  .activity-folder-content { max-height: min(28vh, 220px); max-height: min(28dvh, 220px); overflow-x: hidden; -webkit-overflow-scrolling: touch; }
   .activity-row { margin-left: 0; align-items: stretch; }
-  .activity-row-open { gap: 8px; height: auto; min-height: 56px; padding: 7px 6px; }
-  .activity-row-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; align-items: flex-start; gap: 2px; }
-  .activity-row-title { display: -webkit-box; flex: none; width: 100%; white-space: normal; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 18px; }
+  .activity-row-open { gap: 6px; height: 44px; min-height: 44px; padding: 0 6px; }
+  .activity-row-copy { display: flex; flex: 1; min-width: 0; flex-direction: row; align-items: center; gap: 6px; }
+  .activity-row-title { display: block; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 18px; }
   .activity-row-status { font-size: 12px; line-height: 16px; }
   .activity-row-status-desktop { display: none; }
-  .activity-row-status-touch { display: block; }
+  .activity-row-status-touch { display: block; white-space: nowrap; }
   .activity-row-read { align-self: center; flex: 0 0 44px; width: 44px; min-height: 44px; height: 44px; padding: 3px 0; opacity: 1; gap: 0; }
   .activity-row-more { display: grid; align-self: center; flex: 0 0 44px; width: 44px; min-height: 44px; height: 44px; padding: 0; place-items: center; border-radius: 7px; }
   .activity-row-more svg, .activity-read-all svg, .activity-row-read svg { width: 15px; height: 15px; }

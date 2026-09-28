@@ -7,7 +7,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from app.db.engine import DB
-from app.rath.dao import RathDAO
+from app.agents.dao import AgentDAO
 from app.web_console.core import _WEB_SESSION_KEY, WebSession
 from app.web_console.task_memory_api import WebAdminTaskMemoryMixin
 
@@ -15,7 +15,7 @@ from app.web_console.task_memory_api import WebAdminTaskMemoryMixin
 class _TaskMemoryApiHarness(WebAdminTaskMemoryMixin):
     def __init__(self, db: DB) -> None:
         self.db = db
-        self.rath_dao = RathDAO(db)
+        self.agent_dao = AgentDAO(db)
         self.audit_rows: list[dict] = []
 
     async def _conversation_from_request(self, request: web.Request):
@@ -175,7 +175,7 @@ async def test_task_memory_web_api_projection_pagination_cas_and_soft_restore(ta
 
 async def test_task_memory_web_api_agent_task_ownership_parent_session_and_404(task_memory_api):
     client, harness = task_memory_api
-    valid = await harness.rath_dao.create_task(
+    valid = await harness.agent_dao.create_task(
         chat_id=4201,
         workflow_uuid="wf",
         title="Valid task",
@@ -184,7 +184,7 @@ async def test_task_memory_web_api_agent_task_ownership_parent_session_and_404(t
         agent_session_uuid="shared-session",
         task_uuid="task-valid",
     )
-    await harness.rath_dao.create_task(
+    await harness.agent_dao.create_task(
         chat_id=4201,
         workflow_uuid="wf",
         title="Wrong parent",
@@ -192,7 +192,7 @@ async def test_task_memory_web_api_agent_task_ownership_parent_session_and_404(t
         agent_session_uuid="shared-session",
         task_uuid="task-wrong-parent",
     )
-    await harness.rath_dao.create_task(
+    await harness.agent_dao.create_task(
         chat_id=9999,
         workflow_uuid="wf",
         title="Wrong user",
@@ -233,7 +233,7 @@ async def test_task_memory_web_api_agent_task_ownership_parent_session_and_404(t
 
 async def test_task_memory_preview_uses_effective_short_body_snapshot_scope_acl_and_budget(task_memory_api):
     client, harness = task_memory_api
-    task_uuid = await harness.rath_dao.create_task(
+    task_uuid = await harness.agent_dao.create_task(
         chat_id=4201,
         workflow_uuid="wf-preview",
         title="Preview task",

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import {createOutboundSendTracker, restoreOutboundDraft} from "./outboundSend.js";
-import {createAttachmentDraftStorage} from "./attachmentDraftStorage.js";
+import {createAttachmentDraftStorage, planAttachmentDraftRecord} from "./attachmentDraftStorage.js";
 import {createMemoryAttachmentDraftDriver} from "./attachmentDraftMemoryDriver.mjs";
 
 // Runs the real ConsoleView draft functions: the composer's files must belong to
@@ -27,7 +27,7 @@ const flush = async () => {for (let i = 0; i < 20; i++) await Promise.resolve();
 // browser storage is exercised with a 100-byte "oversized" file.
 const MAX_FILE_BYTES = 64;
 
-function harness({conversationUuid = "conv-a", records = new Map(), fail = null} = {}) {
+function harness({conversationUuid = "conv-a", records = new Map(), fail = null, maxFileBytes = MAX_FILE_BYTES, maxTotalBytes = 96} = {}) {
 	const driver = createMemoryAttachmentDraftDriver({records, fail});
 	const props = {conversationUuid, folderId: ""};
 	const revoked = [];
@@ -44,6 +44,7 @@ function harness({conversationUuid = "conv-a", records = new Map(), fail = null}
 		messages: {value: []},
 		status: {value: "就绪"},
 		sendPending: {value: false},
+		uploadProgressByConversation: {value: {}},
 		running: {value: false},
 		chatState: {value: {}},
 		runStartedAt: {value: 0},
@@ -55,8 +56,9 @@ function harness({conversationUuid = "conv-a", records = new Map(), fail = null}
 		isLocalConversation: {get value() {return props.conversationUuid.startsWith("local:");}},
 		attachmentDrafts: createAttachmentDraftStorage({
 			driver,
-			maxFileBytes: MAX_FILE_BYTES,
+			maxFileBytes, maxTotalBytes,
 		}),
+		planAttachmentDraftRecord: (key, files) => planAttachmentDraftRecord(key, files, {maxFileBytes, maxTotalBytes}),
 		URL: {
 			createObjectURL: (file) => `blob:${file.name}#${++previewSeq}`,
 			revokeObjectURL: (url) => revoked.push(url),
@@ -69,6 +71,7 @@ function harness({conversationUuid = "conv-a", records = new Map(), fail = null}
 		nextTick: (fn) => {fn?.(); return Promise.resolve();},
 		queueSentAttachmentPreviewRevokes: (urls) => {revoked.push(...urls);},
 		adjustComposerHeight() {},
+		setUploadProgress() {},
 		focusComposer: async () => {},
 		orderedOperationsList: () => [],
 		syncRunStateFromOperations() {},
@@ -218,6 +221,8 @@ test("a file too large to store stays usable now and is named once after a reloa
 	await first.open();
 	await first.add("small.txt");
 	await first.add("big.zip", {bytes: 100});
+	assert.equal(first.warnings.length, 1, "oversized unsent file is identified before a reload");
+	assert.match(first.warnings[0], /当前页面有效.*big\.zip/);
 	assert.deepEqual(first.names(), ["small.txt", "big.zip"]);
 	assert.deepEqual(first.stored("conv-a"), ["small.txt"]);
 
@@ -230,6 +235,20 @@ test("a file too large to store stays usable now and is named once after a reloa
 	await reloaded.switchTo("conv-b");
 	await reloaded.switchTo("conv-a");
 	assert.equal(reloaded.warnings.length, 1);
+});
+
+test("a cumulative draft overflow identifies only newly unpersistable files immediately", async () => {
+	const h = harness();
+	await h.open();
+	await h.add("first.bin", {bytes: 50});
+	assert.equal(h.warnings.length, 0);
+	await h.add("second.bin", {bytes: 50});
+	assert.deepEqual(h.stored("conv-a"), ["first.bin"]);
+	assert.equal(h.warnings.length, 1);
+	assert.match(h.warnings[0], /当前页面有效.*second\.bin/);
+	await h.add("third.bin", {bytes: 5});
+	assert.deepEqual(h.stored("conv-a"), ["first.bin", "third.bin"]);
+	assert.equal(h.warnings.length, 1, "an old skipped file is not warned on each save");
 });
 
 test("deleting a conversation drops its parked files, previews and stored record", async () => {

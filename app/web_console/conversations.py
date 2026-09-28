@@ -734,7 +734,10 @@ class WebAdminConversationsMixin:
                     table,
                     "chat_id=?",
                     (old_internal,),
-                    lambda _row: {"chat_id": new_internal, "session_uuid": new_session_uuid},
+                    # Copied billing rows are history snapshots, not new physical
+                    # requests. Do not claim the original attempt's unique identity.
+                    lambda _row: {"chat_id": new_internal, "session_uuid": new_session_uuid,
+                                  **({"attempt_id": ""} if table == "model_calls" else {})},
                 )
             await self._copy_table_rows_for_duplicate(
                 "operations",
@@ -936,6 +939,14 @@ class WebAdminConversationsMixin:
                         "task_uuid": task_map.get(str(row.get("task_uuid") or ""), str(row.get("task_uuid") or "")),
                     },
                 )
+            # An edited branch keeps its explicit system/tools and injection
+            # policy when copied. The creation document remains an immutable
+            # provenance record, not the duplicate's active window.
+            await self.db.conn.execute(
+                "INSERT INTO context_editor_branches (conversation_uuid,source_conversation_uuid,settings_json,document_json,created_at) "
+                "SELECT ?,source_conversation_uuid,settings_json,document_json,? FROM context_editor_branches WHERE conversation_uuid=?",
+                (new_uuid, now_ts(), old_uuid),
+            )
             # Usage copied for billing/history is not a provider report for the
             # duplicated controller context. Keep its display/compact authority
             # explicitly unknown until the duplicate makes its own model request.
@@ -1071,10 +1082,10 @@ class WebAdminConversationsMixin:
         return out
 
     async def _active_rath_task_uuids_for_chat(self, chat_id: int) -> set[str]:
-        if self.rath is None:
+        if self.agents is None:
             return set()
         try:
-            tasks = await self.rath.all_active_tasks_for_chat(int(chat_id or 0))
+            tasks = await self.agents.all_active_tasks_for_chat(int(chat_id or 0))
         except Exception:
             return set()
         return {str(getattr(task, "task_uuid", "") or "") for task in tasks if str(getattr(task, "task_uuid", "") or "")}
@@ -1084,12 +1095,12 @@ class WebAdminConversationsMixin:
         if task_uuids & active_task_uuids:
             return ""
         terminal_statuses: list[str] = []
-        all_tasks_missing = bool(task_uuids) and self.rath_dao is not None
+        all_tasks_missing = bool(task_uuids) and self.agent_dao is not None
         for task_uuid in task_uuids:
             task = None
-            if self.rath_dao is not None:
+            if self.agent_dao is not None:
                 try:
-                    task = await self.rath_dao.get_task(task_uuid)
+                    task = await self.agent_dao.get_task(task_uuid)
                 except Exception:
                     # A failed lookup is not evidence that the task is gone.
                     return ""
@@ -1135,15 +1146,15 @@ class WebAdminConversationsMixin:
             result.get("ok") is not True or not target_uuid or target_uuid == source_uuid
             or not source_uuid or source_uuid != str(args.get("to") or "")
             or str(op_row["op_id"]) != f"agent:{source_uuid}" or not call_id
-            or self.rath_dao is None
+            or self.agent_dao is None
         ):
             return None
         conv_uuid = str(row.get("conversation_uuid") or "")
         chat_id = int(row.get("internal_chat_id") or 0)
         try:
-            if await self.rath_dao.get_task(source_uuid) is not None:
+            if await self.agent_dao.get_task(source_uuid) is not None:
                 return None
-            task = await self.rath_dao.get_task(target_uuid)
+            task = await self.agent_dao.get_task(target_uuid)
         except Exception:
             return None
         if task is None or task.chat_id != chat_id or task.parent_session_uuid != conv_uuid:
@@ -1230,7 +1241,7 @@ class WebAdminConversationsMixin:
         if not conv_uuid or not internal_chat_id:
             return []
         # `accepted` is durably published before live._apply() marks the stream
-        # running and before the controller task reaches RunRegistry. A list/state
+        # running and before the controller task reaches ControllerRuns. A list/state
         # request can otherwise enter this reconciler in that narrow window and
         # terminalize the brand-new run as stale. The sender owns this guard until
         # all startup facts are established.
@@ -1399,12 +1410,12 @@ class WebAdminConversationsMixin:
         for r in rows:
             await self._reconcile_inactive_web_conversation_operations(r, source="conversation_list_reconcile")
         operation_facts = await self._web_operation_facts_for_conversations([str(r.get("conversation_uuid") or "") for r in rows])
-        if self.rath is not None:
+        if self.agents is not None:
             for r in rows:
                 conv_uuid = str(r.get("conversation_uuid") or "")
                 facts = dict(operation_facts.get(conv_uuid) or {})
                 with contextlib.suppress(Exception):
-                    active_tasks = await self.rath.all_active_tasks_for_chat(int(r.get("internal_chat_id") or 0))
+                    active_tasks = await self.agents.all_active_tasks_for_chat(int(r.get("internal_chat_id") or 0))
                     facts["activeRathTaskCount"] = len(active_tasks)
                     facts["activeRathTaskUuids"] = [str(getattr(task, "task_uuid", "") or "") for task in active_tasks]
                 if facts:
@@ -1499,9 +1510,9 @@ class WebAdminConversationsMixin:
                 active_reasons.append(str(row["op_type"] or "operation"))
 
         active_tasks = []
-        if self.rath_dao is not None and chat_id:
+        if self.agent_dao is not None and chat_id:
             with contextlib.suppress(Exception):
-                active_tasks = await self.rath_dao.active_tasks_for_chat(chat_id, limit=100, controllable=True)
+                active_tasks = await self.agent_dao.active_tasks_for_chat(chat_id, limit=100, controllable=True)
         active_tasks = [task for task in active_tasks if not conv_uuid or str(getattr(task, "parent_session_uuid", "") or "") == conv_uuid]
         if active_tasks:
             active_reasons.append("agent")
@@ -1673,9 +1684,9 @@ class WebAdminConversationsMixin:
         if status in {"cancelled", "interrupted"}:
             return True
         task = None
-        if task_uuid and self.rath_dao is not None:
+        if task_uuid and self.agent_dao is not None:
             with contextlib.suppress(Exception):
-                task = await self.rath_dao.get_task(task_uuid)
+                task = await self.agent_dao.get_task(task_uuid)
         if task is not None:
             durable_status = str(task.status or "")
             if durable_status in {"cancelled", "interrupted"}:
@@ -1882,9 +1893,9 @@ class WebAdminConversationsMixin:
             "cancelled",
             "interrupted",
         }
-        if not urgent and self.rath_dao is not None:
+        if not urgent and self.agent_dao is not None:
             try:
-                active = await self.rath_dao.active_tasks_for_chat(chat_id, limit=100, controllable=True)
+                active = await self.agent_dao.active_tasks_for_chat(chat_id, limit=100, controllable=True)
                 active = [
                     task
                     for task in active
@@ -2750,9 +2761,9 @@ class WebAdminConversationsMixin:
                     # should continue or stop.  Ordinary completion results still
                     # wait for their related siblings so final synthesis remains
                     # consolidated.
-                    if not waiting_control_notifications and self.rath_dao is not None:
+                    if not waiting_control_notifications and self.agent_dao is not None:
                         with contextlib.suppress(Exception):
-                            remaining_related_tasks = await self.rath_dao.active_tasks_for_chat(internal_chat_id, limit=100, controllable=True)
+                            remaining_related_tasks = await self.agent_dao.active_tasks_for_chat(internal_chat_id, limit=100, controllable=True)
                         remaining_related_tasks = [
                             task_row for task_row in remaining_related_tasks
                             if str(getattr(task_row, "parent_session_uuid", "") or "") == conversation_uuid

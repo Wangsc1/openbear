@@ -14,8 +14,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from app.config import Config, MCPAgentAccessConfig, MCPServerConfig
 from app.llm.base import AgentResult
 from app.llm.events import ToolCall
-from app.rath.builtin_workflows import ensure_builtin_workflows
-from app.rath.plan import PlanError
+from app.agents.profiles import ensure_builtin_workflows
+from app.agents.plan import PlanError
 from app.services import Services
 from app.tools.allowlist import agent_delegation_catalog, agent_delegation_names
 from app.tools.base import ToolRuntimeContext
@@ -104,7 +104,7 @@ async def env(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENBEAR_CONFIG", str(path))
     svc = Services(Config.model_validate(raw), FakeBot())
     await svc.db.connect()
-    await ensure_builtin_workflows(svc.rath_dao)
+    await ensure_builtin_workflows(svc.agent_dao)
     backend = Backend()
     svc.factory = _FakeFactory(backend)
     await svc.mcp.start()
@@ -129,10 +129,10 @@ async def env(tmp_path, monkeypatch):
         yield SimpleNamespace(svc=svc, backend=backend, ctx=ctx, client=client, cookie=cookie,
                               states=states, logs=logs, grant=grant, path=path)
     finally:
-        for task in list(svc.rath._runs.values()):
+        for task in svc.agents.scheduler.tasks(kind="agent"):
             task.cancel()
-        if svc.rath._runs:
-            await asyncio.gather(*list(svc.rath._runs.values()), return_exceptions=True)
+        if svc.agents.count():
+            await asyncio.gather(*svc.agents.scheduler.tasks(kind="agent"), return_exceptions=True)
         await client.close()
         await svc.mcp.close()
         await svc.http.close()
@@ -317,15 +317,15 @@ async def test_plan_native_grant_step_gate_frozen_contract_and_live_revoke(env):
     ])
     launched = await call(env, "Agent", {"prompt": "Managed native MCP task", "tools": [], "planMode": "managed"})
     task_id = launched["taskUuid"]
-    run = env.svc.rath._runs.get(task_id)
+    run = env.svc.agents.task(task_id)
     assert run is not None
     await asyncio.wait_for(asyncio.shield(run), timeout=10)
-    task = await env.svc.rath_dao.get_task(task_id)
+    task = await env.svc.agent_dao.get_task(task_id)
     assert task.status == "needs_openbear_control", task
     assert len(events(env)) == 1
     assert len(env.backend.calls) == 7
     assert "tool_denied_by_plan_phase" in str(env.backend.calls[1]["messages"])
-    snapshot = await env.svc.rath.plan_coordinator.snapshot(task_id)
+    snapshot = await env.svc.agents.plan_coordinator.snapshot(task_id)
     assert snapshot["state"]["approved_tools"] == [tool]
     info = await call(env, "AgentInfo", {"action": "get", "to": task.agent_session_uuid})
     assert tool in info["capabilities"]["grantedTools"]
@@ -342,9 +342,9 @@ async def test_dynamic_plan_request_count_and_revoked_grant_rejected(env):
     requests = schema["parameters"]["properties"]["plan"]["properties"]["toolRequests"]
     assert len(names) == 12 and requests["maxItems"] >= 12
     assert set(names) <= set(requests["items"]["properties"]["name"]["enum"])
-    coordinator = env.svc.rath.plan_coordinator
-    workflow = await env.svc.rath_dao.workflow_by_slug("single-agent")
-    task_id = await env.svc.rath_dao.create_task(chat_id=123, workflow_uuid=workflow.workflow_uuid, title="dynamic", status="running", input_data={"agentSnapshot": {"toolAllowlist": []}}, parent_session_uuid=env.ctx.session_uuid)
+    coordinator = env.svc.agents.plan_coordinator
+    workflow = await env.svc.agent_dao.workflow_by_slug("single-agent")
+    task_id = await env.svc.agent_dao.create_task(chat_id=123, workflow_uuid=workflow.workflow_uuid, title="dynamic", status="running", input_data={"agentSnapshot": {"toolAllowlist": []}}, parent_session_uuid=env.ctx.session_uuid)
     plan = sample_plan(second_step=False)
     plan["toolRequests"] = [{"name": name, "reason": "needed", "neededForSteps": ["s1"]} for name in names]
     submitted = await coordinator.submit_plan(task_id, plan, request_id="large", wait_for_decision=False)
@@ -356,7 +356,7 @@ async def test_dynamic_plan_request_count_and_revoked_grant_rejected(env):
 async def test_empty_preset_preserves_no_extra_ceiling_but_round_empty_has_no_mcp(env):
     await env.grant("all")
     tool = name(env)
-    await env.svc.rath_dao.create_agent(agent_key="empty-cap", name="Empty cap", tool_allowlist=[])
+    await env.svc.agent_dao.create_agent(agent_key="empty-cap", name="Empty cap", tool_allowlist=[])
     result = await call(env, "Agent", {"prompt": "No business tools this round", "workerType": "empty-cap", "tools": []})
     assert result["status"] == "completed"
     assert not any(t["name"] == tool for t in env.backend.calls[-1]["tools"])
@@ -447,7 +447,7 @@ async def test_legacy_removed_only_preset_remains_restrictive(env):
 async def test_nonempty_preset_caps_native_tools_and_unregistered_builtins_are_not_candidates(env):
     await env.grant("all")
     tool = name(env)
-    await env.svc.rath_dao.create_agent(agent_key="read-only-cap", name="Read only cap", tool_allowlist=["Read"])
+    await env.svc.agent_dao.create_agent(agent_key="read-only-cap", name="Read only cap", tool_allowlist=["Read"])
     denied = await call(env, "Agent", {"workerType": "read-only-cap", "prompt": "must not expand", "tools": [tool]})
     assert denied["error"] == "agent_tool_not_allowed_by_preset"
     env.svc.web_admin.tools = None

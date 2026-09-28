@@ -65,12 +65,6 @@ export function reasoningDuration(event) {
 	return start > 0 && end > start ? end - start : 0;
 }
 
-export function latestReasoningLine(text) {
-	const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
-	for (let i = lines.length - 1; i >= 0; i--) if (lines[i].trim()) return {key: i, text: lines[i].trim()};
-	return {key: 0, text: ''};
-}
-
 export function processToolLabel(name, fallback = '') {
 	return toolDisplayLabel(name, fallback);
 }

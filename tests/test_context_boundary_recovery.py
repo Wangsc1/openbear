@@ -18,7 +18,7 @@ from app.context.window import WindowPolicy, mark_source, source_of
 from app.db.dao import MessageDAO
 from app.llm.base import AgentResult
 from app.llm.events import StreamEvent, ToolCall, Usage
-from app.rath.single_agent import SingleAgentWorkflowRunner
+from app.agents.execution import AgentExecutor
 from app.tools.base import ToolRegistry
 from app.web_console.live_stream import _WebLiveStream, _WebStreamRenderer
 from tests.test_context_strategies import SUMMARY
@@ -131,7 +131,7 @@ async def test_agent_final_response_is_checkpointed_before_summary_and_exposed_o
         effects.append(1)
         return "raw evidence " * 100
     reg.add("Read", "read", {"type": "object"}, read)
-    runner = SingleAgentWorkflowRunner(dao, tid, agent=agent, backend=backend, model="main", model_label="p/main",
+    runner = AgentExecutor(dao, tid, agent=agent, backend=backend, model="main", model_label="p/main",
         max_tokens=1024, tools=reg, plan_protocol_enabled=False, context_window=128000, rollover_trigger_tokens=20000,
         context_config=e.cfg, context_llm_factory=e.factory)
     async def summary_gate():
@@ -196,7 +196,7 @@ async def test_archive_only_accepts_empty_pure_tool_assistant_equivalence(strate
 
 async def test_control_delivery_rolls_back_with_checkpoint_and_retries_once(agent_env, monkeypatch):
     dao, tid, agent = agent_env
-    runner = SingleAgentWorkflowRunner(dao, tid, agent=agent, backend=SimpleNamespace(protocol="chat"), model="main", max_tokens=1024)
+    runner = AgentExecutor(dao, tid, agent=agent, backend=SimpleNamespace(protocol="chat"), model="main", max_tokens=1024)
     messages = [human("Task original")]
     await runner._checkpoint_model_context(messages, round_no=0, stage="before_model")
     cid = await dao.add_control(tid, "steer", message="CONTROL: no more tools.")
@@ -232,7 +232,7 @@ async def test_same_task_resume_uses_newer_window_and_rebuilds_unacked_controls(
         async def complete(self, messages, **kwargs):
             calls.append(copy.deepcopy(messages))
             return AgentResult(tool_calls=[ToolCall("read", "Read", "{}")])
-    runner = SingleAgentWorkflowRunner(dao, tid, agent=agent, backend=Backend(), model="main", max_tokens=1024,
+    runner = AgentExecutor(dao, tid, agent=agent, backend=Backend(), model="main", max_tokens=1024,
         tools=reg, model_call_limit=1, plan_protocol_enabled=False)
     runner.chat_id = 123
     await runner._checkpoint_model_context([human("Task original"), *batch(1, text="EVICTED_OLD_FACT")], round_no=0, stage="before_model")
@@ -266,7 +266,7 @@ async def test_control_received_during_summary_survives_failed_rebudget(agent_en
             calls.append(copy.deepcopy(messages))
             assert len(calls) < 10
             return AgentResult(tool_calls=[ToolCall(f"r{len(calls)}", "Read", "{}")])
-    runner = SingleAgentWorkflowRunner(dao, tid, agent=agent, backend=Backend(), model="main", model_label="p/main",
+    runner = AgentExecutor(dao, tid, agent=agent, backend=Backend(), model="main", model_label="p/main",
         max_tokens=1024, tools=reg, plan_protocol_enabled=False, context_window=128000, rollover_trigger_tokens=20000,
         context_config=e.cfg, context_llm_factory=e.factory)
     control_ids = []
@@ -297,7 +297,7 @@ async def test_control_received_during_summary_survives_failed_rebudget(agent_en
 
 async def test_internal_resume_rejects_mismatched_pending_tool_checkpoint(agent_env):
     dao, tid, agent = agent_env
-    runner = SingleAgentWorkflowRunner(dao, tid, agent=agent, backend=SimpleNamespace(protocol="chat"), model="main", max_tokens=1024)
+    runner = AgentExecutor(dao, tid, agent=agent, backend=SimpleNamespace(protocol="chat"), model="main", max_tokens=1024)
     messages = [human()]
     await runner._checkpoint_model_context(messages, round_no=0, stage="budget_boundary:tool",
         extra_state={"pendingToolCalls": [{"id": "uncertain", "name": "Read", "arguments": "{}"}]})
@@ -340,7 +340,7 @@ async def test_final_summary_does_not_bypass_control_arriving_after_response(age
         assert len(calls) == 4
         ids.append(await dao.add_control(tid, "steer", message="LATEST_CONTROL: acknowledge before finishing."))
     e.backends["p/first"].gate = gate
-    runner = SingleAgentWorkflowRunner(dao, tid, agent=agent, backend=Backend(), model="main", model_label="p/main",
+    runner = AgentExecutor(dao, tid, agent=agent, backend=Backend(), model="main", model_label="p/main",
         max_tokens=1024, tools=reg, plan_protocol_enabled=False, context_window=128000, rollover_trigger_tokens=20000,
         context_config=e.cfg, context_llm_factory=e.factory)
     output = await runner.run()

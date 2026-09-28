@@ -31,7 +31,7 @@ function wouldCycle(source, targetFolderId, knownRows) {
   return false;
 }
 export function resolveTreeDrop(source, target, ratio, knownRows = []) {
-  if (!source || !target || source.local || source.archived || target.local || target.archived || target.search
+  if (!source || !target || source.recentAlias || target.recentAlias || source.local || source.archived || target.local || target.archived || target.search
       || !['folder', 'conversation'].includes(source.kind) || sameTreeItem(source, target)) return null;
   let zone, parent;
   if (target.kind === 'root' && source.kind === 'folder') { zone = 'inside'; parent = ''; }

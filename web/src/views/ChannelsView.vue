@@ -569,9 +569,13 @@ async function copyModelMetadata(row) {
   const text = JSON.stringify(payload, null, 2);
   copiedModelMetadata.value = payload;
   copiedModelMetadataSource.value = row?.fullname || "";
-  localStorage.setItem(MODEL_METADATA_CLIPBOARD_KEY, text);
-  try { await copyTextToClipboard(text); } catch { /* local metadata clipboard remains available */ }
-  ElMessage.success("模型元数据已复制");
+  let stored = false, copied = false;
+  try { localStorage.setItem(MODEL_METADATA_CLIPBOARD_KEY, text); stored = true; } catch { /* memory copy still works in this page */ }
+  try { copied = await copyTextToClipboard(text); } catch { /* browser clipboard may be blocked */ }
+  if (copied) ElMessage.success("模型元数据已复制");
+  else ElMessage.warning(stored
+    ? "系统剪贴板不可用，模型元数据仍可在站内粘贴"
+    : "系统剪贴板与本地存储不可用，模型元数据仅在当前页面可用");
 }
 function payloadWithMetadataForRow(row, meta) {
   const data = meta?.metadata || meta || {};
@@ -613,7 +617,10 @@ async function pasteCopiedMetadataToModel(row) {
 async function pasteModelMetadata() {
   let text = "";
   try { text = await navigator.clipboard?.readText?.() || ""; } catch { text = ""; }
-  if (!text.trim()) text = localStorage.getItem(MODEL_METADATA_CLIPBOARD_KEY) || "";
+  if (!text.trim()) {
+    try { text = localStorage.getItem(MODEL_METADATA_CLIPBOARD_KEY) || ""; } catch { /* private storage can reject reads */ }
+  }
+  if (!text.trim() && copiedModelMetadata.value) text = JSON.stringify(copiedModelMetadata.value);
   if (!text.trim()) {
     ElMessage.warning("没有可粘贴的模型元数据");
     return;
@@ -1593,7 +1600,7 @@ onBeforeUnmount(() => {
         </div>
       </section>
     </div>
-    <el-dialog v-model="providerDialog" class="mac-dialog" :title="providerMode === 'create' ? '添加渠道' : '编辑渠道'" width="720px">
+    <el-dialog append-to-body v-model="providerDialog" class="channels-dialog mac-dialog admin-dialog" :title="providerMode === 'create' ? '添加渠道' : '编辑渠道'" width="720px">
       <div class="dialog-grid">
         <label class="mac-field"><span>渠道名称</span><input v-model="providerForm.name" class="mac-input" placeholder="openai" /></label>
         <label class="mac-field"><span>协议</span><select v-model="providerForm.protocol" class="mac-input"><option value="chat">OpenAI Chat</option><option value="responses">OpenAI Responses</option><option value="anthropic">Anthropic</option></select></label>
@@ -1617,7 +1624,7 @@ onBeforeUnmount(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="testDialog" class="mac-dialog" :title="testTitle" width="720px">
+    <el-dialog append-to-body v-model="testDialog" class="channels-dialog mac-dialog admin-dialog" :title="testTitle" width="720px">
       <div class="space-y-3">
         <div v-for="result in testResults" :key="result.model" class="test-result" :class="result.ok ? 'is-ok' : 'is-bad'">
           <div class="flex items-center justify-between gap-3">
@@ -1632,7 +1639,7 @@ onBeforeUnmount(() => {
       <template #footer><div class="dialog-footer is-right"><div class="dialog-actions"><button class="mac-dialog-button is-primary" @click="testDialog = false">知道了</button></div></div></template>
     </el-dialog>
 
-    <el-dialog v-model="modelDialog" class="mac-dialog" :title="modelMode === 'create' ? '添加模型' : '编辑模型'" width="820px">
+    <el-dialog append-to-body v-model="modelDialog" class="channels-dialog mac-dialog admin-dialog" :title="modelMode === 'create' ? '添加模型' : '编辑模型'" width="820px">
       <div class="dialog-grid">
         <label class="mac-field"><span>模型 ID</span><input v-model="modelForm.id" class="mac-input" placeholder="gpt-4.1" /></label>
         <label class="mac-field"><span>显示名</span><input v-model="modelForm.name" class="mac-input" placeholder="留空则同 ID" /></label>
@@ -1691,7 +1698,7 @@ onBeforeUnmount(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="batchModelsDevDialog" class="mac-dialog batch-models-dev-dialog" width="1060px" :show-close="false">
+    <el-dialog append-to-body v-model="batchModelsDevDialog" class="channels-dialog mac-dialog admin-dialog batch-models-dev-dialog" width="1060px" :show-close="false">
       <template #header="{ close, titleId, titleClass }">
         <div class="batch-dialog-header">
           <div class="batch-dialog-title-group">
@@ -1922,16 +1929,22 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 :deep(.models-dev-preview-row strong) { color: var(--ob-text); font-size: 12px; }
 :deep(.models-dev-preview-row span) { overflow-wrap: anywhere; color: var(--ob-text-subtle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
 :deep(.models-dev-preview-note) { color: var(--ob-text-subtle); font-size: 11px; }
-:deep(.mac-dialog.el-dialog) { --el-dialog-padding-primary: 0; padding: 0 !important; border-radius: 22px; background: linear-gradient(180deg, rgb(var(--ob-surface-rgb) / .98), rgb(var(--ob-surface-rgb) / .96)); box-shadow: 0 24px 80px rgb(var(--ob-shadow-rgb) / .22), inset 0 1px 0 var(--ob-border); overflow: hidden; }
-:deep(.mac-dialog .el-dialog__header) { margin: 0; padding: 18px 20px 12px; border-bottom: 1px solid var(--ob-border); }
-:deep(.mac-dialog .el-dialog__title) { color: var(--ob-text-strong); font-size: 15px; font-weight: 650; }
-:deep(.mac-dialog .el-dialog__body) { padding: 16px 20px; }
-:deep(.mac-dialog .el-dialog__footer) { padding: 12px 20px 16px; border-top: 1px solid var(--ob-border); }
-:deep(.batch-models-dev-dialog.el-dialog) { max-width: calc(100vw - 32px); border-radius: 20px; }
-:deep(.batch-models-dev-dialog .el-dialog__header) { padding: 0; border-bottom: 1px solid var(--ob-border); }
-:deep(.batch-models-dev-dialog .el-dialog__title) { color: var(--ob-text-strong); font-size: 17px; font-weight: 680; letter-spacing: -.015em; }
-:deep(.batch-models-dev-dialog .el-dialog__body) { padding: 18px 26px 14px; }
-:deep(.batch-models-dev-dialog .el-dialog__footer) { padding: 15px 26px 18px; background: rgb(var(--ob-surface-rgb) / .74); }
+:global(.channels-dialog.mac-dialog.el-dialog) { --el-dialog-padding-primary: 0; padding: 0 !important; border-radius: 22px; background: linear-gradient(180deg, rgb(var(--ob-surface-rgb) / .98), rgb(var(--ob-surface-rgb) / .96)); box-shadow: 0 24px 80px rgb(var(--ob-shadow-rgb) / .22), inset 0 1px 0 var(--ob-border); overflow: hidden; }
+:global(.channels-dialog.mac-dialog .el-dialog__header) { margin: 0; border-bottom: 1px solid var(--ob-border); }
+:global(.channels-dialog.mac-dialog .el-dialog__title) { color: var(--ob-text-strong); font-size: 15px; font-weight: 650; }
+:global(.channels-dialog.mac-dialog .el-dialog__footer) { border-top: 1px solid var(--ob-border); }
+:global(.channels-dialog.batch-models-dev-dialog.el-dialog) { max-width: calc(100vw - 32px); border-radius: 20px; }
+:global(.channels-dialog.batch-models-dev-dialog .el-dialog__header) { border-bottom: 1px solid var(--ob-border); }
+:global(.channels-dialog.batch-models-dev-dialog .el-dialog__title) { color: var(--ob-text-strong); font-size: 17px; font-weight: 680; letter-spacing: -.015em; }
+:global(.channels-dialog.batch-models-dev-dialog .el-dialog__footer) { background: rgb(var(--ob-surface-rgb) / .74); }
+@media (min-width: 761px) {
+  :global(.channels-dialog.mac-dialog .el-dialog__header) { padding: 18px 20px 12px; }
+  :global(.channels-dialog.mac-dialog .el-dialog__body) { padding: 16px 20px; }
+  :global(.channels-dialog.mac-dialog .el-dialog__footer) { padding: 12px 20px 16px; }
+  :global(.channels-dialog.batch-models-dev-dialog .el-dialog__header) { padding: 0; }
+  :global(.channels-dialog.batch-models-dev-dialog .el-dialog__body) { padding: 18px 26px 14px; }
+  :global(.channels-dialog.batch-models-dev-dialog .el-dialog__footer) { padding: 15px 26px 18px; }
+}
 .dialog-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; width: 100%; }
 .dialog-footer.is-right { justify-content: flex-end; }
 .dialog-actions { display: inline-flex; align-items: center; justify-content: flex-end; gap: 10px; }
@@ -2205,13 +2218,39 @@ button:disabled { cursor: not-allowed; opacity: .48; }
   place-items: center;
   font-weight: bold;
 }
-:deep(.mac-dialog.el-dialog) {
+:global(.channels-dialog.mac-dialog.el-dialog) {
   width: min(94vw, 760px) !important;
   max-width: calc(100vw - 20px) !important;
   margin: 16px auto !important;
 }
+@media (max-width: 760px) {
+  /* Dialogs are teleported to body: scoped descendants cannot select their root. */
+  :global(.channels-dialog.mac-dialog.admin-dialog.el-dialog) {
+    width: 100% !important;
+    max-width: none !important;
+    margin: calc(var(--mobile-viewport-top, 0px) + env(safe-area-inset-top, 0px)) 0 0 !important;
+    height: calc(var(--mobile-viewport-height, 100dvh) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    max-height: calc(var(--mobile-viewport-height, 100dvh) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: 10px 10px 0 0;
+  }
+  :global(.channels-dialog.mac-dialog.admin-dialog .el-dialog__header) { flex: none; padding-block: 12px 10px; }
+  :global(.channels-dialog.mac-dialog.admin-dialog.batch-models-dev-dialog .el-dialog__header) { height: auto; min-height: 46px; padding: 0; }
+  :global(.channels-dialog.mac-dialog.admin-dialog .el-dialog__body) { flex: 1 1 0%; min-height: 0; overflow-y: auto; overflow-x: hidden; padding-block: 12px; -webkit-overflow-scrolling: touch; }
+  :global(.channels-dialog.mac-dialog.admin-dialog .el-dialog__footer) { flex: none; padding-block: 8px; }
+  .batch-dialog-header { flex-direction: row; align-items: center; gap: 8px; padding: 10px max(14px, env(safe-area-inset-right, 0px)) 10px max(14px, env(safe-area-inset-left, 0px)); }
+  .batch-dialog-mark, .batch-dialog-title-group p { display: none; }
+  .batch-dialog-header-state { width: auto; gap: 6px; }
+  .dialog-footer { gap: 8px; }
+  .dialog-actions { gap: 6px; }
+  .dialog-footer .mac-dialog-button { flex: none; padding-inline: 9px; }
+  .batch-footer-status { display: none; }
+  .batch-sync-list { max-height: none; overflow: visible; }
+}
 @media (max-width: 640px) {
-  :deep(.mac-dialog .el-dialog__body) { padding: 14px 16px !important; }
+  :global(.channels-dialog.mac-dialog.admin-dialog .el-dialog__body) { padding-block: 14px !important; }
   .dialog-grid { grid-template-columns: 1fr !important; }
   .span-2 { grid-column: span 1 !important; }
   .triple-grid { grid-template-columns: 1fr !important; }

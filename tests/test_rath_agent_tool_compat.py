@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from app.rath.single_agent import SingleAgentWorkflowRunner
+from app.agents.execution import AgentExecutor
 from app.tools.allowlist import agent_tool_capability, expand_agent_tool_names
 from app.tools.base import ToolRegistry, current_tool_context
 from app.tools.file_state import FileStateStore
@@ -51,7 +51,7 @@ def test_full_properties_required_compiler_cannot_mix_real_edit_contracts():
 async def test_runner_allowlist_derives_edit_batch_from_edit_permission():
     registry = _file_registry()
 
-    runner = object.__new__(SingleAgentWorkflowRunner)
+    runner = object.__new__(AgentExecutor)
     runner.tools = registry
     runner.agent = SimpleNamespace(tool_allowlist=["Edit"])
     runner.plan_protocol_enabled = False
@@ -119,7 +119,7 @@ async def test_runner_dispatches_real_edit_batch_without_execution_alias():
     schemas = registry.schemas(scope="agent")
     events: list[tuple[str, dict]] = []
 
-    runner = object.__new__(SingleAgentWorkflowRunner)
+    runner = object.__new__(AgentExecutor)
     runner.tools = registry
     runner.agent = SimpleNamespace(agent_key="agent", name="Agent", tool_allowlist=["Edit"])
     runner._allowed_tool_schemas = lambda: _async_value(schemas)
@@ -173,7 +173,7 @@ async def test_edit_batch_does_not_bypass_plan_step_gate():
         schema for schema in registry.schemas(scope="agent")
         if schema["name"] in {"Edit", "EditBatch"}
     ]
-    runner = object.__new__(SingleAgentWorkflowRunner)
+    runner = object.__new__(AgentExecutor)
     runner.tools = registry
     runner.agent = SimpleNamespace(agent_key="agent", name="Agent", tool_allowlist=["Edit"])
     runner._allowed_tool_schemas = lambda: _async_value(schemas)

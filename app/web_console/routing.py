@@ -57,6 +57,7 @@ class WebAdminAppMixin:
     def make_app(self) -> web.Application:
         app = web.Application(middlewares=[self._auth_middleware])
         app.cleanup_ctx.append(self._realtime_context)
+        app.cleanup_ctx.append(self._web_push_context)
         app.on_shutdown.append(self._realtime_shutdown)
         app.add_routes([
             web.get("/health", self.handle_health),
@@ -75,6 +76,12 @@ class WebAdminAppMixin:
             web.get("/api/auth/login/status/{request_uuid}", self.handle_api_auth_status),
             web.post("/api/auth/login/consume/{request_uuid}", self.handle_api_auth_consume),
             web.get("/api/auth/session", self.handle_api_auth_session),
+            web.get("/api/push/key", self.handle_api_push_key),
+            web.post("/api/push/status", self.handle_api_push_status),
+            web.post("/api/push/presence", self.handle_api_push_presence),
+            web.post("/api/push/subscription", self.handle_api_push_subscribe),
+            web.delete("/api/push/subscription", self.handle_api_push_unsubscribe),
+            web.post("/api/push/test", self.handle_api_push_test),
             web.get("/api/auth/sessions", self.handle_api_auth_sessions),
             web.delete("/api/auth/sessions/{session_id:\\d+}", self.handle_api_auth_session_revoke),
             web.get("/api/conversations", self.handle_api_conversations),
@@ -103,6 +110,8 @@ class WebAdminAppMixin:
             web.get("/api/conversations/{conversation_uuid}/state", self.handle_api_conversation_state),
             web.get("/api/conversations/{conversation_uuid}/operations", self.handle_api_conversation_operations),
             web.get("/api/conversations/{conversation_uuid}/operations/{operation_id}/detail", self.handle_api_conversation_operation_detail),
+            web.get("/api/conversations/{conversation_uuid}/search", self.handle_api_conversation_search),
+            web.get("/api/conversations/{conversation_uuid}/operations/{operation_id}/window", self.handle_api_conversation_operation_window),
             web.get("/api/conversations/{conversation_uuid}/compactions/{summary_id:\\d+}", self.handle_api_conversation_compaction),
             web.get("/api/conversations/{conversation_uuid}/frames", self.handle_api_conversation_frames),
             web.get("/api/conversations/{conversation_uuid}/artifacts", self.handle_api_conversation_artifacts),
@@ -118,6 +127,10 @@ class WebAdminAppMixin:
             web.post("/api/references/preview", self.handle_api_reference_preview),
             web.post("/api/references/inspect", self.handle_api_reference_inspect),
             web.get("/api/reference-history/{conversation_uuid}", self.handle_api_reference_history),
+            web.get("/api/conversations/{conversation_uuid}/context-editor", self.handle_api_context_editor),
+            web.post("/api/conversations/{conversation_uuid}/context-editor/preview", self.handle_api_context_editor_preview),
+            web.put("/api/conversations/{conversation_uuid}/context-editor/draft", self.handle_api_context_editor_draft),
+            web.post("/api/conversations/{conversation_uuid}/context-editor/branch", self.handle_api_context_editor_branch),
             web.post("/api/conversations/{conversation_uuid}/compact", self.handle_api_conversation_compact),
             web.post("/api/conversations/{conversation_uuid}/system-prompt/preview", self.handle_api_conversation_prompt_preview),
             web.put("/api/conversations/{conversation_uuid}/system-prompt", self.handle_api_conversation_prompt_update),

@@ -23,7 +23,7 @@ log = get_logger("db.engine")
 
 _SCHEMA = "\n".join(
     (Path(__file__).parent / name).read_text(encoding="utf-8")
-    for name in ("schema.sql", "user_interactions.sql", "interaction_telegram.sql", "web_telegram_replies.sql", "context_schema.sql")
+    for name in ("schema.sql", "user_interactions.sql", "interaction_telegram.sql", "web_telegram_replies.sql", "web_push.sql", "context_schema.sql", "runtime_schema.sql")
 )
 
 
@@ -351,6 +351,8 @@ class DB:
             await self._add_column_if_missing("rath_task_controls", name, ddl)
 
     async def _pre_migrate_existing_model_call_schema(self) -> None:
+        await self._add_column_if_missing("model_calls", "attempt_id", "attempt_id TEXT NOT NULL DEFAULT ''")
+        await self._add_column_if_missing("model_calls", "usage_known", "usage_known INTEGER")
         await self._add_column_if_missing("model_calls", "call_kind", "call_kind TEXT DEFAULT ''")
         await self._add_column_if_missing("model_calls", "last_input_tokens", "last_input_tokens INTEGER DEFAULT 0")
         await self._add_column_if_missing("model_calls", "last_output_tokens", "last_output_tokens INTEGER DEFAULT 0")

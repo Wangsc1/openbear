@@ -169,8 +169,8 @@ class ConfigStore:
 def _migrate_runtime_config(raw: dict[str, Any]) -> bool:
     """Canonicalize retired keys without materializing evolvable prompt defaults."""
     changed = migrate_context_config(raw)
-    rath = raw.get("rath")
-    if not isinstance(rath, dict):
+    agents = raw.get("rath")
+    if not isinstance(agents, dict):
         return changed
     for legacy, canonical in {
         "agentPlanMaxRevisionRounds": "planMaxRevisionRounds",
@@ -178,11 +178,11 @@ def _migrate_runtime_config(raw: dict[str, Any]) -> bool:
         "agentPlanMaxCriteriaPerStep": "planMaxCriteriaPerStep",
         "agentPlanMaxFinalOutputs": "planMaxFinalOutputs",
     }.items():
-        if legacy not in rath:
+        if legacy not in agents:
             continue
-        if canonical not in rath:
-            rath[canonical] = rath[legacy]
-        del rath[legacy]
+        if canonical not in agents:
+            agents[canonical] = agents[legacy]
+        del agents[legacy]
         changed = True
     return changed
 

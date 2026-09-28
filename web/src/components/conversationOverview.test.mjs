@@ -1,9 +1,10 @@
 import test from 'node:test';
+import {useRecentConversationRows} from './conversationRecentRows.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {computed,nextTick,reactive,ref,watch,effectScope} from 'vue';
-import {compareTreeItems} from './conversationTreeInteractions.js';
+import {compareTreeItems, treeItemId as rowId} from './conversationTreeInteractions.js';
 import {ledgerTokenParts,totalSessionDurationMs} from '../views/consoleView/ledgerUsage.js';
 import {startReferenceCatalog,stopReferenceCatalog,watchConversationOverview,applyConversationOverviewPacket} from '../references/catalog.js';
 
@@ -11,13 +12,13 @@ const treeSource=fs.readFileSync(new URL('./ConversationTree.vue',import.meta.ur
 const strip=source=>source.match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import[\s\S]*?;\n/gm,'');
 function hoverHarness(){
  let time=0,serial=0;const timers=new Map();
- const env={computed,nextTick,reactive,ref,compareTreeItems,watch(){},onMounted(){},onBeforeUnmount(){},defineProps:()=>({}),defineEmits:()=>()=>{},defineExpose(){},
+ const env={useRecentConversationRows,referenceCatalog:{},computed,nextTick,reactive,ref,compareTreeItems,rowId,watch(){},onMounted(){},onBeforeUnmount(){},defineProps:()=>({}),defineEmits:()=>()=>{},defineExpose(){},
   // UI import seam only; keep the real hover/timer handlers and assertions.
   defineLazyView:()=>({}),
   setTimeout:(fn,ms)=>{timers.set(++serial,{fn,at:time+ms});return serial;},clearTimeout:id=>timers.delete(id),
-  window:{matchMedia:()=>({matches:true})}};
+  document:{querySelector:()=>null}, window:{matchMedia:()=>({matches:true})}};
  const context=vm.createContext(env);
- vm.runInContext(strip(treeSource)+'\nglobalThis.hover={overview,enterOverview,leaveOverview,keepOverview,closeOverview,drag,menu};',context);
+ vm.runInContext(strip(treeSource)+'\nglobalThis.hover={overview,enterOverview,leaveOverview,keepOverview,closeOverview,openMoreMenu,drag,menu};',context);
  function tick(ms){time+=ms;for(const [id,value] of [...timers])if(value.at<=time){timers.delete(id);value.fn();}}
  const row=id=>({kind:'conversation',conversationUuid:id,title:id});
  const event={pointerType:'mouse',currentTarget:{querySelector:()=>({isConnected:true})}};
@@ -37,6 +38,13 @@ test('new hover supersedes old timer and ignores folders, drafts, touch and drag
  for(const [event,row] of [[h.event,{kind:'folder'}],[h.event,{...h.row('draft'),local:true}],[{...h.event,pointerType:'touch'},h.row('touch')]]){h.enterOverview(event,row);h.tick(500);assert.equal(h.overview.value.open,false);}
  h.drag.value.row=h.row('drag');h.enterOverview(h.event,h.row('a'));h.tick(300);assert.equal(h.overview.value.open,false);h.drag.value.row=null;
  h.menu.value.open=true;h.enterOverview(h.event,h.row('a'));h.tick(300);assert.equal(h.overview.value.open,false);
+});
+test('opening More closes the hover card and does not trigger overview work',async()=>{
+ const h=hoverHarness(),anchor={isConnected:true,getBoundingClientRect:()=>({right:300,bottom:100})};
+ h.enterOverview(h.event,h.row('a'));h.tick(280);assert.equal(h.overview.value.open,true);
+ await h.openMoreMenu({type:'click',currentTarget:anchor,preventDefault(){},stopPropagation(){}},h.row('touch'));
+ assert.equal(h.menu.value.open,true);assert.equal(h.overview.value.open,false);
+ h.enterOverview(h.event,h.row('other'));h.tick(1000);assert.equal(h.overview.value.open,false);
 });
 test('subscription nonce rejects switched/closed packets and reconnect re-subscribes only current card',()=>{
  const globals=Object.fromEntries(['window','document','location','WebSocket'].map(key=>[key,globalThis[key]]));const sockets=[];

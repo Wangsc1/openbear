@@ -650,7 +650,7 @@ defineExpose({open: openDrawer});
 
 	<el-drawer
 		v-model="drawerOpen"
-		class="task-memory-drawer"
+		class="task-memory-drawer mobile-viewport-drawer"
 		size="min(42rem, 100vw)"
 		append-to-body
 		:with-header="false"
@@ -783,7 +783,7 @@ defineExpose({open: openDrawer});
 
 	<el-dialog
 		v-model="editorOpen"
-		class="task-memory-editor"
+		class="task-memory-editor mobile-viewport-dialog"
 		:title="editorTitle"
 		width="min(42rem, 96vw)"
 		append-to-body

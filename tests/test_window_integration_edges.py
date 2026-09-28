@@ -12,8 +12,8 @@ from app.context.store import ContextHistoryUnavailable, ContextOwner, WindowSto
 from app.context.window import WindowPolicy, mark_source
 from app.db.dao import MessageDAO
 from app.llm.events import StreamEvent, ToolCall
-from app.rath.runner import RathTaskCancelled
-from app.rath.single_agent import SingleAgentWorkflowRunner
+from app.agents.task_context import AgentTaskCancelled
+from app.agents.execution import AgentExecutor
 from app.tools.agent_history import register_agent_history_tool
 from app.tools.base import ToolRegistry, ToolRuntimeContext
 from app.tools.history import register_history_tools
@@ -85,7 +85,7 @@ async def test_agent_stop_accepted_during_window_preparation_prevents_model_call
             raise AssertionError("A stopped Agent must not start a model request")
 
     backend = Backend()
-    runner = SingleAgentWorkflowRunner(dao, task_uuid, agent=agent, backend=backend,
+    runner = AgentExecutor(dao, task_uuid, agent=agent, backend=backend,
         model="test", max_tokens=1024, tools=ToolRegistry(), context_window=40000)
     original = runner._prepare_context_window
 
@@ -95,7 +95,7 @@ async def test_agent_stop_accepted_during_window_preparation_prevents_model_call
         return result
 
     monkeypatch.setattr(runner, "_prepare_context_window", prepare)
-    with pytest.raises(RathTaskCancelled):
+    with pytest.raises(AgentTaskCancelled):
         await runner.run()
     assert backend.calls == 0
     assert not await dao.pending_controls(task_uuid)

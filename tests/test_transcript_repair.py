@@ -1,7 +1,13 @@
 """工具配对修复测试 —— 覆盖光杆 / 孤儿 / 重复 / 完整 / 多并行 等场景。"""
 from __future__ import annotations
 
+import copy
+
+import pytest
+
+from app.agent.native_continuation import validate_model_context
 from app.agent.transcript_repair import (
+    ConflictingToolCalls,
     MISSING_TOOL_RESULT_TEXT,
     repair_role_alternation,
     repair_tool_pairing,
@@ -125,6 +131,100 @@ def test_no_tool_calls_passthrough():
 
 def test_empty_input():
     assert repair_tool_pairing([]) == []
+
+
+def test_identical_duplicate_calls_are_only_removed_from_derived_model_view():
+    original = _asst_with_calls(
+        ToolCall("same", "Read", '{"path":"a"}'),
+        ToolCall("other", "History", "{}"),
+        ToolCall("same", "Read", '{"path":"a"}'),
+    )
+    original["openbear_context_source"] = {"id": "message:42", "kind": "execution",
+                                            "message_id": 42, "reference_only": True}
+    messages = [original, _tool_result("same", content="actual"), _tool_result("other")]
+    snapshot = copy.deepcopy(messages)
+    result = repair_tool_pairing(messages)
+    assert messages == snapshot
+    assert result[0] is not original
+    assert [c.id for c in result[0]["tool_calls"]] == ["same", "other"]
+    assert result[0]["tool_calls"][0] is original["tool_calls"][0]
+    assert [m["content"] for m in result[1:]] == ["actual", "结果"]
+    assert validate_model_context(result)
+    source = result[0]["openbear_context_source"]
+    assert source["id"].startswith("message:42/dedup:")
+    assert source["derived_from"] == "message:42"
+    assert source["message_id"] == 0 and source["reference_only"] is False
+    assert original["openbear_context_source"] == snapshot[0]["openbear_context_source"]
+    assert repair_tool_pairing(messages)[0]["openbear_context_source"]["id"] == source["id"]
+    assert repair_tool_pairing(result) == result  # already closed and idempotent
+
+
+def test_duplicate_calls_without_results_get_one_uncertain_placeholder():
+    messages = [_asst_with_calls(ToolCall("same", "Bash", "{}"), ToolCall("same", "Bash", "{}"))]
+    result = repair_tool_pairing(messages)
+    assert len(result[0]["tool_calls"]) == 1
+    assert result[1]["content"] == MISSING_TOOL_RESULT_TEXT
+    assert len(result) == 2 and validate_model_context(result)
+    assert len(messages[0]["tool_calls"]) == 2
+
+
+@pytest.mark.parametrize("calls", [
+    [ToolCall("same", "Read", '{"path":"a"}'), ToolCall("same", "Read", '{"path":"b"}')],
+    [ToolCall("same", "Read", "{}"), ToolCall("same", "Bash", "{}")],
+    [{"id": "same", "name": "Read", "arguments": "{}", "legacy": "a"},
+     {"id": "same", "name": "Read", "arguments": "{}", "legacy": "b"}],
+])
+def test_conflicting_calls_fail_closed_with_originals_accessible(calls):
+    original = {"role": "assistant", "content": "", "tool_calls": calls,
+                "openbear_context_source": {"id": "message:99", "kind": "execution"}}
+    snapshot = copy.deepcopy(original)
+    with pytest.raises(ConflictingToolCalls) as raised:
+        repair_tool_pairing([original, _tool_result("same", content="unknown owner")])
+    assert raised.value.call_id == "same" and raised.value.source_id == "message:99"
+    assert raised.value.calls == tuple(calls)
+    assert "path" not in str(raised.value) and "unknown owner" not in str(raised.value)
+    assert original == snapshot  # no arbitrary winner, no fabricated successful result
+
+
+def test_edited_turn_drops_native_and_signed_state_but_complete_turn_preserves_it():
+    call = ToolCall("same", "Read", "{}")
+    native = [{"type": "function_call", "call_id": "same", "name": "Read", "arguments": "{}"}]
+    original = _asst_with_calls(call, copy.deepcopy(call))
+    original.update(native_output_items=native, reasoning="old reasoning", signature="old signature")
+    result = repair_tool_pairing([original, _tool_result("same")])
+    assert validate_model_context(result)
+    assert not any(k in result[0] for k in ("native_output_items", "reasoning", "signature"))
+    assert original["native_output_items"] == native and original["reasoning"] == "old reasoning"
+    complete = _asst_with_calls(call)
+    complete["native_output_items"] = native
+    full = [complete, _tool_result("same")]
+    assert repair_tool_pairing(full)[0] is complete
+    assert validate_model_context(full)
+
+
+async def test_derived_source_archives_payload_not_a_changed_original(tmp_path):
+    from app.context.store import ContextOwner, WindowStore
+    from app.db.engine import DB
+    db = DB(str(tmp_path / "source-proof.db"))
+    await db.connect()
+    try:
+        store = WindowStore(db, ContextOwner.controller(chat_id=42, session_uuid="test"))
+        original = _asst_with_calls(ToolCall("same", "Read", "{}"), ToolCall("same", "Read", "{}"))
+        original["openbear_context_source"] = {"id": "message:42", "kind": "execution",
+                                               "message_id": 42, "reference_only": True}
+        tool = _tool_result("same")
+        tool["openbear_context_source"] = {"id": "message:43", "kind": "execution",
+                                          "message_id": 0, "reference_only": False}
+        result = repair_tool_pairing([original, tool])
+        await store.archive(result)
+        derived_id = result[0]["openbear_context_source"]["id"]
+        event = await store.event_payload(derived_id)
+        assert event["payload"]["tool_calls"] == [{"id": "same", "name": "Read", "arguments": "{}"}]
+        assert original["tool_calls"] != result[0]["tool_calls"]
+        assert event["message_id"] is None
+        assert await store.archive(result) == {"revision": 0, "sourceRevision": 2, "highWater": 2, "added": 0}
+    finally:
+        await db.close()
 
 
 # ── 角色交替规整:repair_role_alternation ─────────────────────────

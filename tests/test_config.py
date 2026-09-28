@@ -71,8 +71,8 @@ def test_plan_limit_aliases_read_legacy_and_write_canonical_names():
         "planDraftPrompt": "任务：{task}\n结构：{plan_schema}",
     }
     cfg = Config.model_validate(data)
-    assert cfg.rath.agent_plan_max_revision_rounds == 4
-    assert cfg.rath.agent_plan_max_steps == 31
+    assert cfg.agents.agent_plan_max_revision_rounds == 4
+    assert cfg.agents.agent_plan_max_steps == 31
     dumped = cfg.model_dump(mode="json", by_alias=True)["rath"]
     assert dumped["planMaxRevisionRounds"] == 4
     assert dumped["planMaxSteps"] == 31

@@ -224,7 +224,7 @@ async def _status_text(svc: Services, chat_id: int) -> str:
     proto = resolved[0].protocol if resolved else "?"
     uptime = int(time.time() - float(getattr(svc, "started_at", time.time())))
     running = svc.runs.count() if getattr(svc, "runs", None) is not None else 0
-    rath_running = svc.rath.count() if getattr(svc, "rath", None) is not None else 0
+    rath_running = svc.agents.count() if getattr(svc, "agents", None) is not None else 0
     child_count = processes.count()
 
     # Main-controller and Rath Agent requests now share the per-call
@@ -358,7 +358,7 @@ async def _schedule_restart(svc: Services, chat_id: int, *, reason: str = "teleg
 @router.message(Command("restart"))
 async def cmd_restart(message: Message, svc: Services) -> None:
     running = svc.runs.count()
-    rath_running = svc.rath.count() if getattr(svc, "rath", None) is not None else 0
+    rath_running = svc.agents.count() if getattr(svc, "agents", None) is not None else 0
     child_count = processes.count()
     if running or rath_running or child_count:
         await answer_rich(
@@ -391,7 +391,7 @@ async def cb_restart_confirm(query: CallbackQuery, svc: Services) -> None:
     if query.message:
         with contextlib.suppress(Exception):
             await edit_rich(query.bot, query.message.chat.id, query.message.message_id, "🔄 已确认，正在重启 openbear.service …")
-    log.info("确认 /restart，触发 systemd 重启", 运行任务=svc.runs.count(), Rath任务=svc.rath.count(), 子进程=processes.count())
+    log.info("确认 /restart，触发 systemd 重启", 运行任务=svc.runs.count(), Rath任务=svc.agents.count(), 子进程=processes.count())
     chat_id = int(query.message.chat.id if query.message else query.from_user.id)
     asyncio.create_task(_schedule_restart(svc, chat_id, reason="telegram /restart confirm"))
 

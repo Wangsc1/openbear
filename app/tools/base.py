@@ -5,15 +5,18 @@ backend 各自把中性 schema 渲染成 OpenAI function / Anthropic input_schem
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from app.interaction_data import redact_result
 from app.logging import get_logger
+from app.runtime.tool_result import ToolOutcome
+from app.runtime.lifecycle import current_session
 from app.tools.json_repair import extract_balanced_json
 from app.tools.truncate import truncate_tool_result
 
@@ -108,8 +111,8 @@ def redact_tool_result_for_audit(name: str, result: str, arguments: str = "") ->
         }, ensure_ascii=False, separators=(",", ":"))
     return json.dumps(redact_result(payload), ensure_ascii=False, separators=(",", ":"))
 
-# 工具处理函数：(arguments_dict) -> 结果字符串
-ToolHandler = Callable[[dict[str, Any]], Awaitable[str]]
+# 工具处理函数：(arguments_dict) -> 结果字符串或结构化结果
+ToolHandler = Callable[[dict[str, Any]], Awaitable[str | ToolOutcome]]
 
 
 @dataclass(slots=True)
@@ -169,6 +172,10 @@ class ToolRuntimeContext:
     # this runtime callback so the model chooses event-only vs delayed review,
     # while Web owns reliable wake-up, aggregation, and same-root-turn routing.
     agent_wait: Callable[[dict[str, Any]], Awaitable[str]] | None = None
+    execution_id: str = ""
+    run_id: str = ""
+    # Last dispatch result, including cancellation when the await is interrupted.
+    tool_outcome: ToolOutcome | None = None
 
 
 _TOOL_CONTEXT: ContextVar[ToolRuntimeContext] = ContextVar(
@@ -188,6 +195,9 @@ class Tool:
     visibility: set[str]
     source: str = "builtin"
     preserve_result: bool = False
+    read_only: bool = False
+    concurrent_safe: bool = False
+    effect_scope: str = "unknown"
 
     def schema(self) -> dict[str, Any]:
         return {
@@ -213,11 +223,15 @@ class ToolRegistry:
 
     def add(self, name: str, description: str, parameters: dict[str, Any],
             handler: ToolHandler, *, visibility: set[str] | None = None,
-            source: str = "builtin", preserve_result: bool = False) -> None:
+            source: str = "builtin", preserve_result: bool = False,
+            read_only: bool = False, concurrent_safe: bool = False,
+            effect_scope: str = "unknown") -> None:
         self.register(Tool(name=name, description=description,
                            parameters=parameters, handler=handler,
                            visibility=set(visibility or {"main", "agent", "runtime"}),
-                           source=source, preserve_result=bool(preserve_result)))
+                           source=source, preserve_result=bool(preserve_result),
+                           read_only=read_only, concurrent_safe=concurrent_safe,
+                           effect_scope=effect_scope))
 
     def _visible_tools(self, scope: str | None = None, source: str | None = None) -> list[Tool]:
         if not scope:
@@ -246,14 +260,31 @@ class ToolRegistry:
         max_chars: int = _HARD_CAP_CHARS,
         context: ToolRuntimeContext | None = None,
     ) -> str:
-        """执行工具。arguments 是 JSON 字符串。返回结果字符串（回灌给模型）。
+        """兼容模型工具结果文本；完整执行状态由 dispatch_outcome 提供。"""
+        return (await self.dispatch_outcome(
+            name, arguments, max_chars=max_chars, context=context,
+        )).content
 
-        结果在产出当下就地智能截断到 max_chars 以内（head+tail），
-        存进 convo 后不再改 —— 历史字节级稳定，保护 prompt cache。
-        """
+    async def dispatch_outcome(
+        self,
+        name: str,
+        arguments: str,
+        *,
+        max_chars: int = _HARD_CAP_CHARS,
+        context: ToolRuntimeContext | None = None,
+    ) -> ToolOutcome:
+        """执行工具并返回完整状态；仅结果正文遵循原有智能截断规则。"""
+        execution_context = context if context is not None else ToolRuntimeContext()
+        execution_context.tool_outcome = None
+        session = current_session()
+        if session:
+            execution_context.execution_id = session.tool_action_id
+            execution_context.run_id = session.run_id
         tool = self._tools.get(name)
         if tool is None:
-            return f"error: 未知工具: {name}"
+            outcome = ToolOutcome(f"error: 未知工具: {name}", "failed", "not_started")
+            execution_context.tool_outcome = outcome
+            return outcome
         if not arguments.strip():
             args: Any = {}
         else:
@@ -264,23 +295,51 @@ class ToolRegistry:
                 # 失败时试一次括号配平提取;仍失败才报错。
                 repaired = extract_balanced_json(arguments)
                 if repaired is None:
-                    return f"error: 工具参数不是合法 JSON: {e}"
+                    outcome = ToolOutcome(f"error: 工具参数不是合法 JSON: {e}", "failed", "not_started")
+                    execution_context.tool_outcome = outcome
+                    return outcome
                 log.info("工具参数 JSON 容错修复成功", 工具=name)
                 args = repaired
         if not isinstance(args, dict):
-            return "error: 工具参数必须是 JSON 对象"
-        execution_context = context or ToolRuntimeContext()
+            outcome = ToolOutcome("error: 工具参数必须是 JSON 对象", "failed", "not_started")
+            execution_context.tool_outcome = outcome
+            return outcome
         execution_context.preserve_user_answer = False
+        image_start = len(execution_context.tool_images)
         token = _TOOL_CONTEXT.set(execution_context)
         try:
             try:
                 result = await tool.handler(args)
+            except asyncio.CancelledError:
+                execution_context.tool_outcome = ToolOutcome(
+                    "", "cancelled", "unknown",
+                    images=list(execution_context.tool_images[image_start:]),
+                )
+                raise
             except Exception as e:
                 log.exception("工具执行异常", 工具=name)
-                return f"error: 工具 {name} 执行失败: {type(e).__name__}: {e}"
+                outcome = ToolOutcome(
+                    f"error: 工具 {name} 执行失败: {type(e).__name__}: {e}",
+                    "failed", "unknown",
+                    images=list(execution_context.tool_images[image_start:]),
+                )
+                execution_context.tool_outcome = outcome
+                return outcome
         finally:
             _TOOL_CONTEXT.reset(token)
-        if isinstance(result, str) and len(result) > max_chars and not tool.preserve_result and not execution_context.preserve_user_answer:
-            log.info("工具结果智能截断", 工具=name, 原长=len(result), 上限=max_chars)
-            return truncate_tool_result(result, max_chars)
-        return result
+        if isinstance(result, ToolOutcome):
+            outcome = result
+        else:
+            # A legacy string may contain arbitrary error-looking text or JSON;
+            # neither provides evidence of business success or effect safety.
+            outcome = ToolOutcome(result, "completed", "reported")
+        content = outcome.content
+        if len(content) > max_chars and not tool.preserve_result and not execution_context.preserve_user_answer:
+            log.info("工具结果智能截断", 工具=name, 原长=len(content), 上限=max_chars)
+            content = truncate_tool_result(content, max_chars)
+        outcome = replace(
+            outcome, content=content,
+            images=[*outcome.images, *execution_context.tool_images[image_start:]],
+        )
+        execution_context.tool_outcome = outcome
+        return outcome

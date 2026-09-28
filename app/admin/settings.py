@@ -4,7 +4,7 @@ from __future__ import annotations
 from string import Formatter
 from typing import Any
 
-from app.rath.prompts import PROMPT_SPECS, render_plan_prompt, validate_prompt_template
+from app.agents.prompts import PROMPT_SPECS, render_plan_prompt, validate_prompt_template
 from app.settings.specs import GROUPS, SPECS, WEB_DOMAINS, SettingSpec, get_spec
 
 _SENSITIVE_EXACT = {

@@ -5,16 +5,16 @@ import asyncio
 import pytest
 
 from app.db.engine import DB
-from app.rath.builtin_workflows import ensure_builtin_workflows
-from app.rath.dao import RathDAO
-from app.rath.manager import RathTaskManager
+from app.agents.profiles import ensure_builtin_workflows
+from app.agents.dao import AgentDAO
+from app.agents.control import AgentControlService
 
 
 @pytest.fixture
 async def env(tmp_path):
     db = DB(str(tmp_path / "manager.db"))
     await db.connect()
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow_uuid = await ensure_builtin_workflows(dao)
     try:
         yield dao, workflow_uuid
@@ -24,7 +24,7 @@ async def env(tmp_path):
 
 async def test_register_rejects_duplicate_live_runner(env):
     dao, _workflow_uuid = env
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
 
     async def _sleep() -> None:
         await asyncio.sleep(30)
@@ -57,7 +57,7 @@ async def test_stop_does_not_rewrite_completed_task(env):
         finish=True,
         expected_statuses=("running",),
     )
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
 
     control_uuid = await manager.stop(task_uuid, message="late stop")
 
@@ -80,7 +80,7 @@ async def test_stop_wins_over_late_runner_completion(env):
         title="stop race",
         status="running",
     )
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
     completion_changed: list[bool] = []
 
     async def _late_complete() -> None:
@@ -114,7 +114,7 @@ async def test_stop_without_live_runner_marks_task_cancelled(env):
         title="stale",
         status="running",
     )
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
 
     await manager.stop(task_uuid, message="用户停止")
 
@@ -135,8 +135,10 @@ async def test_active_lookup_cleans_stale_running_task(env):
         title="stale",
         status="running",
     )
-    manager = RathTaskManager(dao)
-    manager._chat_active[123] = [task_uuid]  # simulate an interactive route-active task whose coroutine vanished
+    manager = AgentControlService(dao)
+    finished = asyncio.get_running_loop().create_future()
+    finished.set_result(None)
+    manager.register(task_uuid, 123, finished)  # completed coroutine awaiting registry cleanup
 
     active = await manager.active_task_for_chat(123)
 
@@ -156,7 +158,7 @@ async def test_detached_running_task_does_not_intercept_chat(env):
         title="detached",
         status="running",
     )
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
 
     async def _sleep() -> None:
         await asyncio.sleep(30)
@@ -187,7 +189,7 @@ async def test_stop_all_for_chat_cancels_detached_running_task(env):
         title="detached",
         status="running",
     )
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
 
     async def _sleep() -> None:
         await asyncio.sleep(30)
@@ -212,7 +214,7 @@ async def test_stop_all_for_chat_cancels_needs_openbear_control_task(env):
         title="waiting control",
         status="needs_openbear_control",
     )
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
 
     assert await manager.all_active_tasks_for_chat(123) == []
     controllable = await manager.all_controllable_tasks_for_chat(123)
@@ -235,7 +237,7 @@ async def test_interactive_registered_task_intercepts_chat(env):
         title="interactive",
         status="running",
     )
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
 
     async def _sleep() -> None:
         await asyncio.sleep(30)
@@ -264,8 +266,10 @@ async def test_active_lookup_does_not_rewrite_terminal_local_tail(env):
         status="running",
     )
     await dao.update_task(task_uuid, status="completed", current_status="任务完成", finish=True)
-    manager = RathTaskManager(dao)
-    manager._chat_active[123] = [task_uuid]  # simulate callback tail before in-memory clear
+    manager = AgentControlService(dao)
+    finished = asyncio.get_running_loop().create_future()
+    finished.set_result(None)
+    manager.register(task_uuid, 123, finished)  # simulate callback tail before scheduler cleanup
 
     active = await manager.active_task_for_chat(123)
 

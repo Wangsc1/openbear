@@ -2,6 +2,9 @@
 import {computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch} from "vue";
 import {ElDialog} from "element-plus";
 import ConsoleMarkdown from "../views/consoleView/ConsoleMarkdown.vue";
+import ArtifactDownload from "./ArtifactDownload.vue";
+import {onArtifactDownload} from "./artifactDownload.js";
+import {copyTextToClipboard} from "../utils/clipboard.js";
 import {htmlPreviewDocument} from "./htmlPreview.js";
 import {highlightCodeHtml} from "../views/consoleView/markdown.js";
 import {artifactFromUrl, artifactRecord, artifactFormat, artifactErrorMessage, formatFileSize, loadArtifactMetadata, loadArtifactText, readingState, clearArtifactCache} from "./artifactFiles.js";
@@ -78,7 +81,7 @@ async function onContentClick(event) {
 	event.preventDefault(); event.stopPropagation();
 	const source = button.closest(".md-code-block")?.querySelector("code")?.textContent;
 	if (source == null) return;
-	try { await navigator.clipboard.writeText(source); button.textContent = "已复制"; setTimeout(() => { if (button.isConnected) button.textContent = "复制"; }, 1200); }
+	try { await copyTextToClipboard(source); button.textContent = "已复制"; setTimeout(() => { if (button.isConnected) button.textContent = "复制"; }, 1200); }
 	catch { button.textContent = "复制失败"; }
 }
 function mediaChanged() { mobile.value = Boolean(media?.matches); }
@@ -94,7 +97,7 @@ onBeforeUnmount(() => { savePosition(); generation++; window.removeEventListener
 				<span class="artifact-preview-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10zM13 3v7h7M8 14h8M8 17h5"/></svg></span>
 				<div class="artifact-preview-heading"><h2 :id="titleId">{{ title }}</h2><p>{{ record?.metadata?.fileName || '附件' }}<template v-if="record?.metadata"> · {{ formatFileSize(record.metadata.sizeBytes) }}</template></p></div>
 				<div class="artifact-preview-actions">
-					<a v-if="selected" class="artifact-preview-action" :href="selected.identity.downloadUrl" download aria-label="下载原文件" title="下载原文件"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/></svg></a>
+					<a v-if="selected" class="artifact-preview-action" :href="selected.identity.downloadUrl" download aria-label="下载原文件" title="下载原文件" @click="onArtifactDownload($event, selected.identity)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/></svg></a>
 					<button v-if="!mobile" type="button" class="artifact-preview-action" :aria-label="maximized ? '还原窗口' : '最大化预览'" :title="maximized ? '还原窗口' : '最大化预览'" @click="maximized = !maximized"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path v-if="maximized" d="M8 8V4h12v12h-4M4 8h12v12H4z"/><path v-else d="M4 9V4h5m6 0h5v5m0 6v5h-5M9 20H4v-5"/></svg></button>
 					<button type="button" class="artifact-preview-action" aria-label="关闭附件预览" title="关闭预览（Esc）" @click="close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button>
 				</div>
@@ -114,7 +117,7 @@ onBeforeUnmount(() => { savePosition(); generation++; window.removeEventListener
 				<div v-if="imageFailed" class="artifact-preview-empty" role="alert"><strong>图片未能加载</strong><p>可以重新读取，或下载原文件查看。</p><button type="button" @click="loadSelected(true)">重新读取</button></div>
 				<div v-else class="artifact-preview-image-stage" :class="{'is-fit': imageZoom == null}"><span v-if="imageLoading" class="artifact-preview-image-status" role="status">正在加载图片…</span><img :key="imageVersion" :src="selected.identity.contentUrl" :alt="record?.metadata?.fileName || title" :style="imageZoom == null ? {} : {width: `${Math.round(imageWidth * imageZoom)}px`}" @load="imageLoaded" @error="imageFailed = true; imageLoading = false"></div>
 			</template>
-			<div v-else-if="format.kind === 'unsupported'" class="artifact-preview-empty"><span class="artifact-preview-file-type">{{ format.label }}</span><strong>这个文件暂不支持站内预览</strong><p>原文件已保留，可以直接下载查看。</p><a :href="selected.identity.downloadUrl" download>下载原文件</a></div>
+			<div v-else-if="format.kind === 'unsupported'" class="artifact-preview-empty"><span class="artifact-preview-file-type">{{ format.label }}</span><strong>这个文件暂不支持站内预览</strong><p>原文件已保留，可以直接下载查看。</p><a :href="selected.identity.downloadUrl" download @click="onArtifactDownload($event, selected.identity)">下载原文件</a></div>
 			<div v-else-if="text.length === 0" class="artifact-preview-empty"><strong>这是一个空文件</strong><p>仍可通过右上角下载原文件。</p></div>
 			<template v-else-if="format.kind === 'html' && mode === 'preview'">
 				<iframe v-if="opened" class="artifact-preview-html" :title="`HTML 页面预览：${title}`" :srcdoc="htmlDocument" sandbox="allow-scripts" referrerpolicy="no-referrer" allow="camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'"></iframe>
@@ -124,6 +127,7 @@ onBeforeUnmount(() => { savePosition(); generation++; window.removeEventListener
 		</div>
 		<div class="artifact-preview-footer"><span>对话附件<span v-if="!mobile"> · 只读预览</span></span><span>{{ format.kind === 'html' && mode === 'preview' && !error && !busy ? '隔离预览 · 外部资源与接口访问受限' : format.kind === 'markdown' && !error && !busy ? (mode === 'preview' ? 'Markdown 已渲染' : '显示原始 Markdown') : '下载始终保留原文件' }}</span></div>
 	</ElDialog>
+	<ArtifactDownload :navigation-key="navigationKey"/>
 </template>
 
 <style>
@@ -177,6 +181,21 @@ onBeforeUnmount(() => { savePosition(); generation++; window.removeEventListener
 .artifact-preview-footer { display: flex; flex: none; justify-content: space-between; gap: 12px; padding: 10px 24px; border-top: 1px solid var(--ob-border-soft); color: var(--ob-text-muted); font-size: 10px; line-height: 1.4; }
 .artifact-preview-dialog button:focus-visible, .artifact-preview-dialog a:focus-visible { outline: 2px solid var(--ob-blue); outline-offset: 2px; }
 @keyframes artifact-spin { to { transform: rotate(360deg); } }
-@media (max-width: 760px) { .artifact-preview-header { min-height: 76px; padding: 14px 14px; gap: 9px; } .artifact-preview-mark { display: none; } .artifact-preview-heading h2 { font-size: 14px; } .artifact-preview-actions { gap: 0; } .artifact-preview-toolbar { padding: 8px 15px; gap: 8px; } .artifact-preview-document { padding: 20px 20px 35px; font-size: 13px; } .artifact-preview-source { padding: 18px 18px 35px; } .artifact-preview-footer { padding: 10px 16px max(10px, env(safe-area-inset-bottom)); } }
+@media (max-width: 760px) {
+	.artifact-preview-dialog.el-dialog.is-fullscreen {
+		margin-top: calc(var(--mobile-viewport-top, 0px) + env(safe-area-inset-top, 0px));
+		height: calc(var(--mobile-viewport-height, 100dvh) - env(safe-area-inset-top, 0px));
+		max-height: calc(var(--mobile-viewport-height, 100dvh) - env(safe-area-inset-top, 0px));
+	}
+	.artifact-preview-header { min-height: 76px; padding: 14px max(14px, env(safe-area-inset-right, 0px)) 14px max(14px, env(safe-area-inset-left, 0px)); gap: 9px; }
+	.artifact-preview-mark { display: none; }
+	.artifact-preview-heading h2 { font-size: 14px; }
+	.artifact-preview-actions { gap: 0; }
+	.artifact-preview-toolbar { padding: 8px max(15px, env(safe-area-inset-right, 0px)) 8px max(15px, env(safe-area-inset-left, 0px)); gap: 8px; }
+	.artifact-preview-body { padding-left: env(safe-area-inset-left, 0px); padding-right: env(safe-area-inset-right, 0px); }
+	.artifact-preview-document { padding: 20px 20px 35px; font-size: 13px; }
+	.artifact-preview-source { padding: 18px 18px 35px; }
+	.artifact-preview-footer { padding: 10px max(16px, env(safe-area-inset-right, 0px)) max(10px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left, 0px)); }
+}
 @media (prefers-reduced-motion: reduce) { .artifact-preview-spinner { animation: none; } }
 </style>

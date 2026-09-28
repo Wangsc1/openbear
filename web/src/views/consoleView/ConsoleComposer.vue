@@ -6,6 +6,8 @@ import InteractionMarkdown from "./InteractionMarkdown.vue";
 import ContextCompactionIcon from "./legacy/ContextCompactionIcon.vue";
 import ModelFeatureIcon from "./ModelFeatureIcon.vue";
 import ContextUsageMeter from './ContextUsageMeter.vue';
+import {Coins, Layers, Clock3} from "@lucide/vue";
+import {ElMessage} from "element-plus";
 import {
 	ArrowDown,
 	CircleCheck,
@@ -52,6 +54,7 @@ const props = defineProps({
 	conversationUuid: {type: String, default: ""},
 	pendingAttachments: {type: Array, default: () => []},
 	attachmentPreviews: {type: Object, default: () => ({})},
+	uploadProgress: {type: Object, default: () => ({})},
 	pendingConfirmations: {type: Array, default: () => []},
 	confirmationSubmitting: {type: Object, default: () => ({})},
 	confirmationErrors: {type: Object, default: () => ({})},
@@ -90,6 +93,9 @@ const props = defineProps({
 	contextThresholdDisplay: {type: String, default: "—"},
 	contextWindowDisplay: {type: String, default: "—"},
 	contextPercentDisplay: {type: String, default: "—"},
+	tokensText: {type: String, default: "0"},
+	cachePercentText: {type: String, default: "—"},
+	durationText: {type: String, default: "—"},
 	costText: {type: String, default: "$0.0000"},
 });
 const emit = defineEmits([
@@ -313,7 +319,8 @@ function onPaste(event) {
 	const files = clipboardFiles(event);
 	if (!files.length) return;
 	event.preventDefault();
-	if (!props.running) emit("attachment-change", files);
+	if (props.running) ElMessage.warning("运行中暂不能添加附件");
+	else emit("attachment-change", files);
 	insertPlainTextFromPaste(event);
 }
 
@@ -659,7 +666,7 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 				</div>
 			</div>
 
-			<div v-if="props.pendingConfirmations.length" class="web-confirm-stack">
+			<div v-if="props.pendingConfirmations.length" class="web-confirm-stack" :class="{'has-multiple': props.pendingConfirmations.length > 1}">
 				<div v-for="item in props.pendingConfirmations" :key="item.confirmationId" class="web-confirm-card"
 				     :class="{'questionnaire-card': interactionAction(item) === 'questionnaire', 'is-expired': interactionExpired(item)}"
 				     :data-questionnaire-id="interactionAction(item) === 'questionnaire' ? item.confirmationId : undefined"
@@ -682,7 +689,7 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 						<div v-if="item.body" class="web-interaction-content" tabindex="0" role="region" :aria-label="`${item.title || '问卷'}内容`">
 							<InteractionMarkdown class="questionnaire-intro" :text="item.body"/>
 						</div>
-						<div class="questionnaire-questions">
+						<div class="questionnaire-questions" :class="{'has-multiple': questionnaireQuestions(item).length > 1}">
 							<fieldset v-for="(question, questionIndex) in questionnaireQuestions(item)"
 							          :key="questionnaireQuestionId(question) || questionIndex"
 							          class="questionnaire-question"
@@ -764,7 +771,7 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 						<template v-if="interactionAction(item) === 'select'">
 							<div class="web-interaction-options">
 								<label v-for="(option, idx) in item.options || []" :key="`${item.confirmationId}-${idx}`"
-								       class="web-interaction-option" :class="{'is-selected': optionChecked(item, idx)}">
+								       class="web-interaction-option" :class="{'is-selected': optionChecked(item, idx), 'is-disabled': interactionDisabled(item)}">
 									<input :type="item.multiple ? 'checkbox' : 'radio'" :name="`interaction-${item.confirmationId}`"
 									       :checked="optionChecked(item, idx)" :disabled="interactionDisabled(item)" @change="toggleOption(item, idx)"/>
 									<span class="web-interaction-option-copy"><strong>{{ optionLabel(option) }}</strong><small v-if="option?.description">{{ option.description }}</small></span>
@@ -824,6 +831,12 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 							<span>{{ item.file.name }}</span>
 							<small>{{ fmtBytes(item.file.size) }}</small>
 						</div>
+						<div v-if="props.uploadProgress[item.id]" class="attachment-upload-state"
+						     :class="`is-${props.uploadProgress[item.id].phase}`"
+						     role="status" :aria-label="`${item.file.name}：${props.uploadProgress[item.id].phase === 'failed' ? '上传失败，附件已保留' : props.uploadProgress[item.id].phase === 'finalizing' ? '保存中' : props.uploadProgress[item.id].phase === 'complete' ? '上传完成，等待发送确认' : `上传 ${props.uploadProgress[item.id].percent}%`}`">
+							<span>{{ props.uploadProgress[item.id].phase === 'failed' ? '失败 · 已保留' : props.uploadProgress[item.id].phase === 'finalizing' ? '保存中' : props.uploadProgress[item.id].phase === 'complete' ? '待确认' : `${props.uploadProgress[item.id].percent}%` }}</span>
+							<div class="attachment-upload-track"><div :style="{width: `${props.uploadProgress[item.id].percent}%`}"/></div>
+						</div>
 						<el-tooltip content="移除附件" placement="top" :show-after="260">
 							<button type="button" class="attachment-remove" :aria-label="`移除附件：${item.file.name}`"
 							        @click.stop="emit('remove-attachment', item.id)">
@@ -869,7 +882,6 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 						</el-tooltip>
 					</div>
 					<div class="composer-status">
-						<ContextUsageMeter :usage="props.contextUsage" :context-window="props.contextWindowTokens" :threshold="props.contextThresholdTokens" :strategy="props.contextStrategy" :conversation-uuid="props.conversationUuid"/>
 						<el-popover ref="runConfigPopover" v-model:visible="runConfigPopoverVisible"
 						            popper-class="composer-menu-popper run-config-menu-popper"
 						            placement="top-end"
@@ -985,8 +997,8 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 								<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/></svg>
 							</button>
 						</el-tooltip>
-						<el-tooltip v-else content="发送消息（Enter）" placement="top" :show-after="260">
-							<button type="button" class="send-button" aria-label="发送消息（Enter）" :disabled="!props.canSend"
+						<el-tooltip v-else content="发送消息（Enter；触屏可用 Ctrl/⌘+Enter）" placement="top" :show-after="260">
+							<button type="button" class="send-button" aria-label="发送消息（桌面 Enter；触屏 Ctrl 或 Command 加 Enter）" :disabled="!props.canSend"
 							        @click="emit('send')">
 								<Promotion/>
 							</button>
@@ -994,9 +1006,16 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 					</div>
 				</div>
 			</div>
+			<div class="composer-usage-summary" aria-label="上下文与会话累计统计">
+				<ContextUsageMeter :usage="props.contextUsage" :context-window="props.contextWindowTokens" :threshold="props.contextThresholdTokens" :strategy="props.contextStrategy" :conversation-uuid="props.conversationUuid"/>
+				<span class="composer-total" :title="`总 Tokens ${props.tokensText}；缓存命中率 ${props.cachePercentText}`" :aria-label="`总 Tokens ${props.tokensText}；缓存命中率 ${props.cachePercentText}`"><Layers aria-hidden="true"/><span>{{ props.tokensText }}（{{ props.cachePercentText }}）</span></span>
+				<span class="composer-total" :title="`总花费 ${props.costText}`" :aria-label="`总花费 ${props.costText}`"><Coins aria-hidden="true"/><span>{{ props.costText }}</span></span>
+				<span class="composer-total" :title="`总耗时 ${props.durationText}`" :aria-label="`总耗时 ${props.durationText}`"><Clock3 aria-hidden="true"/><span>{{ props.durationText }}</span></span>
+			</div>
 			<div class="composer-hints mt-2 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-ob-muted">
-				<span>Enter 发送 · Ctrl/⌘+Enter 也可发送</span>
-				<span>图片/文本附件会随本轮发送</span>
+				<span class="composer-desktop-shortcut">Enter 发送 · Ctrl/⌘+Enter 也可发送</span>
+				<span class="composer-touch-shortcut">Enter 换行 · Ctrl/⌘+Enter 发送</span>
+				<span class="composer-attachment-hint">图片/文本附件会随本轮发送</span>
 			</div>
 		</div>
 	</footer>
@@ -1077,7 +1096,7 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 }
 
 /* A single card owns its content scroll; only stacked cards need an outer rail. */
-.web-confirm-stack:has(.web-confirm-card + .web-confirm-card) {
+.web-confirm-stack.has-multiple {
 	grid-auto-rows: max-content;
 	max-height: min(58vh, 36rem);
 	max-height: min(58dvh, 36rem);
@@ -1341,7 +1360,7 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 }
 
 .web-confirm-btn:disabled,
-.web-interaction-option:has(input:disabled),
+.web-interaction-option.is-disabled,
 .clear-question-choice:disabled {
 	opacity: 0.58;
 	cursor: not-allowed;
@@ -1365,7 +1384,7 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 	max-height: min(14dvh, 8rem);
 }
 
-.questionnaire-questions:has(.questionnaire-question + .questionnaire-question) {
+.questionnaire-questions.has-multiple {
 	max-height: min(32vh, 20rem);
 	max-height: min(32dvh, 20rem);
 	overflow: auto;
@@ -1645,6 +1664,22 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 	background: linear-gradient(180deg, var(--ob-surface), var(--ob-surface));
 	box-shadow: var(--ob-shadow-panel);
 }
+
+.attachment-upload-state {
+	position: absolute;
+	inset: auto 0 0;
+	padding: 0.18rem 0.3rem 0.24rem;
+	background: rgb(var(--ob-text-strong-rgb) / 0.84);
+	color: var(--ob-text-inverse);
+	font-size: 0.66rem;
+	font-weight: 700;
+	text-align: center;
+	pointer-events: none;
+}
+.attachment-upload-state.is-failed { background: rgb(var(--ob-danger-rgb) / 0.92); }
+.attachment-upload-track { height: 3px; margin-top: 0.15rem; border-radius: 3px; background: rgb(255 255 255 / 0.35); }
+.attachment-upload-track div { height: 100%; border-radius: inherit; background: currentColor; }
+.attachment-upload-state.is-finalizing .attachment-upload-track div { opacity: 0.65; }
 
 .attachment-thumb {
 	display: block;
@@ -2212,17 +2247,24 @@ button.status-chip:hover, .status-chip-active {
 	cursor: not-allowed;
 }
 
-@media (min-width: 761px) {
-	/* Desktop already includes usage in the model/configuration button. */
-	.composer-status :deep(.context-usage-trigger) { display: none; }
+/* Desktop keeps context in run configuration and totals in the header. */
+.composer-usage-summary { display: none; }
+.composer-touch-shortcut { display: none; }
+@media (hover: none) and (pointer: coarse) {
+	.composer-desktop-shortcut { display: none; }
+	.composer-touch-shortcut { display: inline; }
 }
 
 @media (max-width: 760px) {
-	.composer-shell { padding: .5rem .75rem max(8px, env(safe-area-inset-bottom, 0px)); }
-	.composer-box { padding: 7px; border-radius: 15px; margin-bottom: 32px; }
-	/* One live usage owner, placed beneath the input without squeezing its actions. */
-	.composer-toolbar :deep(.context-usage-trigger) { position: absolute; left: 50%; bottom: -34px; transform: translateX(-50%); }
-	.composer-status .run-config-chip-strategy { display: none; }
+	.composer-shell { padding: .5rem .75rem 8px; }
+	.composer-box { padding: 7px; border-radius: 15px; }
+	/* Normal flow lets long totals wrap without covering the editor or its actions. */
+	.composer-usage-summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0 5px; min-height: 32px; padding-top: 2px; color: var(--ob-chat-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+	.composer-total { display: inline-flex; align-items: center; gap: 3px; min-height: 24px; line-height: 24px; white-space: nowrap; }
+	.composer-total::before { content: "·"; margin-right: 2px; color: var(--ob-chat-muted); }
+	.composer-total > svg { width: 11px; height: 11px; flex: none; stroke-width: 1.7; }
+	.composer-total > span { color: var(--ob-chat-subtle); }
+	.composer-status .run-config-chip-strategy { display: inline; font-size: 10px; }
 	.composer-toolbar {
 		display: flex;
 		flex-wrap: nowrap;
@@ -2254,7 +2296,7 @@ button.status-chip:hover, .status-chip-active {
 	.composer-clear:disabled { display: none; }
 	.composer-toolbar button.run-config-chip:focus-visible { outline: 2px solid var(--bear-accent); outline-offset: -2px; }
 	.run-config-chip-meta { display: none; }
-	.composer-hints { display: none; }
+	.composer-attachment-hint { display: none; }
 	:deep(.reference-editor-content) { min-height: min(3rem, calc(var(--mobile-viewport-height, 100dvh) * .22)); padding: .55rem .5rem; }
 	:deep(.reference-editor-placeholder) { padding: .65rem .5rem; }
 }
@@ -2266,7 +2308,6 @@ button.status-chip:hover, .status-chip-active {
 	.composer-status { display: contents; }
 	.composer-actions { grid-row: 2; grid-column: 1; }
 	.composer-toolbar button.run-config-chip { grid-row: 1; grid-column: 1; justify-self: start; max-width: 100%; }
-	.composer-toolbar :deep(.context-usage-trigger) { grid-row: auto; grid-column: auto; }
 	.composer-toolbar .send-button { grid-row: 2; grid-column: 2; }
 }
 @media (min-width: 761px) and (max-width: 1120px) {
@@ -2276,6 +2317,7 @@ button.status-chip:hover, .status-chip-active {
 }
 
 @media (max-width: 760px), (hover: none) and (pointer: coarse) {
+	.composer-hints { display: none; }
 	/* In an exceptionally short landscape/keyboard viewport, keep every input
 	   action reachable inside the composer rather than overflowing the page. */
 	.composer-shell { max-height: 100%; overflow-y: auto; pointer-events: auto; }

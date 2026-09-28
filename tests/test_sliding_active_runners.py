@@ -12,7 +12,7 @@ from app.context.window import WindowPolicy, source_of
 from app.db.dao import MessageDAO
 from app.llm.base import AgentResult
 from app.llm.events import StreamEvent, ToolCall
-from app.rath.single_agent import SingleAgentWorkflowRunner
+from app.agents.execution import AgentExecutor
 from app.task_memory import TaskMemoryDAO, is_task_memory_runtime_message
 from app.tools.base import ToolRegistry
 from app.web_admin import _WebLiveStream, _WebStreamRenderer
@@ -162,7 +162,7 @@ async def test_agent_same_task_pause_resume_pins_instruction_and_current_control
             return AgentResult(text="continued")
 
     backend = Backend()
-    runner = SingleAgentWorkflowRunner(dao, task_uuid, agent=replace(agent, tool_allowlist=["Read"]),
+    runner = AgentExecutor(dao, task_uuid, agent=replace(agent, tool_allowlist=["Read"]),
                                        backend=backend, model="gpt", max_tokens=1024, tools=registry,
                                        model_call_limit=1, context_window=128000, rollover_trigger_tokens=8000,
                                        plan_protocol_enabled=False)

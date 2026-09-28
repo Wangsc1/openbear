@@ -3,6 +3,7 @@ import {computed, onBeforeUnmount, ref, watch} from "vue";
 import {renderMarkdown} from "./markdown.js";
 import {vMarkdownHtml} from "./markdownDom.js";
 import {artifactFromUrl, openArtifactPreview} from "../../artifacts/artifactFiles.js";
+import {onArtifactDownload} from "../../artifacts/artifactDownload.js";
 import {referenceFromUrl, referenceKey} from "../../references/codec.js";
 
 const props = defineProps({
@@ -205,7 +206,8 @@ function onMarkdownClick(event) {
 	const link = event.target?.closest?.("a[href]");
 	if (!img && link && !event.defaultPrevented && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && (!event.button || event.button === 0)) {
 		const artifact = artifactFromUrl(link.getAttribute("href"));
-		if (artifact && !artifact.download) {
+		if (artifact?.download) { onArtifactDownload(event, artifact); return; }
+		if (artifact) {
 			event.preventDefault(); event.stopPropagation();
 			openArtifactPreview(artifact, link.textContent.trim(), link);
 			return;

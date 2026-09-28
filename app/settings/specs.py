@@ -9,7 +9,7 @@ from typing import Literal
 from app.browser.settings import build_specs as _browser_specs
 from app.context.summary_prompt import DEFAULT_SUMMARY_PROMPT
 from app.conversation_titles import DEFAULT_NAMING_PROMPT
-from app.rath.prompts import PROMPT_SPECS
+from app.agents.prompts import PROMPT_SPECS
 
 SettingKind = Literal["bool", "int", "float", "str", "multi"]
 Effect = Literal["立即生效", "下一轮生效", "需要重启"]

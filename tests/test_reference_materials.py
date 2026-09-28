@@ -208,7 +208,7 @@ async def test_reference_preview_is_authorized_metadata_only_and_invalid_referen
 async def test_running_steers_keep_each_occurrence_bound_to_its_frozen_material(web_env):
     from types import SimpleNamespace
 
-    from app.agent.runs import RunRegistry
+    from app.runtime.scheduler import ControllerRuns
     from app.llm.events import StreamEvent
     from app.tools.base import ToolRegistry
     from tests.test_web_admin import FakeRunFactory, FakeStreamBackend
@@ -235,7 +235,7 @@ async def test_running_steers_keep_each_occurrence_bound_to_its_frozen_material(
     )
     e.server.llm_factory = FakeRunFactory(backend, context_window=128000)
     e.server.model_selection = SimpleNamespace(current="openai/gpt")
-    e.server.runs = RunRegistry()
+    e.server.runs = ControllerRuns()
     e.server.tools = ToolRegistry()
 
     async def system(conversation_uuid=""):

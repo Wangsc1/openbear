@@ -14,7 +14,7 @@ from typing import Any
 from aiohttp import WSMsgType, web
 
 from app.reference_policy import CONVERSATION_CONTENT_LIMIT, catalog_history_sizes
-from app.web_console.core import _WEB_SESSION_KEY
+from app.web_console.core import _WEB_SESSION_KEY, log
 
 
 def catalog_preview(value: str) -> str:
@@ -438,25 +438,35 @@ class WebAdminRealtimeMixin:
         await hub.snapshot(queue, int(session.chat_id), request.query.get("archived") == "1")
 
         async def writer():
-            while True:
-                # Periodic authentication also revokes an already-open channel.
-                if await self.session_from_request(request) is None:
-                    await ws.close(code=1008, message=b"session expired")
-                    return
-                try:
-                    packet = await asyncio.wait_for(queue.get(), 20)
-                except TimeoutError:
-                    packet = {"type": "ping"}
-                await ws.send_json(packet)
-                if packet.get("type") == "reconnect":
-                    await ws.close(code=1012)
-                    return
+            try:
+                while True:
+                    # Check both idle subscriptions and queued outgoing metadata.
+                    try:
+                        packet = await asyncio.wait_for(queue.get(), 20)
+                    except TimeoutError:
+                        packet = {"type": "ping"}
+                    if await self.session_from_request(request) is None:
+                        await ws.close(code=1008, message=b"session expired")
+                        return
+                    await ws.send_json(packet)
+                    if packet.get("type") == "reconnect":
+                        await ws.close(code=1012)
+                        return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Global WebSocket writer failed")
+                with contextlib.suppress(Exception):
+                    await ws.close(code=1011, message=b"metadata writer failed; reconnect")
 
         task = asyncio.create_task(writer())
         try:
             async for message in ws:
                 if message.type != WSMsgType.TEXT:
                     continue
+                if await self.session_from_request(request) is None:
+                    await ws.close(code=1008, message=b"session expired")
+                    break
                 try:
                     data = json.loads(message.data)
                 except (ValueError, TypeError):

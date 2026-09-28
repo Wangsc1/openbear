@@ -1,0 +1,15 @@
+/* iOS zooms focused editable controls below 16px. Apply this to the actual
+   input/editable node (including teleported dialogs), not to surrounding copy.
+   Touch landscape/tablets, including fine-pointer peripherals, also need it;
+   non-touch desktop typography and pinch zoom stay
+   untouched. Important beats scoped form rules and Monaco's inline input size. */
+@media (max-width: 760px), (hover: none) and (pointer: coarse), (any-pointer: coarse) {
+  input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="file"]):not([type="image"]),
+  textarea,
+  select,
+  [contenteditable]:not([contenteditable="false"]),
+  .el-select__wrapper,
+  .reference-editor-placeholder {
+    font-size: 16px !important;
+  }
+}

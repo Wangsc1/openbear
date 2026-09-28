@@ -50,6 +50,7 @@ class StreamEvent:
     kind:
       - "content"    正文增量（text）
       - "reasoning"  思考增量（text）；anthropic 还可带 signature
+      - "encrypted_reasoning" 加密思考展示（text，整段替换）；不作为可读思考聚合或回灌
       - "tool_call"  完整工具调用集合（tool_calls）
       - "usage"      用量（usage）
       - "finish"     结束（finish_reason: stop|tool_calls|length|...）
@@ -61,7 +62,8 @@ class StreamEvent:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     # Provider 原生 output items。当前由 OpenAI Responses 用于无状态
-    # encrypted reasoning continuation；不得放入用户可见事件或日志。
+    # encrypted reasoning continuation；完整 items 不得放入用户可见事件或日志。
+    # 用户可见的密文展示仅通过独立 encrypted_reasoning 事件传递。
     native_output_items: list[dict] = field(default_factory=list)
     usage: Usage | None = None
     finish_reason: str = ""

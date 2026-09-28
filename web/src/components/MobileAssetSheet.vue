@@ -44,7 +44,7 @@ async function copyReference() {
 </script>
 
 <template>
-  <el-drawer :model-value="props.modelValue" direction="btt" size="auto" :title="title" class="mobile-asset-sheet" append-to-body destroy-on-close @update:model-value="emit('update:modelValue', $event)">
+  <el-drawer :model-value="props.modelValue" direction="btt" size="auto" :title="title" class="mobile-asset-sheet mobile-viewport-sheet" append-to-body destroy-on-close @update:model-value="emit('update:modelValue', $event)">
     <div class="mobile-asset-grip" aria-hidden="true"></div>
     <template v-if="props.view === 'detail'">
       <p v-if="props.loading" class="asset-sheet-notice" role="status">正在读取内容…</p>

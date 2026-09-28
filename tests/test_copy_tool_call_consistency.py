@@ -10,7 +10,7 @@ import pytest
 from app.agent.native_continuation import serialize_messages
 from app.context.window import mark_source, neutral_context, source_of
 from app.llm.events import ToolCall
-from app.rath.schemas import RathAgentDef
+from app.agents.schemas import AgentDefinition
 from tests.test_conversation_copy_context import copied, runner_for
 from tests.test_rath_web_api import web_env as shared_web_env
 
@@ -21,7 +21,7 @@ web_env = shared_web_env
 async def test_copy_tool_arguments_agree_in_archive_window_and_checkpoint(web_env, partial):
     env = web_env
     await env.server.global_realtime.close()
-    dao = env.server.rath_dao
+    dao = env.server.agent_dao
     source = await env.server._create_web_conversation(123, title="args copy")
     conv, chat = source["conversation_uuid"], source["internal_chat_id"]
     workflow = await dao.workflow_by_slug("single-agent")
@@ -29,7 +29,7 @@ async def test_copy_tool_arguments_agree_in_archive_window_and_checkpoint(web_en
         workflow_uuid=workflow.workflow_uuid, agent_key="copy-agent")
     tid = await dao.create_task(chat_id=chat, workflow_uuid=workflow.workflow_uuid, parent_session_uuid=conv,
         title="partial", agent_session_uuid=instance.session_uuid)
-    agent = RathAgentDef(workflow_uuid=workflow.workflow_uuid, agent_key="copy-agent", name="Copy", id=1,
+    agent = AgentDefinition(workflow_uuid=workflow.workflow_uuid, agent_key="copy-agent", name="Copy", id=1,
         system_prompt="Inspect", tool_allowlist=[], model="gpt", enabled=True)
     runner = runner_for(env, source, instance, tid, agent)
     runner.session_id = "SOURCE_PROVIDER_SESSION"

@@ -14,7 +14,7 @@ class _ConversationHarness(WebAdminConversationsMixin):
         self.db = db
         self._web_starting_turns: dict[str, Any] = {}
         self._web_live_streams: dict[str, Any] = {}
-        self.rath = None
+        self.agents = None
         self.runs = None
 
     async def _ensure_default_web_conversation(self, owner_chat_id: int) -> None:

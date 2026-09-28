@@ -532,7 +532,7 @@ class SessionConfig(BaseModel):
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
 
-class RathConfig(BaseModel):
+class AgentsConfig(BaseModel):
     enabled: bool = True
     status_update_interval_s: float = Field(default=3.0, alias="statusUpdateIntervalS")
     max_concurrent_tasks: int = Field(default=3, alias="maxConcurrentTasks", ge=1)
@@ -669,7 +669,7 @@ class Config(BaseModel):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
-    rath: RathConfig = Field(default_factory=RathConfig)
+    agents: AgentsConfig = Field(default_factory=AgentsConfig, alias="rath", validation_alias=AliasChoices("agents", "rath"))
     web: WebConfig = Field(default_factory=WebConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     media: MediaConfig = Field(default_factory=MediaConfig)

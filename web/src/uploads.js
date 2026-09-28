@@ -11,11 +11,11 @@ export async function uploadFilesViaHttp(api, conversationUuid, files = [], {sig
   let loaded = 0;
   for (const [index, file] of list.entries()) {
     signal?.throwIfAborted();
-    const progress = (bytes) => onProgress?.({loaded: loaded + bytes, total, fileIndex: index, fileCount: list.length});
+    const progress = (bytes, phase = "uploading") => onProgress?.({loaded: loaded + bytes, total, fileIndex: index, fileCount: list.length, fileLoaded: bytes, fileSize: file.size, phase});
     const cached = completedUploads.get(file)?.get(conversationUuid);
     if (cached) {
       rows.push({uploadId: cached});
-      progress(file.size);
+      progress(file.size, "complete");
       loaded += file.size;
       continue;
     }
@@ -38,6 +38,7 @@ export async function uploadFilesViaHttp(api, conversationUuid, files = [], {sig
         progress(offset);
       }
       signal?.throwIfAborted();
+      progress(file.size, "finalizing");
       // Finalizing may hash/copy a large file. Neither this nor the upload shares
       // the short WS acknowledgement/ordinary JSON request timeout.
       const completed = await api.post(`${url}/complete`, {}, {signal, timeout: 0});
@@ -46,7 +47,7 @@ export async function uploadFilesViaHttp(api, conversationUuid, files = [], {sig
       if (!cache) completedUploads.set(file, cache = new Map());
       cache.set(conversationUuid, uploadId);
       rows.push({uploadId});
-      progress(file.size);
+      progress(file.size, "complete");
       loaded += file.size;
     } catch (error) {
       // Never retry a chunk/message after an uncertain response. Only unfinished

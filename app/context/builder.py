@@ -17,13 +17,13 @@ from app.db.dao import MessageDAO, SummaryDAO
 from app.llm.base import Message
 from app.logging import get_logger
 from app.memory.client import MemoryClient
-from app.rath.controller_projection import project_history_message_for_controller
+from app.agents.controller_projection import project_history_message_for_controller
 from app.tools.base import ToolRegistry
 from app.tools.skills import Skill, render_skills_block
 from app.utils import now_cn
 
 if TYPE_CHECKING:
-    from app.rath.dao import RathDAO
+    from app.agents.dao import AgentDAO
 
 log = get_logger("context.builder")
 
@@ -200,23 +200,23 @@ async def build_controller_history(
 class ContextBuilder:
     def __init__(self, mem: MemoryClient, messages: MessageDAO, summaries: SummaryDAO,
                  skills: list[Skill], tools: ToolRegistry, workspace_dir: str,
-                 rath_dao: RathDAO | None = None, mcp_manager: Any = None) -> None:
+                 agent_dao: AgentDAO | None = None, mcp_manager: Any = None) -> None:
         self._mem = mem
         self._messages = messages
         self._summaries = summaries
         self._skills = skills
         self._tools = tools
         self._workspace_dir = workspace_dir
-        self._rath_dao = rath_dao
+        self._agent_dao = agent_dao
         self._mcp_manager = mcp_manager
 
     async def _available_agents_for_prompt(self) -> list[dict[str, Any]]:
-        if self._rath_dao is None:
+        if self._agent_dao is None:
             return []
         try:
-            from app.rath.prompting import available_agent_prompt_items
+            from app.agents.prompting import available_agent_prompt_items
 
-            return await available_agent_prompt_items(self._rath_dao)
+            return await available_agent_prompt_items(self._agent_dao)
         except Exception as exc:
             log.warning("获取可用 Agent 提示词参数失败", 错误=str(exc)[:120])
             return []

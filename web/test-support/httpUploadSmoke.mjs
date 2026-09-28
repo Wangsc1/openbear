@@ -33,10 +33,19 @@ const files = [
   new File([], 'empty.txt', {type: 'text/plain'}),
 ];
 let progress;
-const refs = await uploadFilesViaHttp(api, conversationUuid, files, {onProgress: event => {progress = event;}});
+const progressEvents = [];
+const refs = await uploadFilesViaHttp(api, conversationUuid, files, {onProgress: event => {progress = event; progressEvents.push(event);}});
 const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
 assert.equal(refs.length, 3);
 assert.equal(progress.loaded, totalBytes);
+assert.equal(progress.phase, 'complete');
+assert.ok(progressEvents.some(event => event.phase === 'uploading' && event.fileIndex === 0 && event.loaded > 0 && event.loaded < totalBytes));
+for (const fileIndex of [0, 1, 2]) {
+  const events = progressEvents.filter(event => event.fileIndex === fileIndex);
+  assert.equal(events.at(-2).phase, 'finalizing', '100% bytes must not masquerade as completed server-side storage');
+  assert.equal(events.at(-1).phase, 'complete');
+  assert.equal(events.at(-1).fileLoaded, files[fileIndex].size);
+}
 assert.equal(chunks.length, 141);
 assert.ok(chunks.every(chunk => chunk.type === 'application/octet-stream' && chunk.size <= 512 * 1024));
 assert.ok(refs.every(file => Object.keys(file).join() === 'uploadId'));

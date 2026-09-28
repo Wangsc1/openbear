@@ -571,6 +571,8 @@ CREATE TABLE IF NOT EXISTS web_memory_reminders (
 );
 
 CREATE TABLE IF NOT EXISTS model_calls (
+  attempt_id TEXT NOT NULL DEFAULT '',
+  usage_known INTEGER,
   id                  INTEGER PRIMARY KEY AUTOINCREMENT,
   chat_id             INTEGER NOT NULL,
   session_uuid        TEXT DEFAULT '',
@@ -1175,3 +1177,5 @@ CREATE INDEX IF NOT EXISTS idx_rath_controls_task_status
   ON rath_task_controls(task_uuid, status, id);
 CREATE INDEX IF NOT EXISTS idx_rath_controls_time
   ON rath_task_controls(created_at DESC, id DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_model_calls_attempt ON model_calls(attempt_id) WHERE attempt_id != '';

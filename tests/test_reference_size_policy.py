@@ -11,7 +11,7 @@ from app.context.window import RequiredContextTooLarge, estimate_request, mark_s
 from app.memory.builtin import BuiltinMemoryClient
 from app.reference_policy import CONVERSATION_CONTENT_LIMIT
 from app.references import BUNDLE_FIELD, ReferenceError, effective_reference_text, parse_references
-from app.agent.runs import RunRegistry
+from app.runtime.scheduler import ControllerRuns
 from app.web_console.reference_api import WebAdminReferenceMixin
 from app.web_console.realtime import read_catalog
 from tests.test_builtin_template_import import _login_cookie, web_env
@@ -145,7 +145,7 @@ async def test_latest_send_growth_is_visible_and_preserves_question_and_copy(web
     assert all(item.get('mode') != 'mention' for item in preview['items'])
     await e.db.conn.execute('UPDATE web_operations SET payload_json=?,revision=revision+1 WHERE conversation_uuid=?', (json.dumps({'text': '原文'*4000+'增'}), conv))
     await e.db.conn.commit()
-    e.server.runs = RunRegistry()
+    e.server.runs = ControllerRuns()
     captured, completed = {}, asyncio.Event()
     async def fake_run(chat_id, effective, renderer, **kwargs):
         captured.update(text=effective, **kwargs)

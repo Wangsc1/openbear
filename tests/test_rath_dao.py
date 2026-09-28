@@ -5,8 +5,8 @@ import asyncio
 import pytest
 
 from app.db.engine import DB
-from app.rath.builtin_workflows import ensure_builtin_workflows
-from app.rath.dao import RathDAO
+from app.agents.profiles import ensure_builtin_workflows
+from app.agents.dao import AgentDAO
 
 
 @pytest.fixture
@@ -18,7 +18,7 @@ async def db(tmp_path):
 
 
 async def test_workflow_task_event_artifact_control_roundtrip(db):
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow_uuid = await ensure_builtin_workflows(dao)
     wf = await dao.workflow_by_slug("single-agent")
     assert wf is not None
@@ -70,7 +70,7 @@ async def test_workflow_task_event_artifact_control_roundtrip(db):
 
 
 async def test_legacy_agent_tool_names_roundtrip_without_runtime_reintroduction(db):
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     await db.conn.execute(
         """
         INSERT INTO rath_agents (
@@ -106,7 +106,7 @@ async def test_legacy_agent_tool_names_roundtrip_without_runtime_reintroduction(
 
 
 async def test_agent_registry_crud(db):
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
 
     seeded_agents = await dao.list_agents()
     assert seeded_agents == []
@@ -139,7 +139,7 @@ async def test_agent_registry_crud(db):
 
 
 async def test_mark_interrupted_running_tasks(db):
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow_uuid = await ensure_builtin_workflows(dao)
     running = await dao.create_task(chat_id=1, workflow_uuid=workflow_uuid, title="running", status="running")
     done = await dao.create_task(chat_id=1, workflow_uuid=workflow_uuid, title="done", status="completed")
@@ -151,7 +151,7 @@ async def test_mark_interrupted_running_tasks(db):
 
 
 async def test_agent_session_reuse_unique_and_close_on_new_boundary(db):
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow_uuid = await ensure_builtin_workflows(dao)
 
     first = await dao.get_or_create_agent_session(
@@ -187,7 +187,7 @@ async def test_agent_session_reuse_unique_and_close_on_new_boundary(db):
 
 
 async def test_events_without_after_seq_returns_recent_tail_in_order(db):
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow_uuid = await ensure_builtin_workflows(dao)
     task_uuid = await dao.create_task(chat_id=123, workflow_uuid=workflow_uuid, title="event-tail")
 
@@ -200,7 +200,7 @@ async def test_events_without_after_seq_returns_recent_tail_in_order(db):
 
 
 async def test_append_event_is_safe_for_concurrent_writers(db):
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow_uuid = await ensure_builtin_workflows(dao)
     task_uuid = await dao.create_task(chat_id=123, workflow_uuid=workflow_uuid, title="event-race")
 
@@ -216,7 +216,7 @@ async def test_append_event_is_safe_for_concurrent_writers(db):
 
 
 async def test_append_event_ignores_a_pinned_shared_reader_snapshot(db):
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow_uuid = await ensure_builtin_workflows(dao)
     task_uuid = await dao.create_task(chat_id=123, workflow_uuid=workflow_uuid, title="event-stale-reader")
     await dao.append_event(task_uuid, "event_2")
@@ -239,12 +239,12 @@ async def test_append_event_ignores_a_pinned_shared_reader_snapshot(db):
 
 
 async def test_append_event_is_atomic_across_db_instances(db):
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow_uuid = await ensure_builtin_workflows(dao)
     task_uuid = await dao.create_task(chat_id=123, workflow_uuid=workflow_uuid, title="event-multi-db")
     other_db = DB(db.path)
     await other_db.connect()
-    other_dao = RathDAO(other_db)
+    other_dao = AgentDAO(other_db)
     try:
         seqs = await asyncio.gather(*(
             (dao if idx % 2 == 0 else other_dao).append_event(task_uuid, f"event_{idx}")
@@ -259,7 +259,7 @@ async def test_append_event_is_atomic_across_db_instances(db):
 
 
 async def test_terminal_task_rejects_late_unconditional_updates(db):
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow_uuid = await ensure_builtin_workflows(dao)
     task_uuid = await dao.create_task(
         chat_id=123,
@@ -292,7 +292,7 @@ async def test_terminal_task_rejects_late_unconditional_updates(db):
 
 
 async def test_events_with_after_seq_keeps_incremental_semantics(db):
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow_uuid = await ensure_builtin_workflows(dao)
     task_uuid = await dao.create_task(chat_id=123, workflow_uuid=workflow_uuid, title="event-incremental")
 
@@ -305,7 +305,7 @@ async def test_events_with_after_seq_keeps_incremental_semantics(db):
 
 
 async def test_historical_agent_compaction_event_without_body_is_explicitly_unavailable(db):
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow_uuid = await ensure_builtin_workflows(dao)
     task_uuid = await dao.create_task(chat_id=123, workflow_uuid=workflow_uuid, title="legacy compaction")
     await dao.append_event(

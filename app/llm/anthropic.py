@@ -4,8 +4,8 @@
     + message_delta(usage, stop_reason) + message_start(usage)
 入：assistant 的 tool_use 块 + 顶层 system + role:user 里的 tool_result 块
 
-★ thinking 块多轮回传：assistant 的 thinking 块必须带 signature 原样回传，
-  否则开启 extended thinking 时 /v1/messages 报错。
+★ thinking/redacted_thinking 多轮回传：工具循环内原始块（含签名/密文）
+  必须保持完整、顺序与原值，不可由中性 reasoning 重建签名。
 """
 from __future__ import annotations
 
@@ -52,22 +52,42 @@ def _norm_stop(stop_reason: str) -> str:
     }.get(stop_reason, stop_reason)
 
 
+def _active_tool_turn_start(messages: list[Message]) -> int | None:
+    """Return the latest user turn's start if its tool cycle is still active."""
+    last_user = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=-1)
+    tail = messages[last_user + 1:]
+    # A final assistant answer closes the tool turn. Tool results (neutral role
+    # 'tool') do not: their preceding thinking must survive even with /think off.
+    if not tail or tail[-1].get("role") not in {"tool", "assistant"}:
+        return None
+    if tail[-1].get("role") == "assistant" and not tail[-1].get("tool_calls"):
+        return None
+    return last_user + 1 if any(m.get("role") == "assistant" and m.get("tool_calls") for m in tail) else None
+
+
 def _to_anthropic(messages: list[Message], *, include_thinking: bool = True) -> list[dict[str, Any]]:
     """中性消息 → Anthropic messages（system 单独抽出，不在这里）。"""
     out: list[dict[str, Any]] = []
-    for m in messages:
+    tool_turn_start = _active_tool_turn_start(messages) if not include_thinking else None
+    for index, m in enumerate(messages):
         role = m["role"]
         if role == "system":
             continue  # system 顶层传，跳过
         if role == "assistant":
             blocks: list[dict[str, Any]] = []
-            # thinking 块（含 signature）必须排在最前；/think off 时不回放历史 thinking。
-            if include_thinking and m.get("reasoning") and m.get("signature"):
-                blocks.append({
-                    "type": "thinking",
-                    "thinking": m["reasoning"],
-                    "signature": m["signature"],
-                })
+            # 原生 thinking/redacted 块独占思考表示；普通文本与调用仍用中性字段。
+            # /think off 仅可省略已完成回合，工具循环中的块必须完整原样回传。
+            if include_thinking or (tool_turn_start is not None and index >= tool_turn_start):
+                native = [dict(item) for item in (m.get("native_output_items") or [])
+                          if isinstance(item, dict) and item.get("type") in {"thinking", "redacted_thinking"}]
+                if native:
+                    blocks.extend(native)
+                elif m.get("signature"):
+                    blocks.append({
+                        "type": "thinking",
+                        "thinking": m.get("reasoning") or "",
+                        "signature": m["signature"],
+                    })
             if m.get("content"):
                 blocks.append({"type": "text", "text": text_from_content(m.get("content"))})
             for i, tc in enumerate(m.get("tool_calls") or []):
@@ -154,8 +174,13 @@ def _inject_cache_on_msg(msg: dict) -> dict:
     content = msg.get("content")
     if isinstance(content, list) and content:
         content = list(content)
-        content[-1] = _inject_cache_on_block(dict(content[-1]))
-        msg["content"] = content
+        # Cache metadata must not be appended to an opaque signed block.
+        target = next((i for i in range(len(content) - 1, -1, -1)
+                       if isinstance(content[i], dict)
+                       and content[i].get("type") not in {"thinking", "redacted_thinking"}), None)
+        if target is not None:
+            content[target] = _inject_cache_on_block(dict(content[target]))
+            msg["content"] = content
     elif isinstance(content, str):
         msg["content"] = [{"type": "text", "text": content, "cache_control": _CACHE_EPHEMERAL}]
     return msg
@@ -231,15 +256,16 @@ class AnthropicBackend(LLMBackend):
                  service_tier: str | None = None,
                  fast_request: Any = None) -> dict[str, Any]:
         level = normalize_think_level(think_level) if think_level else None
+        active_tool_turn = _active_tool_turn_start(messages) is not None
         payload: dict[str, Any] = {
             "model": None,  # 调用方填
             "max_tokens": max_tokens,
             "messages": _to_anthropic(messages, include_thinking=level != "off"),
             "stream": stream,
         }
-        if level == "off":
+        if level == "off" and not active_tool_turn:
             payload["thinking"] = {"type": "disabled"}
-        elif level:
+        elif level and level != "off":
             payload["thinking"] = {"type": "adaptive"}
             effort = api_effort(level)
             if effort:
@@ -330,7 +356,8 @@ class AnthropicBackend(LLMBackend):
                 idx = data.get("index", 0)
                 cb = data.get("content_block") or {}
                 blocks[idx] = {"type": cb.get("type"), "id": cb.get("id", ""),
-                               "name": cb.get("name", ""), "args": "", "sig": ""}
+                               "name": cb.get("name", ""), "args": "",
+                               "native": dict(cb) if cb.get("type") in {"thinking", "redacted_thinking"} else None}
             elif t == "content_block_delta":
                 idx = data.get("index", 0)
                 d = data.get("delta") or {}
@@ -338,19 +365,26 @@ class AnthropicBackend(LLMBackend):
                 if dt == "text_delta":
                     yield StreamEvent(kind="content", text=d.get("text", ""))
                 elif dt == "thinking_delta":
+                    native = blocks.get(idx, {}).get("native")
+                    if native is not None and native.get("type") == "thinking":
+                        native["thinking"] = native.get("thinking", "") + d.get("thinking", "")
                     yield StreamEvent(kind="reasoning", text=d.get("thinking", ""))
                 elif dt == "signature_delta":
-                    blocks.setdefault(idx, {}).setdefault("sig", "")
-                    blocks[idx]["sig"] += d.get("signature", "")
+                    native = blocks.get(idx, {}).get("native")
+                    if native is not None and native.get("type") == "thinking":
+                        native["signature"] = native.get("signature", "") + d.get("signature", "")
                 elif dt == "input_json_delta":
                     blocks.setdefault(idx, {"args": ""})
                     blocks[idx]["args"] = blocks[idx].get("args", "") + d.get("partial_json", "")
             elif t == "content_block_stop":
                 idx = data.get("index", 0)
                 blk = blocks.get(idx) or {}
-                if blk.get("type") == "thinking" and blk.get("sig"):
-                    # 把 signature 作为 reasoning 事件补发（聚合层会记下）
-                    yield StreamEvent(kind="reasoning", text="", signature=blk["sig"])
+                native = blk.get("native")
+                if native is not None:
+                    yield StreamEvent(kind="native_output_item", native_output_items=[native])
+                    if native.get("type") == "thinking" and native.get("signature"):
+                        # 中性签名继续供旧调用方使用，回放只取原生块。
+                        yield StreamEvent(kind="reasoning", text="", signature=native["signature"])
             elif t == "message_delta":
                 d = data.get("delta") or {}
                 if d.get("stop_reason"):
@@ -417,10 +451,12 @@ class AnthropicBackend(LLMBackend):
             bt = blk.get("type")
             if bt == "text":
                 result.text += blk.get("text", "")
-            elif bt == "thinking":
-                result.reasoning += blk.get("thinking", "")
-                if blk.get("signature"):
-                    result.signature = blk["signature"]
+            elif bt in {"thinking", "redacted_thinking"}:
+                result.native_output_items.append(dict(blk))
+                if bt == "thinking":
+                    result.reasoning += blk.get("thinking", "")
+                    if blk.get("signature"):
+                        result.signature = blk["signature"]
             elif bt == "tool_use":
                 result.tool_calls.append(ToolCall(
                     id=blk.get("id", ""), name=blk.get("name", ""),

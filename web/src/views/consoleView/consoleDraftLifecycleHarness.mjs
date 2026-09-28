@@ -32,7 +32,7 @@ async function consoleSetupCode() {
           messages: 'export const ElMessage=__env.messages; export const ElMessageBox=__env.confirm;',
           api: 'export const Api=__env.api; export const apiError=e=>e.message||String(e); export const conversationWsUrl=id=>`ws://test/${id}`;',
           icons: Object.keys(require('@element-plus/icons-vue')).map(key => `export const ${key}={};`).join('\n'),
-          storage: `import {createAttachmentDraftStorage as actual} from ${JSON.stringify(path.join(directory, 'attachmentDraftStorage.js'))}; export const createAttachmentDraftStorage=()=>actual({driver:__env.driver});`,
+          storage: `import {createAttachmentDraftStorage as actual, planAttachmentDraftRecord} from ${JSON.stringify(path.join(directory, 'attachmentDraftStorage.js'))}; export {planAttachmentDraftRecord}; export const createAttachmentDraftStorage=()=>actual({driver:__env.driver});`,
         }[name];
         return {contents, resolveDir: directory};
       });

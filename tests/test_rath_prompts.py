@@ -8,19 +8,19 @@ from app.admin.settings import (
     safe_settings_payload,
     serialize_spec,
 )
-from app.rath.prompting import agent_prompt_item
-from app.rath.prompts import PROMPT_SPECS, render_plan_prompt
-from app.rath.schemas import RathAgentDef
+from app.agents.prompting import agent_prompt_item
+from app.agents.prompts import PROMPT_SPECS, render_plan_prompt
+from app.agents.schemas import AgentDefinition
 from app.settings.specs import get_spec
-from app.web_console.rath_api import WebAdminRathMixin
+from app.web_console.agents_api import WebAdminAgentsMixin
 
 
 def test_legacy_removed_preset_tools_are_not_advertised_as_callable() -> None:
-    old_only = agent_prompt_item(RathAgentDef(agent_key="old", name="Old", tool_allowlist=["WebSearch"]))
+    old_only = agent_prompt_item(AgentDefinition(agent_key="old", name="Old", tool_allowlist=["WebSearch"]))
     assert old_only["allowedTools"] == []
     assert "configured preset tools are unavailable" in old_only["allowedToolsText"]
 
-    mixed = agent_prompt_item(RathAgentDef(agent_key="mixed", name="Mixed", tool_allowlist=["WebExtract", "Read"]))
+    mixed = agent_prompt_item(AgentDefinition(agent_key="mixed", name="Mixed", tool_allowlist=["WebExtract", "Read"]))
     assert mixed["allowedTools"] == ["Read"]
     assert mixed["allowedToolsText"] == "Read"
 
@@ -90,7 +90,7 @@ def test_plan_version_diff_reports_structural_changes() -> None:
             "steps": [{"id": "a", "title": "A2"}, {"id": "c", "title": "C"}],
         },
     }
-    diff = WebAdminRathMixin._plan_version_diff(previous, current)
+    diff = WebAdminAgentsMixin._plan_version_diff(previous, current)
     assert diff == {
         "fromVersion": 1,
         "toVersion": 2,

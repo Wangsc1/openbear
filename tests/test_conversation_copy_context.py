@@ -19,9 +19,9 @@ from app.context.window import WindowPolicy, mark_source, source_of
 from app.db.dao import MessageDAO, SummaryDAO
 from app.llm.base import AgentResult
 from app.llm.events import ToolCall
-from app.rath.manager import RathTaskManager
-from app.rath.schemas import RathAgentDef
-from app.rath.single_agent import SingleAgentWorkflowRunner
+from app.agents.control import AgentControlService
+from app.agents.schemas import AgentDefinition
+from app.agents.execution import AgentExecutor
 from app.tools.agents import register_agent_tools
 from app.tools.base import ToolRegistry, ToolRuntimeContext
 from tests.test_agent_continuity import call
@@ -179,8 +179,8 @@ async def test_copy_legacy_summary_and_derivatives_never_alias_original_history(
 
 
 def runner_for(env, conversation, instance, task_uuid, agent, *, protocol="chat"):
-    runner = SingleAgentWorkflowRunner(
-        env.server.rath_dao, task_uuid, agent=agent, backend=NoModelBackend(protocol), model="gpt",
+    runner = AgentExecutor(
+        env.server.agent_dao, task_uuid, agent=agent, backend=NoModelBackend(protocol), model="gpt",
         max_tokens=1000, tools=ToolRegistry(), context_window=50000,
         agent_session_uuid=instance.session_uuid, openbear_session_uuid=conversation["conversation_uuid"],
     )
@@ -191,13 +191,13 @@ def runner_for(env, conversation, instance, task_uuid, agent, *, protocol="chat"
 
 
 async def agent_checkpoint(env, *, partial):
-    dao = env.server.rath_dao
+    dao = env.server.agent_dao
     source = await env.server._create_web_conversation(123, title="agent copy")
     chat, conv = source["internal_chat_id"], source["conversation_uuid"]
     workflow = await dao.workflow_by_slug("single-agent")
     instance = await dao.create_agent_instance(openbear_session_uuid=conv, chat_id=chat, workflow_uuid=workflow.workflow_uuid, agent_key="copy-agent")
     tid = await dao.create_task(chat_id=chat, workflow_uuid=workflow.workflow_uuid, parent_session_uuid=conv, title="partial task", agent_session_uuid=instance.session_uuid)
-    agent = RathAgentDef(workflow_uuid=workflow.workflow_uuid, agent_key="copy-agent", name="Copy agent", id=1, system_prompt="Only inspect", tool_allowlist=[], model="gpt", enabled=True)
+    agent = AgentDefinition(workflow_uuid=workflow.workflow_uuid, agent_key="copy-agent", name="Copy agent", id=1, system_prompt="Only inspect", tool_allowlist=[], model="gpt", enabled=True)
     runner = runner_for(env, source, instance, tid, agent)
     runner.session_id = "SOURCE_PROVIDER_SESSION"
     messages = [mark_source({"role": "user", "content": "PARTIAL_TASK"}, kind="task", task_uuid=tid, turn_uuid="agent-root", run_root_turn_uuid="agent-root")]
@@ -223,7 +223,7 @@ async def agent_checkpoint(env, *, partial):
 @pytest.mark.parametrize("protocol", ["chat", "responses"])
 async def test_copy_agent_checkpoint_pairing_and_independent_continue(web_env, partial, protocol):
     env = web_env
-    dao = env.server.rath_dao
+    dao = env.server.agent_dao
     source, instance, tid, agent, runner = await agent_checkpoint(env, partial=partial)
     before = await runner._round_context_messages()
     source_checkpoint = await dao.task_model_context(tid)
@@ -271,7 +271,7 @@ async def test_copy_agent_checkpoint_pairing_and_independent_continue(web_env, p
 @pytest.mark.parametrize("bad_pair", [(0, 1), (99, 2), (None, None)])
 async def test_copy_does_not_launder_unreliable_partial_checkpoint(web_env, bad_pair):
     env = web_env
-    dao = env.server.rath_dao
+    dao = env.server.agent_dao
     source, _, tid, agent, runner = await agent_checkpoint(env, partial=True)
     original = await dao.task_model_context(tid)
     state = original["state"]
@@ -293,11 +293,11 @@ async def test_copy_does_not_launder_unreliable_partial_checkpoint(web_env, bad_
 @pytest.mark.parametrize("partial", [False, True])
 async def test_copied_instance_agent_continue_tool_never_replays_uncertain_side_effect(web_env, tmp_path, monkeypatch, partial):
     env = web_env
-    dao = env.server.rath_dao
+    dao = env.server.agent_dao
     source = await env.server._create_web_conversation(123, title="Continue integration")
     reg = ToolRegistry()
     backend = _RecordingBackend()
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
     actual_calls = []
 
     async def read(_args):

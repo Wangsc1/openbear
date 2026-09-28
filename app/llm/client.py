@@ -8,6 +8,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -122,12 +123,28 @@ class HTTPClient:
         )
         total_deadline = (req_start + total_to) if total_to > 0 else None
         # 流式读取的 read 超时交给下面的四段逻辑全权控制(read=None),connect 仍由 httpx 把关。
-        stream_timeout = httpx.Timeout(None, connect=self._connect_timeout_s)
+        stream_timeout = httpx.Timeout(self._default_timeout_s, connect=self._connect_timeout_s, read=None)
+        # Manual SSE deadlines only start after headers. Keep the existing normal
+        # request timeout for opening/error-body reads, and honor total there too.
+        def opening_budget() -> float:
+            remaining = self._default_timeout_s
+            if total_deadline is not None:
+                remaining = min(remaining, total_deadline - time.monotonic())
+            return max(0, remaining)
         try:
-            async with self._http.stream("POST", url, headers=headers, json=payload,
-                                         timeout=stream_timeout) as resp:
+            async with AsyncExitStack() as stack:
+                try:
+                    async with asyncio.timeout(opening_budget()):
+                        resp = await stack.enter_async_context(self._http.stream(
+                            "POST", url, headers=headers, json=payload, timeout=stream_timeout))
+                except TimeoutError:
+                    raise OpenBearLLMError("流式响应头等待超时", retryable=True, protocol=protocol) from None
                 if resp.status_code >= 400:
-                    full_body = (await resp.aread()).decode("utf-8", "replace")
+                    try:
+                        async with asyncio.timeout(opening_budget()):
+                            full_body = (await resp.aread()).decode("utf-8", "replace")
+                    except TimeoutError:
+                        raise OpenBearLLMError("流式错误响应体读取超时", retryable=True, protocol=protocol) from None
                     normalized = normalize_error_payload(full_body, transport_status=resp.status_code)
                     raise OpenBearLLMError(
                         normalized.message,

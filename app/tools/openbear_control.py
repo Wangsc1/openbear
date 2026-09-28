@@ -102,7 +102,7 @@ async def _action_status(svc: Any, chat_id: int) -> str:
             "startedAt": int(svc.started_at),
             "runningRuns": svc.runs.count(),
             "runningThisChat": svc.runs.is_running(chat_id),
-            "rathTasks": svc.rath.count() if getattr(svc, "rath", None) is not None else 0,
+            "rathTasks": svc.agents.count() if getattr(svc, "agents", None) is not None else 0,
             "childProcesses": processes.count(),
             "postTurnActions": svc.control_actions.pending_count(chat_id),
         },
@@ -316,7 +316,7 @@ async def _action_restart(svc: Any, chat_id: int, args: dict[str, Any], reason: 
         body=(
             "这会重启 OpenBear 服务，当前回复会先完成收尾，随后由 systemd-run 延迟执行重启。\n"
             f"运行中 OpenBear 回合：{svc.runs.count()}\n"
-            f"Rath 任务：{svc.rath.count() if getattr(svc, 'rath', None) is not None else 0}\n"
+            f"Rath 任务：{svc.agents.count() if getattr(svc, 'agents', None) is not None else 0}\n"
             f"子进程：{processes.count()}"
         ),
         confirm_text="确认重启",

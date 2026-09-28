@@ -105,7 +105,7 @@ class FakeSvc:
         self.interactions = UserInteractionManager(self.bot)  # type: ignore[arg-type]
         self.messages = FakeMessages()
         self.runs = FakeRuns()
-        self.rath = FakeRath()
+        self.agents = FakeRath()
         self.selection = FakeSelection()
         self.config = SimpleNamespace(
             models=FakeModels(),

@@ -19,7 +19,7 @@ from app.llm.base import AgentResult
 from app.llm.events import StreamEvent, Usage
 from app.llm.openai_chat import OpenAIChatBackend
 from app.llm.openai_responses import OpenAIResponsesBackend
-from app.rath.single_agent import SingleAgentWorkflowRunner
+from app.agents.execution import AgentExecutor
 from app.tools.base import ToolRegistry
 from app.web_console.live_stream import _WebLiveStream, _WebStreamRenderer
 from tests.test_agent_loop import RecordRenderer
@@ -73,7 +73,7 @@ async def test_runner_budget_options_equal_production_request(agent_env, protoco
         result = await Agent(backend, reg).run([human()], RecordRenderer(), model="gpt-test", system="Stable", window_runtime=runtime, **options)
         assert result.text == "Done"
     else:
-        runner = SingleAgentWorkflowRunner(dao, tid, agent=agent, backend=backend, model="gpt-test", model_label="p/gpt-test",
+        runner = AgentExecutor(dao, tid, agent=agent, backend=backend, model="gpt-test", model_label="p/gpt-test",
             tools=reg, context_window=128000, rollover_trigger_tokens=30000, plan_protocol_enabled=False, **options)
         result = await runner.run()
         assert result["summary"] == "Done"

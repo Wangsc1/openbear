@@ -17,8 +17,8 @@ from app.context.store import ContextOwner, WindowStore
 from app.context.window import source_of
 from app.db.dao import MessageDAO, SummaryDAO
 from app.llm.base import AgentResult
-from app.rath.builtin_workflows import ensure_builtin_workflows
-from app.rath.manager import RathTaskManager
+from app.agents.profiles import ensure_builtin_workflows
+from app.agents.control import AgentControlService
 from app.tools.agent_history import register_agent_history_tool
 from app.tools.agents import register_agent_tools
 from app.tools.base import ToolRegistry, ToolRuntimeContext
@@ -72,17 +72,17 @@ class AgentBackend:
 
 
 async def agents(env):
-    await ensure_builtin_workflows(env.server.rath_dao)
+    await ensure_builtin_workflows(env.server.agent_dao)
     reg, backend = ToolRegistry(), AgentBackend()
     async def noop(args):
         return "LOCAL_ONLY"
     for name in ("Read", "Bash", "Edit", "EditBatch"):
         reg.add(name, name, {"type": "object"}, noop)
     register_agent_history_tool(reg, env.db)
-    manager = RathTaskManager(env.server.rath_dao)
+    manager = AgentControlService(env.server.agent_dao)
     cfg = _FakeConfig()
     cfg.agent = cfg.agent.model_copy(deep=True)
-    register_agent_tools(reg, config=cfg, dao=env.server.rath_dao, manager=manager,
+    register_agent_tools(reg, config=cfg, dao=env.server.agent_dao, manager=manager,
                          llm_factory=_FakeFactory(backend), model_selection=_FakeSelection(), workspace_dir=str(Path(env.db.path).parent))
     return reg, backend, manager
 
@@ -111,13 +111,13 @@ async def test_agent_combinations(web_env, monkeypatch, initial_copy, strategy, 
     untouched = row
     if initial_copy:
         row = await duplicate(env, row)
-        sid = (await env.server.rath_dao.list_agent_sessions(openbear_session_uuid=row["conversation_uuid"]))[0].session_uuid
+        sid = (await env.server.agent_dao.list_agent_sessions(openbear_session_uuid=row["conversation_uuid"]))[0].session_uuid
     status, result = await suffix(env, row, "future")
     assert status == 200, (status, result)
-    reset_session = await env.server.rath_dao.agent_session(sid)
+    reset_session = await env.server.agent_dao.agent_session(sid)
     cp = await duplicate(env, row)
-    ni = (await env.server.rath_dao.list_agent_sessions(openbear_session_uuid=cp["conversation_uuid"]))[0]
-    checkpoint = await env.server.rath_dao.task_model_context(ni.context_task_uuid)
+    ni = (await env.server.agent_dao.list_agent_sessions(openbear_session_uuid=cp["conversation_uuid"]))[0]
+    checkpoint = await env.server.agent_dao.task_model_context(ni.context_task_uuid)
     cp_window = await WindowStore(env.db, ContextOwner.agent(task_uuid=ni.context_task_uuid, agent_session_uuid=ni.session_uuid)).load()
     assert (checkpoint["state"]["windowVersion"], checkpoint["state"]["windowRevision"]) == (cp_window["window_version"], cp_window["revision"])
     backend.protocol = protocol
@@ -136,7 +136,7 @@ async def test_agent_combinations(web_env, monkeypatch, initial_copy, strategy, 
     report["wrongInstanceContinue"] = await call_agent(reg, cp, "cross", agent_id=sid, prompt="DENY_CROSS_OWNER")
     if initial_copy:
         report["untouchedSourceWindow"] = await (await store(env, untouched)).load()
-        report["untouchedSourceFutureTask"] = await env.server.rath_dao.get_task(future["task"]["taskId"])
+        report["untouchedSourceFutureTask"] = await env.server.agent_dao.get_task(future["task"]["taskId"])
     assert continued_copy["status"] == continued_source["status"] == "completed"
     assert "SAFE_AGENT_ORIGIN" in str(copy_request) and "FUTURE_AGENT_SECRET" not in str(copy_request)
     assert "COPY_ONLY_NEXT" not in str(source_request) and "SOURCE_ONLY_NEXT" not in str(copy_request)
@@ -269,13 +269,13 @@ async def test_managed_plan_archive_restart_copy_continue(web_env, monkeypatch):
     await configure_web(env, monkeypatch)
     row = await env.server._create_web_conversation(123, model="openai/gpt")
     await seed_turn(env, row, "safe", "SAFE_MANAGED_CONTROLLER")
-    monkeypatch.setattr(_FakeConfig.rath, "agent_plan_enabled", True)
+    monkeypatch.setattr(_FakeConfig.agents, "agent_plan_enabled", True)
     reg, backend, manager = await agents(env)
-    env.server.rath = manager
+    env.server.agents = manager
     from app.tools.base import current_tool_context
     async def recorded_read(args):
         context = current_tool_context()
-        artifact_uuid = await env.server.rath_dao.create_artifact(
+        artifact_uuid = await env.server.agent_dao.create_artifact(
             context.task_uuid, kind="local_read_evidence", name="observed fixture", content="LOCAL_ONLY",
         )
         return json.dumps({"observed": "LOCAL_ONLY", "artifactUuid": artifact_uuid, "taskUuid": context.task_uuid})
@@ -333,12 +333,12 @@ async def test_managed_plan_archive_restart_copy_continue(web_env, monkeypatch):
         if not launch.done():
             launch.cancel()
             await asyncio.gather(launch, return_exceptions=True)
-        for running in list(manager._runs.values()):
+        for running in manager.scheduler.tasks(kind="agent"):
             if not running.done():
                 running.cancel()
-        if manager._runs:
-            await asyncio.gather(*manager._runs.values(), return_exceptions=True)
-    actual = await env.server.rath_dao.get_task(tid)
+        if manager.count():
+            await asyncio.gather(*manager.scheduler.tasks(kind="agent"), return_exceptions=True)
+    actual = await env.server.agent_dao.get_task(tid)
     assert actual.status == "completed", actual
     assert not sequence
     sid = actual.agent_session_uuid
@@ -368,7 +368,7 @@ async def test_managed_plan_archive_restart_copy_continue(web_env, monkeypatch):
     assert {table: await rows(env, table) for table in tables} == before
     monkeypatch.setattr(env.server, "_copy_table_rows_for_duplicate", real_copy)
     cp = await duplicate(env, row)
-    ni = (await env.server.rath_dao.list_agent_sessions(openbear_session_uuid=cp["conversation_uuid"]))[0]
+    ni = (await env.server.agent_dao.list_agent_sessions(openbear_session_uuid=cp["conversation_uuid"]))[0]
     copied_status, copied_plan = await http(env, "get", f"/api/conversations/{cp['conversation_uuid']}/agents/{ni.context_task_uuid}/plan")
     assert copied_status == 200, copied_plan
     backend.protocol = "responses"
@@ -386,7 +386,7 @@ async def test_managed_plan_archive_restart_copy_continue(web_env, monkeypatch):
     assert copied_plan["decisions"][0]["decision_uuid"] != source_plan["decisions"][0]["decision_uuid"]
     import hashlib
     evidence_uuid = copied_plan["evidence"][0]["evidence_uuid"]
-    artifacts = await env.server.rath_dao.artifacts(ni.context_task_uuid, kind="local_read_evidence")
+    artifacts = await env.server.agent_dao.artifacts(ni.context_task_uuid, kind="local_read_evidence")
     assert len(artifacts) == 1 and artifacts[0].content == "LOCAL_ONLY"
     assert copied_plan["evidence"][0]["reference"] == f"artifact:{artifacts[0].artifact_uuid}"
     assert copied_plan["evidence"][0]["metadata"] == {"artifactUuid": artifacts[0].artifact_uuid, "taskUuid": ni.context_task_uuid}
@@ -397,7 +397,7 @@ async def test_managed_plan_archive_restart_copy_continue(web_env, monkeypatch):
     canonical = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     new_hash = hashlib.sha256(canonical.encode()).hexdigest()
     assert copied_plan["versions"][0]["plan_hash"] == new_hash
-    events = await env.server.rath_dao.events(ni.context_task_uuid)
+    events = await env.server.agent_dao.events(ni.context_task_uuid)
     assert any(e.detail.get("planHash") == new_hash for e in events if e.kind == "plan_submitted")
     old_hash = source_plan["versions"][0]["plan_hash"]
     probe = {"planHash": old_hash, "body": f"Literal audit digest {old_hash}"}
@@ -532,7 +532,7 @@ async def test_agent_rotated_history_copy_restart_copy(web_env, monkeypatch, str
     first_copy = await duplicate(env, row)
     assert (await suffix(env, first_copy, "future"))[0] == 200
     second_copy = await duplicate(env, first_copy)
-    ni = (await env.server.rath_dao.list_agent_sessions(openbear_session_uuid=second_copy["conversation_uuid"]))[0]
+    ni = (await env.server.agent_dao.list_agent_sessions(openbear_session_uuid=second_copy["conversation_uuid"]))[0]
     backend.protocol = "responses"
     continued = await call_agent(reg, second_copy, "new", agent_id=ni.session_uuid, prompt="AFTER_REWIND_NEXT", tools=[])
     assert continued["status"] == "completed", continued
@@ -569,8 +569,8 @@ async def test_agent_task_order_copy_suffix_minimal(web_env, monkeypatch, copy_d
         current = await duplicate(env, current)
     copied_tasks = await rows(env, "rath_tasks", "chat_id=? ORDER BY id", (current["internal_chat_id"],))
     assert (await suffix(env, current, "future"))[0] == 200
-    ni = (await env.server.rath_dao.list_agent_sessions(openbear_session_uuid=current["conversation_uuid"]))[0]
-    checkpoint = await env.server.rath_dao.task_model_context(ni.context_task_uuid)
+    ni = (await env.server.agent_dao.list_agent_sessions(openbear_session_uuid=current["conversation_uuid"]))[0]
+    checkpoint = await env.server.agent_dao.task_model_context(ni.context_task_uuid)
     assert "SAFE_CONFIRMED_CORRECTION" in str(checkpoint["state"]["messages"])
     backend.protocol = "responses"
     continued = await call_agent(reg, current, "next", agent_id=ni.session_uuid, prompt="USE_SAFE_CORRECTION_NOW", tools=[])
@@ -606,12 +606,12 @@ async def test_suffix_uses_logical_rounds_when_legacy_copy_ids_are_reversed(web_
     # Only physical IDs change; real task inputs, checkpoints and History remain.
     await env.db.conn.execute("UPDATE rath_tasks SET id=1000-id WHERE chat_id=?", (row["internal_chat_id"],))
     if checkpoint_mode == "missing_latest":
-        await env.server.rath_dao.clear_task_model_context(tids[1])
+        await env.server.agent_dao.clear_task_model_context(tids[1])
     elif checkpoint_mode == "ambiguous_rounds":
         await env.db.conn.execute("UPDATE rath_tasks SET input_json=json_set(input_json,'$.sessionTurn',1) WHERE task_uuid=?", (tids[1],))
     await env.db.conn.commit()
     assert (await suffix(env, row, "future"))[0] == 200
-    instance = await env.server.rath_dao.agent_session(sid)
+    instance = await env.server.agent_dao.agent_session(sid)
     before_calls = len(backend.calls)
     continued = await call_agent(reg, row, "next", agent_id=sid, prompt="NEXT")
     if checkpoint_mode != "present":

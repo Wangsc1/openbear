@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 
 from app.db.engine import DB
-from app.rath.builtin_workflows import ensure_builtin_workflows
-from app.rath.continuity import AgentContinuityError
-from app.rath.dao import RathDAO
-from app.rath.manager import RathTaskManager
+from app.agents.profiles import ensure_builtin_workflows
+from app.agents.continuity import AgentContinuityError
+from app.agents.dao import AgentDAO
+from app.agents.control import AgentControlService
 from app.task_memory import TaskMemoryDAO, task_memory_catalog_snapshot
 from app.tools.agents import register_agent_tools
 from app.tools.base import ToolRegistry, ToolRuntimeContext
@@ -22,11 +22,11 @@ from tests.test_tools_agent_orchestration import _FakeConfig, _FakeFactory, _Fak
 async def env(tmp_path):
     db = DB(str(tmp_path / "continuity.db"))
     await db.connect()
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     await ensure_builtin_workflows(dao)
     registry = ToolRegistry()
     backend = _RecordingBackend()
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
     register_task_memory_tool(registry, TaskMemoryDAO(db))
     async def noop(args):
         return "authorized"
@@ -114,12 +114,12 @@ async def test_instance_cas_single_owner_and_stale_checkpoint_rejected(env):
 
 
 async def test_old_pause_artifact_cannot_override_completed_checkpoint(env):
-    from app.rath.single_agent import SingleAgentWorkflowRunner
+    from app.agents.execution import AgentExecutor
     dao, reg, _, ctx, _ = env
     first = await call(reg, "Agent", {"prompt": "latest", "tools": []}, ctx)
     tid = first["task"]["taskUuid"]
     await dao.create_artifact(tid, kind="agent_continuation_state", name="old pause", content='{"roundNo":0,"messages":[],"kind":"old"}')
-    runner = object.__new__(SingleAgentWorkflowRunner)
+    runner = object.__new__(AgentExecutor)
     runner.dao, runner.task_uuid = dao, tid
     state = await runner._latest_continuation_state()
     assert state["stage"] == "completed"
@@ -152,7 +152,7 @@ async def test_schema_reconnect_does_not_merge_independent_instances(tmp_path):
     path = str(tmp_path / "reconnect.db")
     db = DB(path)
     await db.connect()
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     args = dict(openbear_session_uuid="c", chat_id=1, workflow_uuid="w", agent_key="same")
     one = await dao.create_agent_instance(**args)
     two = await dao.create_agent_instance(**args)

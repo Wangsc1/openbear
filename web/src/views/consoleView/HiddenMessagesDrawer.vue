@@ -46,7 +46,7 @@ async function restoreAll() {
 </script>
 
 <template>
-  <el-drawer v-model="managing" :direction="phone ? 'btt' : 'rtl'" :size="phone ? 'min(78dvh, 44rem)' : '420px'" title="隐藏内容" append-to-body destroy-on-close class="hidden-messages-drawer">
+  <el-drawer v-model="managing" :direction="phone ? 'btt' : 'rtl'" :size="phone ? 'min(calc(var(--mobile-viewport-height, 100vh) * .78), 44rem)' : '420px'" title="隐藏内容" append-to-body destroy-on-close class="hidden-messages-drawer" :class="{'mobile-viewport-sheet': phone}">
     <div class="hidden-drawer-layout">
       <div class="hidden-drawer-intro"><Hide/><p>只隐藏展示，不删除记录，也不改变 AI 上下文。<br/>查看原文仅在本机预览；恢复会同步到所有设备。</p></div>
       <div class="hidden-drawer-summary"><span>{{ items.length }} 条隐藏内容</span><button v-if="items.length" type="button" :disabled="busy" @click="restoreAll">全部恢复</button></div>

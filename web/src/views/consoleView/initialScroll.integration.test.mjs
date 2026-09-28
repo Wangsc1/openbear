@@ -41,7 +41,7 @@ function harness() {
     ElMessage: {error: (e) => errors.push(e)}, apiError: String,
   });
   vm.runInContext(`
-    let componentMounted = true, loadRequestGeneration = 0, explicitUnlockAt = 0;
+    let componentMounted = true, loadRequestGeneration = 0, explicitUnlockAt = 0, searchNavigationGeneration = 0;
     ${between('const INITIAL_TIMELINE_LIMIT =', 'const LOAD_EARLIER_SCROLL_THRESHOLD =')}
     ${between('const loading = ref(false);', 'const sendPending = ref(false);')}
     ${between('function unlockAutoScroll()', 'function toggleAutoScrollLock()')}
@@ -53,6 +53,17 @@ function harness() {
     resolve: (index, tag='loaded') => calls[index].resolve({conversationUuid: calls[index].uuid, tag}),
   };
 }
+
+test('an in-flight preserve snapshot cannot restore a pre-search anchor after a newer search jump', async()=>{
+  const h=harness();
+  h.context.autoScrollLocked.value=false;
+  const pending=h.load('preserve');
+  h.run('searchNavigationGeneration++');
+  h.resolve(0,'fresh state');
+  await pending;
+  assert.deepEqual(h.applied,[{uuid:'A',tag:'fresh state'}]);
+  assert.deepEqual(h.scrolls,[],'search navigation now owns the reading position');
+});
 
 test('stale A refresh and expired external caller cannot invalidate B or leave its loading stuck',async()=>{
   const h=harness();h.props.conversationUuid='B';const current=h.load('bottom');

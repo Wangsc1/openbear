@@ -72,6 +72,40 @@ async def test_responses_stream_reasoning():
     assert result.text == "答"
 
 
+@pytest.mark.parametrize("native_continuation", [False, True])
+@pytest.mark.parametrize("with_ids", [False, True])
+async def test_encrypted_reasoning_is_display_only_and_replaces_each_item(native_continuation, with_ids):
+    lines = []
+    final_items = []
+    for index, (initial, final) in enumerate((("opaque-first-start", "opaque-first-final"),
+                                            (None, "opaque-second-final"))):
+        for phase, encrypted in (("added", initial), ("done", final)):
+            item = {"type": "reasoning", "summary": [], "encrypted_content": encrypted}
+            if with_ids:
+                item["id"] = f"rs_{index}"
+            lines += _ev(f"response.output_item.{phase}", {
+                "type": f"response.output_item.{phase}", "output_index": index, "item": item,
+            })
+            if phase == "done":
+                final_items.append(item)
+    lines += _ev("response.output_text.delta", {"type": "response.output_text.delta", "delta": "答"})
+    lines += _ev("response.completed", {"type": "response.completed", "response": {"status": "completed"}})
+    backend = OpenAIResponsesBackend(make_client(lambda _r: sse_response(lines)), "https://x/v1", "k")
+    options = {"model": "gpt-test", "native_continuation": native_continuation}
+    events = [event async for event in backend.stream([{"role": "user", "content": "hi"}], **options)]
+    assert [event.text for event in events if event.kind == "encrypted_reasoning"] == [
+        "opaque-first-start", "opaque-first-final", "opaque-first-final\n\nopaque-second-final",
+    ]
+    first_display = next(i for i, event in enumerate(events) if event.kind == "encrypted_reasoning")
+    first_text = next(i for i, event in enumerate(events) if event.kind == "content")
+    assert first_display < first_text
+    assert not any(event.kind == "reasoning" for event in events)
+    result = await aggregate(backend.stream([{"role": "user", "content": "hi"}], **options))
+    assert result.text == "答"
+    assert result.reasoning == ""
+    assert result.native_output_items == (final_items if native_continuation else [])
+
+
 async def test_responses_stream_function_call():
     lines = []
     lines += _ev("response.output_item.done", {"type": "response.output_item.done", "item": {

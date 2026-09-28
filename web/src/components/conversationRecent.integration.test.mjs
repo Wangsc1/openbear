@@ -1,4 +1,5 @@
 import test from 'node:test';
+import {useRecentConversationRows} from './conversationRecentRows.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -6,6 +7,7 @@ import {compile, computed, createSSRApp, effectScope, h, nextTick, proxyRefs, re
 import {renderToString} from 'vue/server-renderer';
 import {parse} from '@vue/compiler-sfc';
 import {baseParse} from '@vue/compiler-dom';
+import * as icons from '@element-plus/icons-vue';
 import {treeItemId as rowId, treeItemParent, compareTreeItems, resolveTreeDrop} from './conversationTreeInteractions.js';
 import {activityLabel, activityState, activityReadRequests, applyActivityReadVersions, groupActivityItems} from '../conversationActivity.js';
 
@@ -15,7 +17,7 @@ const folderSource = parse(read('./ConversationActivityFolder.vue')).descriptor;
 const strip = descriptor => descriptor.scriptSetup.content.replace(/^import[\s\S]*?;\n/gm, '');
 const walk = nodes => (nodes || []).flatMap(node => node && typeof node === 'object' ? [node, ...walk(Array.isArray(node.children) ? node.children : [])] : []);
 const hasClass = (node, value) => String(node.props?.class || '').split(/\s+/).includes(value);
-const activityTemplate = walk(baseParse(treeSource.template.content).children).find(node => node.tag === 'ConversationActivityFolder').loc.source;
+const treeTemplate = walk(baseParse(treeSource.template.content).children).find(node => node.props?.some(prop => prop.name === 'ref' && prop.value?.content === 'listRef')).loc.source;
 const row = (id, at = 1000, extra = {}) => ({kind: 'conversation', id, conversationUuid: id, folderId: 'F', parentId: 'F', title: id, path: '目录 F', lastInteractionAtMs: at, activityVersion: 1, activityReadVersion: 1, activityUnread: false, activityState: 'completed', running: false, ...extra});
 
 function treeHarness(t) {
@@ -23,26 +25,32 @@ function treeHarness(t) {
   const props = reactive({activeConversationUuid: '', draftConversation: null});
   const catalog = reactive({connected: false, ready: false, activityReadVersions: new Map()});
   const emitted = [], timers = new Map(); let time = 0, serial = 0;
-  const ctx = vm.createContext({computed, nextTick, reactive, ref, watch, rowId, treeItemParent, compareTreeItems, resolveTreeDrop,
-    activityLabel, activityReadRequests, referenceCatalog: catalog,
+  const ctx = vm.createContext({...icons, referenceItem: () => null, useRecentConversationRows, computed, nextTick, reactive, ref, watch, rowId, treeItemParent, compareTreeItems, resolveTreeDrop,
+    activityLabel, activityState, activityReadRequests, referenceCatalog: catalog,
     defineLazyView: () => ({}), defineProps: () => props, defineEmits: () => (...args) => emitted.push(args), defineExpose() {}, onMounted() {}, onBeforeUnmount() {},
     Api: {}, apiError: String, ElMessage: {error(value) {assert.fail(String(value));}},
-    window: {matchMedia: () => ({matches: true})}, document: {querySelector: () => null}, CSS: {escape: value => value},
+    window: {matchMedia: query => ({matches: query === '(hover: hover)'})}, document: {querySelector: () => null}, CSS: {escape: value => value},
     setTimeout(fn, delay) {timers.set(++serial, {fn, at: time + delay}); return serial;}, clearTimeout(id) {timers.delete(id);},
   });
-  scope.run(() => vm.runInContext(strip(treeSource) + '\nglobalThis.tree={props,activityItems,recentItems,activityReadBusy,titleGenerating,referenceCatalog,applyStatus,knownConversationRows,forgetConversation,withDraft,rootFolders,stateFor,expanded,selectedFolderId,openActivityConversation,markActivityRead,overview,enterOverview,leaveOverview,closeOverview,keepOverview,menu,openMoreMenu};', ctx));
+  scope.run(() => vm.runInContext(strip(treeSource) + `
+    globalThis.tree={props,activityItems,recentItems,activityReadBusy,titleGenerating,referenceCatalog,applyStatus,knownConversationRows,forgetConversation,withDraft,rootFolders,stateFor,expanded,selectedFolderId,openActivityConversation,markActivityRead,overview,enterOverview,leaveOverview,closeOverview,keepOverview,menu,openMoreMenu,
+      activeConversationRow,sidebarView,isDirectoryView,switchSidebarView,recentClock,recentConversationRows,recentUnreadCount,recentWaitingCount,recentLabel,displayRows,query,initialized,loading,listRef,
+      activateRow,toggleRow,dragStart,dragOver,drop,clearDrag,rootDropTarget,drag,moveInFlight,rowId,rowLabel,rowLoading,nodePath,indentation,isExpanded,running,isTitleGenerating,liveConversationTitle,
+      loadChildren,searchHasMore,searchRows,searchLoading,runSearch,locateAndOpen,openMenu,openRootMenu,rowKeydown,moreMenuKeydown,clearDropTarget};
+    initialized.value=true;`, ctx));
   const tree = ctx.tree;
   return {tree, props, catalog, emitted, run: text => vm.runInContext(text, ctx),
     tick(ms) {time += ms; for (const [id, timer] of [...timers]) if (timer.at <= time) {timers.delete(id); timer.fn();}},
-    async folderBindings() {
+    async render() {
       let vnode;
-      const bindings = proxyRefs({...tree, activeConversationUuid: props.activeConversationUuid});
-      const renderer = compile(activityTemplate);
+      const bindings = proxyRefs({...icons, ...tree, activityLabel, activeConversationUuid: props.activeConversationUuid});
+      const renderer = compile(treeTemplate);
       const app = createSSRApp({render() {vnode = renderer.call(this, bindings, []); return vnode;}});
-      let delivered;
-      app.component('ConversationActivityFolder', {props: ['items', 'recentItems', 'activeConversationUuid', 'readVersions', 'busy', 'titleGenerating'], setup(props, {attrs}) {delivered = {...props, ...attrs}; return () => h('div');}});
-      await renderToString(app);
-      return delivered;
+      for (const [name, icon] of Object.entries(icons)) app.component(name, icon);
+      app.component('AnimatedConversationTitle', {props: ['text'], render() {return h('span', this.text);}});
+      app.component('el-icon', {render() {return h('i', this.$slots.default?.());}});
+      const html = await renderToString(app);
+      return {html, vnode, nodes: walk([vnode])};
     },
   };
 }
@@ -50,7 +58,7 @@ function treeHarness(t) {
 function folderHarness(t, props, dispatch = () => {}) {
   const scope = effectScope(); t.after(() => scope.stop());
   const emitted = [], mounted = [], unmounted = [], intervals = new Map(); let serial = 0;
-  const ctx = vm.createContext({computed, ref, watch, activityLabel, activityState, groupActivityItems,
+  const ctx = vm.createContext({useRecentConversationRows, computed, ref, watch, activityLabel, activityState, groupActivityItems,
     referenceItem: () => null,
     defineProps: () => props, defineEmits: () => (...args) => {emitted.push(args); dispatch(...args);},
     onMounted: fn => mounted.push(fn), onBeforeUnmount: fn => unmounted.push(fn),
@@ -73,20 +81,20 @@ function folderHarness(t, props, dispatch = () => {}) {
 const recentGroup = view => view.nodes.find(node => Object.hasOwn(node.props || {}, 'data-recent-conversations'));
 const groupRows = group => walk([group]).filter(node => hasClass(node, 'activity-row'));
 
-test('one recent list keeps newest five plus outstanding work, excludes archives/drafts, and remains after switching', async t => {
-  const items = Array.from({length: 6}, (_, i) => row(`c${i}`, (i + 1) * 1000));
-  const props = reactive({items: [row('working', 9000, {running: true}), row('unread', 8000, {activityUnread: true})], recentItems: [...items, {...items[0]}, row('archived', 99000, {archived: true}), row('draft', 99001, {local: true}), row('empty', 0)], activeConversationUuid: '', readVersions: new Map(), busy: false});
+test('one recent list keeps newest fifteen plus outstanding work, excludes archives/drafts, and remains after switching', async t => {
+  const items = Array.from({length: 16}, (_, i) => row(`c${i}`, (i + 1) * 1000));
+  const props = reactive({items: [row('working', 19000, {running: true}), row('unread', 18000, {activityUnread: true})], recentItems: [...items, {...items[0]}, row('archived', 99000, {archived: true}), row('draft', 99001, {local: true}), row('empty', 0)], activeConversationUuid: '', readVersions: new Map(), busy: false});
   const folder = folderHarness(t, props);
   let view = await folder.render();
   assert.match(view.html, /最近会话/);
-  assert.deepEqual(groupRows(recentGroup(view)).map(node => node.props['data-activity-id']), ['working', 'unread', 'c5', 'c4', 'c3', 'c2', 'c1']);
+  assert.deepEqual(groupRows(recentGroup(view)).map(node => node.props['data-activity-id']), ['working', 'unread', ...Array.from({length: 15}, (_, i) => `c${15 - i}`)]);
   assert.equal(walk([recentGroup(view)]).filter(node => hasClass(node, 'activity-row-read')).length, 1);
   assert.doesNotMatch(view.html, /运行与未读|<h5|data-activity-group/);
   props.items = []; props.activeConversationUuid = 'different'; await nextTick();
-  view = await folder.render(); assert.equal(groupRows(recentGroup(view)).length, 5);
-  props.recentItems = items.filter(item => item.conversationUuid !== 'c5'); await nextTick();
+  view = await folder.render(); assert.equal(groupRows(recentGroup(view)).length, 15);
+  props.recentItems = items.filter(item => item.conversationUuid !== 'c15'); await nextTick();
   view = await folder.render();
-  assert.deepEqual(groupRows(recentGroup(view)).map(node => node.props['data-activity-id']), ['c4', 'c3', 'c2', 'c1', 'c0']);
+  assert.deepEqual(groupRows(recentGroup(view)).map(node => node.props['data-activity-id']), Array.from({length: 15}, (_, i) => `c${14 - i}`));
   assert.doesNotMatch(view.html, /暂无运行/);
 });
 
@@ -169,59 +177,53 @@ test('read receipts clear badges without removing recent aliases or changing the
   assert.equal(status.recentItems[0].activityUnread, true);
 });
 
-test('actual tree props carry recent aliases; opening and deleting reuse existing navigation without moving folders', async t => {
-  const h = treeHarness(t), item = row('recent', Date.now() - 180000);
+test('actual tree renders recent aliases; opening and deleting reuse existing navigation without moving folders', async t => {
+  const h = treeHarness(t), item = row('recent', h.tree.recentClock.value - 180000);
   h.tree.applyStatus({items: [], activityItems: [], recentItems: [item]});
-  const bindings = await h.folderBindings();
-  assert.equal(bindings.recentItems[0].conversationUuid, 'recent');
+  assert.equal(h.tree.recentConversationRows.value[0].conversationUuid, 'recent');
   assert.ok(h.tree.knownConversationRows().some(item => item.conversationUuid === 'recent'));
-  const folder = folderHarness(t, reactive({items: [], recentItems: bindings.recentItems, activeConversationUuid: '', readVersions: new Map(), busy: false}), (type, ...args) => {if (type === 'open') bindings.onOpen(...args);});
-  const view = await folder.render();
-  assert.match(view.html, /3 分钟前/); assert.match(view.html, /最后交互/);
+  const view = await h.render();
+  assert.match(view.html, /3 分钟前/);
+  const alias = view.nodes.find(node => node.props?.['data-tree-id'] === 'recent:recent');
   h.tree.selectedFolderId.value = 'do-not-change';
-  walk([recentGroup(view)]).find(node => hasClass(node, 'activity-row-open')).props.onClick();
-  assert.equal(h.emitted.find(event => event[0] === 'open')[1].conversationUuid, 'recent');
+  await walk([alias]).find(node => hasClass(node, 'conversation')).props.onClick();
+  const opened = h.emitted.find(event => event[0] === 'open')[1];
+  assert.equal(opened.conversationUuid, 'recent'); assert.equal(opened.folderId, 'F'); assert.equal('recentAlias' in opened, false);
   assert.equal(h.tree.selectedFolderId.value, 'do-not-change'); assert.equal(h.tree.expanded.value.size, 0);
   h.tree.forgetConversation('recent');
   assert.equal(h.tree.recentItems.value.length, 0);
   assert.equal(h.tree.knownConversationRows().some(item => item.conversationUuid === 'recent'), false);
+  assert.ok(!(await h.render()).nodes.some(node => node.props?.['data-tree-id'] === 'recent:recent'));
 });
 
-test('compiled activity/recent row pointer events open the same desktop overview and ignore touch; scroll/collapse close it', async t => {
+test('compiled recent rows open the desktop overview and ignore touch; scroll/view switches close it', async t => {
   const h = treeHarness(t), running = row('working', 3000, {running: true}), recent = row('recent', 2000);
   h.tree.applyStatus({items: [running], activityItems: [running], recentItems: [recent]});
-  const bindings = await h.folderBindings();
-  const handlers = {'overview-enter': bindings.onOverviewEnter, 'overview-leave': bindings.onOverviewLeave, 'overview-close': bindings.onOverviewClose};
-  const folder = folderHarness(t, reactive({items: bindings.items, recentItems: bindings.recentItems, activeConversationUuid: '', readVersions: new Map(), busy: false}), (type, ...args) => handlers[type]?.(...args));
-  const view = await folder.render();
-  const rows = view.nodes.filter(node => hasClass(node, 'activity-row'));
-  const titleButton = {isConnected: true, getBoundingClientRect: () => ({left: 20, right: 230})};
-  const anchor = {isConnected: true, getBoundingClientRect: () => ({left: 20, right: 320}),
-    querySelector(selector) {return selector.includes('activity-row-open') ? titleButton : null;}};
-  const event = {pointerType: 'mouse', currentTarget: anchor};
+  const view = await h.render();
+  const rows = view.nodes.filter(node => node.props?.['data-kind'] === 'conversation');
+  assert.equal(rows.length, 2);
+  const anchor = {isConnected: true, getBoundingClientRect: () => ({left: 20, right: 320})};
+  const event = {pointerType: 'mouse', currentTarget: {querySelector: selector => selector === 'button.conversation' ? anchor : null}};
   for (const node of rows) {
     node.props.onPointerenter(event); h.tick(279); assert.equal(h.tree.overview.value.open, false);
-    h.tick(1); assert.equal(h.tree.overview.value.row.conversationUuid, node.props['data-activity-id']);
+    h.tick(1); assert.equal(`recent:${h.tree.overview.value.row.conversationUuid}`, node.props['data-tree-id']);
     assert.equal(toRaw(h.tree.overview.value.anchor), anchor);
-    assert.equal(h.tree.overview.value.anchor.getBoundingClientRect().right, 320, 'overview starts outside the complete row, not inside the trailing status/read controls');
+    assert.equal(h.tree.overview.value.anchor.getBoundingClientRect().right, 320, 'overview uses the shared conversation button, including its trailing status');
     node.props.onPointerleave(); h.tick(100); h.tree.keepOverview(); h.tick(100); assert.equal(h.tree.overview.value.open, true);
-    view.nodes.find(node => hasClass(node, 'activity-folder-content')).props.onScrollPassive();
+    view.nodes.find(node => hasClass(node, 'tree-list')).props.onScrollPassive();
     assert.equal(h.tree.overview.value.open, false);
     node.props.onPointerenter({...event, pointerType: 'touch'}); h.tick(300); assert.equal(h.tree.overview.value.open, false);
   }
   rows[0].props.onPointerenter(event); h.tick(280);
-  view.nodes.find(node => hasClass(node, 'activity-folder-toggle')).props.onClick();
+  await h.tree.switchSidebarView('folders');
   assert.equal(h.tree.overview.value.open, false);
 });
 
 test('right-clicking a recent row opens the ordinary conversation menu at the pointer', async t => {
   const h = treeHarness(t), item = row('recent-menu', 2000);
   h.tree.applyStatus({items: [], recentItems: [item]});
-  const bindings = await h.folderBindings();
-  const folder = folderHarness(t, reactive({items: [], recentItems: bindings.recentItems, activeConversationUuid: '', readVersions: new Map(), busy: false}),
-    (type, ...args) => {if (type === 'more') bindings.onMore(...args);});
-  const view = await folder.render();
-  const recentRow = groupRows(recentGroup(view))[0];
+  const view = await h.render();
+  const recentRow = view.nodes.find(node => node.props?.['data-tree-id'] === 'recent:recent-menu');
   let prevented = 0, stopped = 0;
   recentRow.props.onContextmenu({
     type: 'contextmenu', clientX: 123, clientY: 77,
@@ -231,6 +233,7 @@ test('right-clicking a recent row opens the ordinary conversation menu at the po
   assert.ok(prevented >= 1); assert.ok(stopped >= 1);
   assert.equal(h.tree.menu.value.open, true);
   assert.equal(h.tree.menu.value.row.conversationUuid, 'recent-menu');
+  assert.equal('recentAlias' in h.tree.menu.value.row, false);
   assert.equal(h.tree.menu.value.x, 123); assert.equal(h.tree.menu.value.y, 77);
 });
 

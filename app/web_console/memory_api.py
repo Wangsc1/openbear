@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from app.memory.builtin import bundled_prompt_template
-from app.rath.prompting import available_agent_prompt_items
+from app.agents.prompting import available_agent_prompt_items
 from app.web_console.core import *
 from app.web_console.live_stream import *
 
@@ -94,7 +94,7 @@ class WebAdminMemoryMixin:
 
     async def _available_agents_for_prompt(self) -> list[dict[str, Any]]:
         try:
-            return await available_agent_prompt_items(self.rath_dao)
+            return await available_agent_prompt_items(self.agent_dao)
         except Exception as exc:
             log.warning("Web 获取可用 Agent 提示词参数失败", 错误=str(exc)[:120])
             return []

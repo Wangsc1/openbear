@@ -6,7 +6,7 @@ const props = defineProps({
   target: {type: Object, required: true},
   turn: {type: Object, default: null},
   desktopPlacement: {type: String, default: 'inline'},
-  mobileLongPress: {type: Boolean, default: false},
+  mobileSelectionOnly: {type: Boolean, default: false},
 });
 const visibility = useMessageVisibility();
 const {selecting, selected, busy} = visibility;
@@ -19,13 +19,13 @@ function select() { open.value = false; visibility.startSelection(props.target);
 
 <template>
   <span v-if="visibility.canTarget(props.target)" class="message-visibility-action"
-        :class="[`placement-${props.desktopPlacement}`, {'is-selecting': selecting, 'is-open': open, 'uses-long-press': props.mobileLongPress}]">
+        :class="[`placement-${props.desktopPlacement}`, {'is-selecting': selecting, 'is-open': open, 'mobile-selection-only': props.mobileSelectionOnly}]">
     <label v-if="selecting" class="visibility-select" title="选择消息">
       <input type="checkbox" :checked="selected.has(visibilityOperationId(props.target))" aria-label="选择消息" :disabled="busy" @change="visibility.toggle(props.target)"/>
       <span class="visibility-check" aria-hidden="true"><Check/></span>
     </label>
     <template v-else>
-    <button v-if="!props.mobileLongPress" type="button" class="visibility-more visibility-mobile-more" aria-label="更多消息操作" aria-haspopup="dialog" :disabled="busy" @click="visibility.openMobileMenu(props.target, props.turn)"><MoreFilled/></button>
+    <button v-if="!props.mobileSelectionOnly" type="button" class="visibility-more visibility-mobile-more" aria-label="更多消息操作" aria-haspopup="dialog" :disabled="busy" @click="visibility.openMobileMenu(props.target, props.turn)"><MoreFilled/></button>
     <el-popover v-model:visible="open" trigger="click" placement="bottom-start" :width="164" :show-arrow="false" popper-class="visibility-action-popover">
       <template #reference><button type="button" class="visibility-more visibility-desktop-more" aria-label="更多消息操作" :aria-expanded="open" :disabled="busy"><MoreFilled/></button></template>
       <div class="visibility-action-menu">
@@ -81,8 +81,8 @@ function select() { open.value = false; visibility.startSelection(props.target);
   .visibility-action-menu button { min-height: 44px; }
 }
 @media (max-width: 760px) {
-  /* Phone menus belong to the row's long press. Only selection owns a rail. */
-  .message-visibility-action.uses-long-press:not(.is-selecting) { display: none; }
+  /* Phone menus use explicit footer buttons. Only selection owns a rail. */
+  .message-visibility-action.mobile-selection-only:not(.is-selecting) { display: none; }
   .message-visibility-action.placement-gutter,
   .message-visibility-action.placement-footer.is-selecting { position: absolute; left: -12px; top: calc(var(--visibility-line-center, 12px) - 22px); z-index: 3; }
   .message-visibility-action.placement-footer.is-selecting { top: 0; }

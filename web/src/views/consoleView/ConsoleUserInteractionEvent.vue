@@ -146,7 +146,7 @@ watch(() => [props.open, operationId.value, operationRevision.value, detailAvail
 					<div>{{ view.promptValue || '（空回答）' }}</div>
 				</div>
 
-				<div v-else-if="view.action === 'questionnaire'" class="questionnaire-questions">
+				<div v-else-if="view.action === 'questionnaire'" class="questionnaire-questions" :class="{'has-multiple': view.questions.length > 1}">
 					<section v-for="question in view.questions" :key="question.id" class="questionnaire-question">
 						<header>
 							<span class="question-number">{{ question.number }}</span>
@@ -243,7 +243,7 @@ details[open] > summary .disclosure-icon svg { transform: rotate(90deg); }
 .readonly-text-answer > div { min-height: 2.4rem; border: 1px solid var(--ob-border); border-radius: .68rem; background: var(--ob-surface); padding: .58rem .62rem; font-size: .77rem; font-weight: 400; line-height: 1.5; color: var(--ob-text); white-space: pre-wrap; overflow-wrap: anywhere; }
 .questionnaire-card > .readonly-content { max-height: min(14vh, 8rem); max-height: min(14dvh, 8rem); }
 .questionnaire-questions { display: grid; gap: .7rem; margin-top: .75rem; }
-.questionnaire-questions:has(.questionnaire-question + .questionnaire-question) { max-height: min(32vh, 20rem); max-height: min(32dvh, 20rem); overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.questionnaire-questions.has-multiple { max-height: min(32vh, 20rem); max-height: min(32dvh, 20rem); overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .questionnaire-question { min-width: 0; border: 1px solid var(--ob-border); border-radius: .85rem; background: rgb(var(--ob-surface-rgb) / 0.9); padding: .72rem; }
 .questionnaire-question > header { display: flex; align-items: center; gap: .42rem; font-size: .81rem; line-height: 1.45; color: var(--ob-text); }
 .question-number { display: inline-grid; width: 1.35rem; height: 1.35rem; flex: 0 0 auto; place-items: center; border-radius: 50%; background: var(--ob-blue-soft); font-size: .7rem; color: var(--ob-text); }

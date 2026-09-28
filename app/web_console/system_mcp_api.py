@@ -45,7 +45,7 @@ class WebAdminSystemMcpMixin:
     async def _restart_running_json(self) -> dict[str, Any]:
         active_processes = processes.active()
         running_openbear = self.runs.count() if self.runs is not None else 0
-        running_rath = self.rath.count() if self.rath is not None else 0
+        running_rath = self.agents.count() if self.agents is not None else 0
         running_children = len([info for info in active_processes if getattr(info, "blocks_restart", True)])
         running_operations = await self._running_operations_json()
         return {

@@ -3,6 +3,7 @@ import { ref, onMounted, onBeforeUnmount, watch } from "vue";
 import * as monaco from "monaco-editor";
 import { isDarkTheme, subscribeTheme } from "../theme.js";
 import { editorTheme } from "../editorTheme.js";
+import {bindMobileEditorFontSize} from '../mobileInput.js';
 // 注:Monaco worker 配置在 main.js 第一个 import 的 ./monaco-worker.js 里(必须早于 monaco-editor 求值)
 
 const props = defineProps({
@@ -23,6 +24,7 @@ const el = ref(null);
 let editor = null;
 let suppress = false;
 let stopThemeSubscription = null;
+let stopFontSubscription = null;
 
 function registerEditorTheme(dark = isDarkTheme()) {
   const name = dark ? 'openbear-dark' : 'openbear-light';
@@ -336,6 +338,7 @@ onMounted(() => {
     suggest: { showWords: false, filterGraceful: true, snippetsPreventQuickSuggestions: false },
     tabCompletion: "on",
   });
+  stopFontSubscription = bindMobileEditorFontSize(editor);
   editor.onDidFocusEditorWidget(syncCompletionContext);
   editor.onDidChangeModelContent(() => {
     syncCompletionContext();
@@ -365,6 +368,7 @@ watch(() => props.modelValue, (v) => {
 
 onBeforeUnmount(() => {
   stopThemeSubscription?.();
+  stopFontSubscription?.();
   editor?.dispose();
 });
 </script>

@@ -1,6 +1,6 @@
 <script setup>
 import {nextTick, onBeforeUnmount, onMounted, ref, watch} from "vue";
-import {ChatLineRound, CollectionTag, DataAnalysis, Hide, Lock, Money, MoreFilled, Timer, Unlock} from "@element-plus/icons-vue";
+import {ChatLineRound, CollectionTag, DataAnalysis, EditPen, Hide, Lock, Money, MoreFilled, Search, Timer, Unlock} from "@element-plus/icons-vue";
 import {useMessageVisibility} from './messageVisibility.js';
 const visibility = useMessageVisibility();
 import {cachePct, fmtTokens, shortText} from "./display.js";
@@ -15,7 +15,7 @@ const props = defineProps({
 	durationText: {type: String, default: "0s"},
 	costText: {type: String, default: "$0.0000"},
 });
-const emit = defineEmits(["open-hidden", "open-memory", "toggle-scroll-lock", "scroll-to-turn"]);
+const emit = defineEmits(["open-hidden", "open-search", "open-memory", "open-context", "toggle-scroll-lock", "scroll-to-turn"]);
 const phone = ref(false);
 const menuOpen = ref(false);
 const navigationOpen = ref(false);
@@ -45,8 +45,9 @@ function turnLabel(turn, index) { return shortText(visibility.userContent(turn),
 
 <template>
 	<div v-if="phone" class="mobile-conversation-tools">
+		<button type="button" class="mobile-more-button" aria-label="搜索此会话" :disabled="!props.conversationUuid || props.conversationUuid.startsWith('local:')" @click="emit('open-search')"><Search/></button>
 		<button type="button" class="mobile-more-button" aria-label="更多会话操作" aria-haspopup="dialog" :aria-expanded="menuOpen" @click="menuOpen = !menuOpen"><MoreFilled/></button>
-		<el-drawer v-model="menuOpen" direction="btt" size="auto" title="会话工具" class="mobile-conversation-menu" append-to-body>
+		<el-drawer v-model="menuOpen" direction="btt" size="auto" title="会话工具" class="mobile-conversation-menu mobile-viewport-sheet" append-to-body>
 			<div class="mobile-sheet-grip" aria-hidden="true"></div>
 			<section class="mobile-conversation-summary" aria-label="会话统计">
 				<div class="mobile-summary-caption">会话统计<span class="mobile-summary-total">{{ fmtTokens((props.tokenParts.input || 0) + (props.tokenParts.output || 0)) }} <small>Tokens</small></span></div>
@@ -66,12 +67,13 @@ function turnLabel(turn, index) { return shortText(visibility.userContent(turn),
 			<div class="mobile-tool-actions">
 				<button type="button" :disabled="!props.conversationUuid || props.conversationUuid.startsWith('local:')" @click="chooseAction('open-hidden')"><Hide/><span>隐藏内容</span><small v-if="props.hiddenCount">{{ props.hiddenCount }}</small></button>
 				<button type="button" :disabled="!props.conversationUuid || props.conversationUuid.startsWith('local:')" @click="chooseAction('open-memory')"><CollectionTag/><span>任务记忆</span></button>
+				<button type="button" :disabled="!props.conversationUuid || props.conversationUuid.startsWith('local:')" @click="chooseAction('open-context')"><EditPen/><span>编辑上下文</span></button>
 				<button type="button" :disabled="!props.turns.length" @click="openNavigation"><ChatLineRound/><span>对话导航</span><small v-if="props.turns.length">{{ props.activeTurnIndex + 1 }} / {{ props.turns.length }}</small></button>
 				<div class="mobile-menu-divider"></div>
 				<button type="button" :aria-pressed="props.autoScrollLocked" @click="chooseAction('toggle-scroll-lock')"><Lock v-if="props.autoScrollLocked"/><Unlock v-else/><span>跟随最新消息</span><small>{{ props.autoScrollLocked ? '开启' : '关闭' }}</small></button>
 			</div>
 		</el-drawer>
-		<el-drawer v-model="navigationOpen" direction="btt" size="min(60dvh, 30rem)" title="对话导航" class="mobile-turn-navigation" append-to-body @opened="revealCurrentTurn">
+		<el-drawer v-model="navigationOpen" direction="btt" size="min(calc(var(--mobile-viewport-height, 100vh) * .6), 30rem)" title="对话导航" class="mobile-turn-navigation mobile-viewport-sheet" append-to-body @opened="revealCurrentTurn">
 			<nav ref="navigationList" class="mobile-turn-list" aria-label="选择对话轮次">
 				<button v-for="(turn, index) in props.turns" :key="turn.id || index" type="button" class="mobile-turn-row" :aria-current="props.activeTurnIndex === index ? 'true' : undefined" @click="chooseTurn(index)">
 					<span class="mobile-turn-index">{{ index + 1 }}</span><span>{{ turnLabel(turn, index) }}</span>
@@ -82,7 +84,7 @@ function turnLabel(turn, index) { return shortText(visibility.userContent(turn),
 </template>
 
 <style scoped>
-.mobile-conversation-tools { display: flex; flex: 0 0 44px; }
+.mobile-conversation-tools { display: flex; flex: 0 0 auto; }
 .mobile-more-button { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; appearance: none; border: 0; border-radius: 10px; background: transparent; color: var(--ob-chat-subtle); cursor: pointer; }
 .mobile-more-button svg { width: 19px; height: 19px; }
 .mobile-conversation-summary { margin: 2px 3px 10px; padding: 13px; border: 1px solid var(--ob-chat-line); border-radius: 12px; background: var(--ob-chat-bg); }

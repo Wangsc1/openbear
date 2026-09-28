@@ -12,11 +12,11 @@ from app.agent.transcript_repair import repair_role_alternation
 from app.db.engine import DB
 from app.llm.base import AgentResult, OpenBearLLMError
 from app.llm.events import StreamEvent, ToolCall, Usage
-from app.rath.builtin_workflows import ensure_builtin_workflows
-from app.rath.dao import RathDAO
-from app.rath.schemas import RathAgentDef
-from app.rath.single_agent import (
-    SingleAgentWorkflowRunner,
+from app.agents.profiles import ensure_builtin_workflows
+from app.agents.dao import AgentDAO
+from app.agents.schemas import AgentDefinition
+from app.agents.execution import (
+    AgentExecutor,
     agent_to_snapshot,
     safe_agent_llm_session_id,
 )
@@ -34,9 +34,9 @@ from app.tools.task_memory import register_task_memory_tool
 async def env(tmp_path):
     db = DB(str(tmp_path / "single-agent.db"))
     await db.connect()
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow_uuid = await ensure_builtin_workflows(dao)
-    agent = RathAgentDef(
+    agent = AgentDefinition(
         workflow_uuid=workflow_uuid,
         agent_key="code-reader",
         name="代码阅读员",
@@ -164,7 +164,7 @@ async def test_single_agent_runner_prepends_base_system_prompt(env):
             return AgentResult(text="ok", usage=Usage(input_tokens=1, output_tokens=1))
 
     backend = CaptureSystemBackend()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -202,7 +202,7 @@ async def test_single_agent_runner_forwards_fast_request_to_every_model_call(env
 
     backend = CaptureFastBackend()
     calls: list[dict] = []
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -235,7 +235,7 @@ async def test_single_agent_runner_forwards_fast_request_to_every_model_call(env
 
 async def test_plan_system_prompt_restores_inherited_facts_without_marking_new_progress(env):
     dao, task_uuid, agent = env
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -299,7 +299,7 @@ async def test_plan_runtime_is_append_only_and_execution_tool_schema_is_frozen(e
         (task_uuid,),
     )
     await dao.db.conn.commit()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -391,7 +391,7 @@ async def test_plan_runtime_is_append_only_and_execution_tool_schema_is_frozen(e
 
 def test_full_plan_runtime_does_not_repeat_full_state_in_instruction_prompts(env):
     dao, task_uuid, agent = env
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -445,7 +445,7 @@ async def test_single_agent_runner_uses_registered_agent_config(env):
         return "README 内容"
 
     reg.add("Read", "read file", {"type": "object", "properties": {}}, read)
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -509,7 +509,7 @@ async def test_tool_call_started_persists_complete_long_arguments(env):
                 text="done", usage=Usage(input_tokens=1, output_tokens=1), finish_reason="stop"
             )
 
-    await SingleAgentWorkflowRunner(
+    await AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -624,7 +624,7 @@ async def test_responses_agent_persists_and_replays_native_continuation(env):
             yield StreamEvent(kind="finish", finish_reason="stop")
 
     backend = NativeResponsesBackend()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -736,7 +736,7 @@ async def test_responses_interrupted_stream_executes_complete_native_tool_call_o
             yield StreamEvent(kind="finish", finish_reason="stop")
 
     backend = InterruptedResponsesBackend()
-    output = await SingleAgentWorkflowRunner(
+    output = await AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -796,7 +796,7 @@ async def test_responses_native_context_resumes_after_db_reconnect(env):
                 finish_reason="tool_calls",
             )
 
-    first_runner = SingleAgentWorkflowRunner(
+    first_runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -831,7 +831,7 @@ async def test_responses_native_context_resumes_after_db_reconnect(env):
     await dao.db.conn.commit()
     await dao.db.close()
     await dao.db.connect()
-    resumed_dao = RathDAO(dao.db)
+    resumed_dao = AgentDAO(dao.db)
 
     class SecondProcessBackend:
         protocol = "responses"
@@ -860,7 +860,7 @@ async def test_responses_native_context_resumes_after_db_reconnect(env):
                 ],
             )
 
-    second_runner = SingleAgentWorkflowRunner(
+    second_runner = AgentExecutor(
         resumed_dao,
         task_uuid,
         agent=agent,
@@ -884,7 +884,7 @@ async def test_responses_native_context_resumes_after_db_reconnect(env):
 
 async def test_native_context_sanitizer_drops_unpaired_function_calls(env):
     dao, task_uuid, agent = env
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -941,7 +941,7 @@ async def test_single_agent_runner_keeps_tool_schemas_across_rounds(env):
         visibility={"agent"},
     )
     backend = _MultiStepBackend()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -990,7 +990,7 @@ async def test_single_agent_runner_empty_allowlist_exposes_no_agent_tools(env):
             return AgentResult(text="无工具完成")
 
     backend = CaptureToolsBackend()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1040,7 +1040,7 @@ async def test_single_agent_runner_empty_allowlist_denies_unsolicited_tool_calls
             return AgentResult(text=f"收到：{tool_text}")
 
     backend = UnsolicitedToolBackend()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1083,7 +1083,7 @@ async def test_single_agent_runner_hard_blocks_memory_even_if_allowlisted(env):
             return AgentResult(text="没有拿到 Memory")
 
     backend = CaptureToolsBackend()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1139,7 +1139,7 @@ async def test_single_agent_runner_denies_unsolicited_memory_tool_call(env):
             return AgentResult(text=f"收到：{tool_text}")
 
     backend = UnsolicitedMemoryBackend()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1164,7 +1164,7 @@ async def test_single_agent_runner_retries_retryable_model_error(env):
     agent.tool_allowlist = []
     backend = _FlakyBackend()
     calls = []
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1213,7 +1213,7 @@ async def test_single_agent_physical_retry_deduplicates_task_memory_and_keeps_pr
         description="stable",
     )
     backend = _FlakyBackend()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1244,7 +1244,7 @@ async def test_single_agent_runner_retry_wait_can_be_cancelled(env):
     agent.tool_allowlist = []
     backend = _FlakyBackend()
     calls = []
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1297,7 +1297,7 @@ async def test_single_agent_uses_streaming_transport_for_long_final_output(env):
             raise AssertionError("Rath production path must not use non-streaming complete()")
 
     backend = StreamingOnlyBackend()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1356,7 +1356,7 @@ async def test_single_agent_context_overflow_pauses_when_nothing_to_compact(env)
                 retryable=False,
             )
 
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1393,9 +1393,9 @@ async def test_single_agent_tasks_are_self_contained_without_history_injection(t
     """同一 Agent Session 的后续 Task 不再注入历史摘要/产物标题；prompt 如实声明自包含。"""
     from app.db.engine import DB
     from app.llm.base import AgentResult
-    from app.rath.dao import RathDAO
-    from app.rath.schemas import RathAgentDef
-    from app.rath.single_agent import SingleAgentWorkflowRunner
+    from app.agents.dao import AgentDAO
+    from app.agents.schemas import AgentDefinition
+    from app.agents.execution import AgentExecutor
 
     class CaptureBackend:
         protocol = "chat"
@@ -1419,9 +1419,9 @@ async def test_single_agent_tasks_are_self_contained_without_history_injection(t
 
     db = DB(str(tmp_path / "rath-history.db"))
     await db.connect()
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     wf_uuid = await dao.upsert_workflow(slug="single-agent", name="Single", kind="single-agent")
-    agent = RathAgentDef(
+    agent = AgentDefinition(
         workflow_uuid=wf_uuid,
         agent_key="reader",
         name="源码阅读员",
@@ -1445,7 +1445,7 @@ async def test_single_agent_tasks_are_self_contained_without_history_injection(t
         parent_session_uuid="openbear-1",
         agent_session_uuid=agent_session.session_uuid,
     )
-    await SingleAgentWorkflowRunner(
+    await AgentExecutor(
         dao,
         first_uuid,
         agent=agent,
@@ -1464,7 +1464,7 @@ async def test_single_agent_tasks_are_self_contained_without_history_injection(t
         parent_session_uuid="openbear-1",
         agent_session_uuid=agent_session.session_uuid,
     )
-    await SingleAgentWorkflowRunner(
+    await AgentExecutor(
         dao,
         second_uuid,
         agent=agent,
@@ -1527,7 +1527,7 @@ async def test_single_agent_model_call_hook_runs_before_task_completes(env):
         current = await dao.get_task(task_uuid)
         observed.append((detail, current.status, current.model_call_count, current.input_tokens))
 
-    output = await SingleAgentWorkflowRunner(
+    output = await AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1576,7 +1576,7 @@ async def test_single_agent_tool_round_persists_reasoning_progress(env):
             )
 
     reg.add("Read", "read", {"type": "object", "properties": {}}, read)
-    output = await SingleAgentWorkflowRunner(
+    output = await AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1597,7 +1597,14 @@ async def test_single_agent_tool_round_persists_reasoning_progress(env):
     assert "下一步只验证授权后即可收口" in tool_turn["content"]
 
 
-async def test_single_agent_budget_pause_can_continue_same_task(env):
+async def test_single_agent_budget_pause_can_continue_same_task(env, monkeypatch):
+    from app.runtime.engine import ExecutionRuntime
+    entries = []
+    original_run = ExecutionRuntime.run
+    async def trace(self, host, **kwargs):
+        entries.append(type(host).__name__)
+        return await original_run(self, host, **kwargs)
+    monkeypatch.setattr(ExecutionRuntime, "run", trace)
     dao, task_uuid, agent = env
     agent.tool_allowlist = []
     memories = TaskMemoryDAO(dao.db)
@@ -1646,7 +1653,7 @@ async def test_single_agent_budget_pause_can_continue_same_task(env):
     reg.add("Noop", "noop", {"type": "object", "properties": {}}, noop)
     agent.tool_allowlist = ["Noop"]
     backend = LoopBackend()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1697,6 +1704,12 @@ async def test_single_agent_budget_pause_can_continue_same_task(env):
     assert any(e.kind == "agent_budget_exhausted" for e in events)
     assert any(e.kind == "agent_task_continued" for e in events)
 
+    assert entries == ["AgentHost", "AgentHost"]
+    cur = await dao.db.conn.execute("SELECT run_id,status FROM runtime_runs WHERE task_uuid=? ORDER BY rowid", (task_uuid,))
+    executions = await cur.fetchall()
+    assert [r["status"] for r in executions] == ["needs_control", "completed"]
+    assert executions[0]["run_id"] != executions[1]["run_id"]
+
 
 async def test_single_agent_user_prompt_carries_runtime_facts_only(
     env,
@@ -1718,7 +1731,7 @@ async def test_single_agent_user_prompt_carries_runtime_facts_only(
             return AgentResult(text="结论：完成")
 
     backend = CaptureBackend()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1777,7 +1790,7 @@ async def test_direct_agent_exposes_control_ack_only_when_intervention_pending(e
 
     reg.add("Read", "读取文件", {"type": "object", "properties": {}}, read, visibility={"agent"})
     reg.add("AgentControlAck", "回执", {"type": "object", "properties": {}}, ack, visibility={"agent"})
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1851,7 +1864,7 @@ async def test_tool_budget_pause_persists_only_paired_tool_calls(env):
         visibility={"agent"},
     )
     backend = MultiToolBackend()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1889,7 +1902,7 @@ async def test_task_memory_requires_explicit_agent_tool_grant(env):
     dao, task_uuid, agent = env
     registry = ToolRegistry()
     register_task_memory_tool(registry, TaskMemoryDAO(dao.db))
-    without_grant = SingleAgentWorkflowRunner(
+    without_grant = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1903,7 +1916,7 @@ async def test_task_memory_requires_explicit_agent_tool_grant(env):
         schema["name"] for schema in await without_grant._allowed_tool_schemas()
     }
 
-    with_grant = SingleAgentWorkflowRunner(
+    with_grant = AgentExecutor(
         dao,
         task_uuid,
         agent=replace(agent, tool_allowlist=["TaskMemory"]),
@@ -1982,7 +1995,7 @@ async def test_agent_task_memory_state_keeps_cross_second_tool_round_provider_pr
     registry.add("Read", "mutate catalog", {"type": "object", "properties": {}}, mutate_catalog)
     register_task_memory_tool(registry, memories)
     agent = replace(agent, tool_allowlist=["Read", "TaskMemory"])
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,

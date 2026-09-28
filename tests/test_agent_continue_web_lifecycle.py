@@ -8,7 +8,7 @@ import json
 import pytest
 
 from app.agent import steering
-from app.agent.runs import RunRegistry
+from app.runtime.scheduler import ControllerRuns
 from app.llm.events import StreamEvent
 from app.tools.base import ToolRegistry
 from app.web_operations import tool_event_operation_specs
@@ -58,8 +58,8 @@ async def _legacy_continue(web_env, *, task_status="completed", source_is_task=F
     await live.publish({"type": "final", "turnUuid": "root", "text": "original answer"})
     source = "previous-task" if source_is_task else "instance-id"
     if source_is_task:
-        await server.rath_dao.create_task(task_uuid=source, chat_id=chat, parent_session_uuid=conv, status="completed", workflow_uuid="test", title="previous round")
-    await server.rath_dao.create_task(task_uuid="new-task", chat_id=chat, parent_session_uuid=conv, status=task_status, workflow_uuid="test", title="new round")
+        await server.agent_dao.create_task(task_uuid=source, chat_id=chat, parent_session_uuid=conv, status="completed", workflow_uuid="test", title="previous round")
+    await server.agent_dao.create_task(task_uuid="new-task", chat_id=chat, parent_session_uuid=conv, status=task_status, workflow_uuid="test", title="new round")
     args = json.dumps({"to": source, "prompt": "next round", "tools": []})
     result = {"ok": True, "taskUuid": "new-task", "status": "running", "detached": True}
     async with server._web_operation_lock(conv):
@@ -82,7 +82,7 @@ async def test_legacy_continue_merges_only_phantom_and_preserves_real_card(web_e
     server, conv = web_env.server, row["conversation_uuid"]
     background = asyncio.create_task(asyncio.Event().wait()) if task_status == "running" else None
     if background:
-        server.rath.register("new-task", int(row["internal_chat_id"]), background)
+        server.agents.register("new-task", int(row["internal_chat_id"]), background)
     try:
         before = {op["opId"]: op for op in await server._web_operations(conv)}
         frames = await server._reconcile_inactive_web_conversation_operations(row, source="test")
@@ -124,7 +124,7 @@ async def test_missing_task_reconciles_but_failed_lookup_does_not(web_env, monke
     async def unavailable(_):
         raise RuntimeError("database unavailable")
 
-    monkeypatch.setattr(web_env.server.rath_dao, "get_task", unavailable)
+    monkeypatch.setattr(web_env.server.agent_dao, "get_task", unavailable)
     assert await web_env.server._terminal_status_for_agent_operation(payload, set()) == ""
 
 
@@ -151,7 +151,7 @@ async def test_send_after_phantom_starts_controller_and_consumes_stranded_messag
     row, live, phantom = await _legacy_continue(web_env)
     server, chat = web_env.server, int(row["internal_chat_id"])
     steering.clear(chat)
-    server.runs = RunRegistry()
+    server.runs = ControllerRuns()
     server.tools = ToolRegistry()
     backend = FakeStreamBackend([[StreamEvent(kind="content", text="new answer"), StreamEvent(kind="finish", finish_reason="stop")]])
     server.llm_factory = FakeRunFactory(backend, context_window=100_000)

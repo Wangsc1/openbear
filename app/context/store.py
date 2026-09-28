@@ -203,6 +203,158 @@ class WindowStore:
             raise self._boundary_conflict("new_controller_message_arrived", boundary, actual, stamp, append=True)
         return actual
 
+    async def _verified_duplicate_source_ids(self, conn: Any, messages: list[Message]) -> set[int]:
+        """Prove a deduplicated assistant still represents its exact original row.
+
+        A derived view has its own archive fingerprint; it cannot use the row's
+        event ID. Only a fresh, same-chat row and an exact re-projection of that
+        row can count as covered at the Controller's original-message boundary.
+        The ordinary row fingerprints/count/CAS are still checked below.
+        """
+        from app.agent.transcript_repair import repair_tool_pairing
+        from app.agents.controller_projection import project_history_message_for_controller
+        from app.db.dao import MessageDAO
+
+        verified: set[int] = set()
+        for message in messages:
+            source = source_of(message)
+            source_id = source.get("id")
+            # Only the assistant dedup projection belongs to this proof. Frozen
+            # reference overlays (/references:) and closed-window views have
+            # their own lineage and must retain their existing recovery path.
+            # Classify by the derived ID, not its parent: a forged dedup parent
+            # must still reach the strict checks below and fail closed.
+            if not isinstance(source_id, str) or "/dedup:" not in source_id:
+                continue
+            parent = source.get("derived_from")
+            if (not isinstance(parent, str) or not parent.startswith("message:")
+                    or not parent[8:].isdecimal() or int(parent[8:]) <= 0):
+                raise StaleWindow("controller_derived_source_unverified")
+            row_id = int(parent[8:])
+            if row_id in verified or message.get("role") != "assistant":
+                raise StaleWindow("controller_derived_source_unverified")
+            cur = await conn.execute("SELECT * FROM messages WHERE chat_id=? AND id=?", (self.owner.chat_id, row_id))
+            raw = await cur.fetchone()
+            if raw is None:
+                raise StaleWindow("controller_derived_source_unverified")
+            row = MessageDAO._row(raw)
+            if row.role != "assistant" or row.task_uuid or row.agent_session_uuid:
+                raise StaleWindow("controller_derived_source_unverified")
+            parent_id = f"message:{row_id}"
+            if (parent != parent_id or source.get("kind") != "execution"
+                    or source.get("message_id") not in (None, 0)
+                    or source.get("reference_only") is not False
+                    or source.get("turn_uuid") != row.turn_uuid
+                    or source.get("run_root_turn_uuid") != (row.run_root_turn_uuid or row.turn_uuid)
+                    or source.get("task_uuid") not in (None, "")):
+                raise StaleWindow("controller_derived_source_unverified")
+            original = project_history_message_for_controller(row.to_message())
+            mark_source(original, kind="execution", source_id=parent_id,
+                        message_id=row_id, reference_only=original == row.to_message(),
+                        turn_uuid=row.turn_uuid, run_root_turn_uuid=row.run_root_turn_uuid or row.turn_uuid)
+            expected = repair_tool_pairing([original])[0]
+            if (source.get("id") != source_of(expected).get("id")
+                    or source_of(expected).get("derived_from") != parent_id):
+                raise StaleWindow("controller_derived_source_unverified")
+            actual_payload = serialize_messages([message])[0]
+            expected_payload = serialize_messages([expected])[0]
+            for payload in (actual_payload, expected_payload):
+                payload.pop(CONTEXT_META, None)
+            bundles = actual_payload.pop("openbear_reference_bundle", None)
+            if actual_payload != expected_payload:
+                raise StaleWindow("controller_derived_source_unverified")
+            if bundles is not None:
+                cur = await conn.execute(
+                    """SELECT b.bundle_uuid FROM web_operation_messages l
+                       JOIN web_reference_bundles b ON b.conversation_uuid=l.conversation_uuid AND b.op_id=l.op_id
+                       WHERE l.message_id=? ORDER BY b.created_at,b.bundle_uuid""", (row_id,))
+                if bundles != [str(item[0]) for item in await cur.fetchall()]:
+                    raise StaleWindow("controller_derived_source_unverified")
+            verified.add(row_id)
+        return verified
+
+    async def _verified_duplicate_result_ids(
+        self, conn: Any, messages: list[Message], assistant_ids: set[int],
+    ) -> set[int]:
+        """Cover omitted result rows only when their first result and batch agree.
+
+        Differing historical result bodies remain in the raw transcript/History;
+        the model view pairs the first result only, as before. This proof never
+        treats the later results as successful replacements or executable calls.
+        """
+        from app.agents.controller_projection import project_history_message_for_controller
+        from app.db.dao import MessageDAO
+
+        verified: set[int] = set()
+        for message in messages:
+            source = source_of(message)
+            extra = source.get("covered_duplicate_result_ids")
+            if extra is None:
+                continue
+            first_id = source.get("message_id")
+            if (message.get("role") != "tool" or source.get("kind") != "execution"
+                    or not isinstance(first_id, int) or isinstance(first_id, bool) or first_id <= 0
+                    or source.get("id") != f"message:{first_id}"
+                    or not isinstance(extra, list) or not extra
+                    or any(not isinstance(item, int) or isinstance(item, bool) for item in extra)
+                    or extra != sorted(set(extra)) or extra[0] <= first_id):
+                raise StaleWindow("controller_duplicate_result_unverified")
+            cur = await conn.execute("SELECT * FROM messages WHERE chat_id=? AND id=?", (self.owner.chat_id, first_id))
+            raw = await cur.fetchone()
+            if raw is None:
+                raise StaleWindow("controller_duplicate_result_unverified")
+            first = MessageDAO._row(raw)
+            if (first.role != "tool" or first.task_uuid or first.agent_session_uuid
+                    or first.tool_call_id != message.get("tool_call_id")
+                    or source.get("turn_uuid") != first.turn_uuid
+                    or source.get("run_root_turn_uuid") != (first.run_root_turn_uuid or first.turn_uuid)):
+                raise StaleWindow("controller_duplicate_result_unverified")
+            projected = project_history_message_for_controller(first.to_message())
+            actual_payload = serialize_messages([message])[0]
+            actual_payload.pop(CONTEXT_META, None)
+            bundles = actual_payload.pop("openbear_reference_bundle", None)
+            if actual_payload != projected:
+                raise StaleWindow("controller_duplicate_result_unverified")
+            if bundles is not None:
+                cur = await conn.execute(
+                    """SELECT b.bundle_uuid FROM web_operation_messages l
+                       JOIN web_reference_bundles b ON b.conversation_uuid=l.conversation_uuid AND b.op_id=l.op_id
+                       WHERE l.message_id=? ORDER BY b.created_at,b.bundle_uuid""", (first_id,))
+                if bundles != [str(item[0]) for item in await cur.fetchall()]:
+                    raise StaleWindow("controller_duplicate_result_unverified")
+            cur = await conn.execute(
+                "SELECT id FROM messages WHERE chat_id=? AND role='assistant' AND id<? ORDER BY id DESC LIMIT 1",
+                (self.owner.chat_id, first_id))
+            parent_row = await cur.fetchone()
+            if parent_row is None or int(parent_row[0]) not in assistant_ids:
+                raise StaleWindow("controller_duplicate_result_unverified")
+            parent_id = int(parent_row[0])
+            cur = await conn.execute(
+                """SELECT MIN(id) FROM messages WHERE chat_id=? AND role='tool'
+                   AND tool_call_id=? AND id>? AND id<=?""",
+                (self.owner.chat_id, first.tool_call_id, parent_id, first_id))
+            if (await cur.fetchone())[0] != first_id:
+                raise StaleWindow("controller_duplicate_result_unverified")
+            for row_id in extra:
+                if row_id in verified:
+                    raise StaleWindow("controller_duplicate_result_unverified")
+                cur = await conn.execute("SELECT * FROM messages WHERE chat_id=? AND id=?", (self.owner.chat_id, row_id))
+                raw = await cur.fetchone()
+                if raw is None:
+                    raise StaleWindow("controller_duplicate_result_unverified")
+                row = MessageDAO._row(raw)
+                if (row.role != "tool" or row.task_uuid or row.agent_session_uuid
+                        or row.tool_call_id != first.tool_call_id):
+                    raise StaleWindow("controller_duplicate_result_unverified")
+                cur = await conn.execute(
+                    "SELECT id FROM messages WHERE chat_id=? AND role='assistant' AND id<? ORDER BY id DESC LIMIT 1",
+                    (self.owner.chat_id, row_id))
+                preceding = await cur.fetchone()
+                if preceding is None or int(preceding[0]) != parent_id:
+                    raise StaleWindow("controller_duplicate_result_unverified")
+                verified.add(row_id)
+        return verified
+
     async def controller_boundary(
         self, messages: list[Message], *, since: int | None, phase: str,
         expected_revision: int = 0, previous: ControllerBoundary | None = None,
@@ -217,7 +369,7 @@ class WindowStore:
         replaying persistence or tool side effects.
         """
         from app.db.dao import MessageDAO
-        from app.rath.controller_projection import project_history_message_for_controller
+        from app.agents.controller_projection import project_history_message_for_controller
 
         if self.owner.kind != "controller":
             raise ValueError("controller_boundary_requires_controller")
@@ -269,6 +421,11 @@ class WindowStore:
                 if since is None:
                     floor = max(floor, max((int(source_of(m).get("message_id") or 0) for m in messages
                                             if source_of(m).get("kind") == "summary"), default=0))
+            derived_ids = await self._verified_duplicate_source_ids(conn, messages)
+            result_ids = await self._verified_duplicate_result_ids(conn, messages, derived_ids)
+            if ids & (derived_ids | result_ids) or derived_ids & result_ids:
+                raise StaleWindow("controller_derived_source_unverified")
+            ids.update(derived_ids | result_ids)
             cur = await conn.execute("SELECT id FROM messages WHERE chat_id=? AND id>? ORDER BY id", (self.owner.chat_id, floor))
             missing = [int(row[0]) for row in await cur.fetchall() if int(row[0]) not in ids]
             # Only execution before an ALREADY adopted user can be historical.

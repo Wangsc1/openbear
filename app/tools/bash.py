@@ -412,8 +412,18 @@ async def _consume_proc(
             if foreground and progress_update and now - started >= _PROGRESS_AFTER_S and now - last_progress >= _PROGRESS_INTERVAL_S:
                 last_progress = now
                 await progress_update(_progress_line(command, buf, started, pid=proc.pid))
-        rc = await proc.wait()
-    except asyncio.CancelledError:
+        # EOF on stdout is not process exit (a command may close its pipes).
+        # Preserve the same command deadline while waiting for the actual exit.
+        try:
+            async with asyncio.timeout(max(0, deadline - time.monotonic()) if deadline else None):
+                rc = await proc.wait()
+        except TimeoutError:
+            timed_out = True
+            await _kill_and_wait(proc)
+            rc = proc.returncode if proc.returncode is not None else 124
+    except BaseException:
+        # Local output/progress failures also end ownership; do not unregister
+        # a live child merely because its presentation callback raised.
         if read_task and not read_task.done():
             read_task.cancel()
         await _kill_and_wait(proc)

@@ -97,6 +97,12 @@ class WebAdminConversationPromptMixin:
                     )
                     if cur.rowcount != 1:
                         return _prompt_response({"ok": False, "error": "prompt_preview_changed"}, status=409)
+                    # An explicit prompt refresh also updates an edited branch;
+                    # ordinary live template changes still cannot replace it.
+                    await conn.execute(
+                        "UPDATE context_editor_branches SET settings_json=json_set(settings_json,'$.system',?) WHERE conversation_uuid=?",
+                        (candidate, conv_uuid),
+                    )
                     # Opaque provider continuation can carry the old system. Do
                     # not touch transcript, summaries, files, or TaskMemory.
                     await conn.execute("DELETE FROM controller_model_contexts WHERE chat_id=?", (chat_id,))

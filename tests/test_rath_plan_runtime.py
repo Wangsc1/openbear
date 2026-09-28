@@ -6,12 +6,12 @@ import json
 from app.db.engine import DB
 from app.llm.base import AgentResult
 from app.llm.events import ToolCall
-from app.rath.builtin_workflows import ensure_builtin_workflows
-from app.rath.dao import RathDAO
-from app.rath.manager import RathTaskManager
-from app.rath.plan import AgentPlanCoordinator, register_agent_plan_tools
-from app.rath.schemas import RathAgentDef
-from app.rath.single_agent import SingleAgentWorkflowRunner
+from app.agents.profiles import ensure_builtin_workflows
+from app.agents.dao import AgentDAO
+from app.agents.control import AgentControlService
+from app.agents.plan import AgentPlanCoordinator, register_agent_plan_tools
+from app.agents.schemas import AgentDefinition
+from app.agents.execution import AgentExecutor
 from app.tools.base import ToolRegistry
 
 INITIAL_PLAN = {
@@ -167,7 +167,7 @@ async def _wait_phase(coordinator: AgentPlanCoordinator, task_uuid: str, phase: 
     raise AssertionError(f"Plan phase did not become {phase}")
 
 
-async def _wait_slots(manager: RathTaskManager, expected: int):
+async def _wait_slots(manager: AgentControlService, expected: int):
     for _ in range(300):
         if manager.execution_slots_in_use == expected:
             return
@@ -175,12 +175,19 @@ async def _wait_slots(manager: RathTaskManager, expected: int):
     raise AssertionError(f"execution slots did not become {expected}")
 
 
-async def test_runtime_enforces_plan_gate_and_rechecks_phase_before_each_tool(tmp_path):
+async def test_runtime_enforces_plan_gate_and_rechecks_phase_before_each_tool(tmp_path, monkeypatch):
+    from app.runtime.engine import ExecutionRuntime
+    entries = []
+    original_run = ExecutionRuntime.run
+    async def trace(self, host, **kwargs):
+        entries.append(type(host).__name__)
+        return await original_run(self, host, **kwargs)
+    monkeypatch.setattr(ExecutionRuntime, "run", trace)
     db = DB(str(tmp_path / "runtime-plan.db"))
     await db.connect()
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow_uuid = await ensure_builtin_workflows(dao)
-    manager = RathTaskManager(dao, max_concurrent_tasks=1)
+    manager = AgentControlService(dao, max_concurrent_tasks=1)
     coordinator = AgentPlanCoordinator(dao, manager)
     registry = ToolRegistry()
     read_calls: list[str] = []
@@ -204,7 +211,7 @@ async def test_runtime_enforces_plan_gate_and_rechecks_phase_before_each_tool(tm
         visibility={"agent"},
     )
     register_agent_plan_tools(registry, coordinator)
-    agent = RathAgentDef(
+    agent = AgentDefinition(
         agent_key="plan-worker",
         name="Plan worker",
         description="Exercise the Plan runtime",
@@ -226,7 +233,7 @@ async def test_runtime_enforces_plan_gate_and_rechecks_phase_before_each_tool(tm
         status="queued",
     )
     backend = PlanRuntimeBackend()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -314,6 +321,14 @@ async def test_runtime_enforces_plan_gate_and_rechecks_phase_before_each_tool(tm
         assert len(snapshot["evidence"]) == 1
         assert manager.execution_slots_in_use == 0
         assert len(backend.calls) == 8
+        assert entries == ["AgentHost"]
+        from app.runtime.store import RuntimeStore
+        cur = await db.conn.execute("SELECT run_id,status FROM runtime_runs WHERE task_uuid=?", (task_uuid,))
+        runtime_run = await cur.fetchone()
+        assert runtime_run["status"] == "completed"
+        actions = await RuntimeStore(db).actions(runtime_run["run_id"])
+        stale = next(a for a in actions if a["call_id"] == "stale-read")
+        assert stale["status"] == "not_started" and stale["outcome"]["effectState"] == "not_started"
     finally:
         if not task.done():
             task.cancel()
@@ -324,13 +339,13 @@ async def test_runtime_enforces_plan_gate_and_rechecks_phase_before_each_tool(tm
 async def test_runtime_refuses_final_answer_before_plan_submission(tmp_path):
     db = DB(str(tmp_path / "runtime-final-gate.db"))
     await db.connect()
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow_uuid = await ensure_builtin_workflows(dao)
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
     coordinator = AgentPlanCoordinator(dao, manager)
     registry = ToolRegistry()
     register_agent_plan_tools(registry, coordinator)
-    agent = RathAgentDef(
+    agent = AgentDefinition(
         agent_key="premature-worker",
         name="Premature worker",
         description="Attempts to finish without a Plan",
@@ -359,7 +374,7 @@ async def test_runtime_refuses_final_answer_before_plan_submission(tmp_path):
             return AgentResult(text="我已经完成，无需 Plan。")
 
     backend = PrematureBackend()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,

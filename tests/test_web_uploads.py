@@ -10,9 +10,9 @@ from types import SimpleNamespace
 import pytest
 from aiohttp import web
 
-from app.agent.runs import RunRegistry
+from app.runtime.scheduler import ControllerRuns
 from app.config import MediaConfig
-from app.media.attachments import build_llm_content, extract_text
+from app.media.attachments import InboundMedia, build_llm_content, build_llm_text_with_media, extract_text
 from app.settings.specs import SPECS
 from tests.test_web_admin import _login_cookie
 from tests.test_web_admin import web_env as _shared_web_env
@@ -67,7 +67,7 @@ async def test_large_http_upload_then_ws_reference_and_download(web_env, monkeyp
         pytest.fail("sending a completed upload must not re-copy/hash the file")
 
     monkeypatch.setattr(web_env.server, "_register_web_artifact_from_path", no_copy)
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     captured = []
     finished = asyncio.Event()
 
@@ -96,9 +96,13 @@ async def test_large_http_upload_then_ws_reference_and_download(web_env, monkeyp
     assert captured[0].kind == kind
     assert not captured[0].skipped
     assert captured[0].size == size
+    model_text = build_llm_text_with_media("read attachment", captured)
+    assert f"本机路径: {path}" in model_text
+    assert "read attachment" in model_text
     if kind == "image":
-        blocks = build_llm_content("read image", captured)
+        blocks = build_llm_content(model_text, captured)
         assert any(item.get("type") == "image" and item.get("path") == str(path) for item in blocks)
+        assert any(item.get("type") == "text" and f"本机路径: {path}" in item.get("text", "") for item in blocks)
     operations = await web_env.server._web_operations(row["conversation_uuid"])
     user = next(op for op in operations if op["opType"] == "user_message")
     attachment = user["payload"]["attachments"][0]
@@ -112,6 +116,27 @@ async def test_large_http_upload_then_ws_reference_and_download(web_env, monkeyp
     assert downloaded.hexdigest() == digest.hexdigest()
     assert (await web_env.client.delete(url)).status == 409
     assert path.exists(), "completed message attachments must not be deleted by upload cleanup"
+
+
+def test_model_attachment_summary_paths_are_real_and_do_not_replace_original_text_or_image():
+    media = [
+        InboundMedia(kind="file", upload_type="web_upload", file_name="notes.txt", path="/tmp/notes.txt", text_excerpt="excerpt"),
+        InboundMedia(kind="audio", upload_type="web_upload", file_name="voice.wav", path="/tmp/voice.wav", transcript="heard"),
+        InboundMedia(kind="file", upload_type="web_upload", file_name="data.zip", path="/tmp/data.zip"),
+        InboundMedia(kind="image", upload_type="web_upload", file_name="image.png", path="/tmp/image.png", mime_type="image/png"),
+        InboundMedia(kind="file", upload_type="web_upload", file_name="failed", path="/tmp/not-real", error="下载失败"),
+    ]
+    original = "Exact user protocol bytes: <request>请读附件</request>"
+    text = build_llm_text_with_media(original, media)
+    assert text.startswith(original + "\n\n[用户附件说明]")
+    assert all(f"本机路径: {item.path}" in text for item in media[:4])
+    assert "/tmp/not-real" not in text
+    assert "需要全文时可读取本机路径" in text and "不要猜测文件内容" in text
+    assert "[附件文本提取 1 · 开始]\nexcerpt" in text
+    assert "[音频转写 2 · 开始]\nheard" in text
+    blocks = build_llm_content(text, media)
+    assert blocks[0] == {"type": "text", "text": text}
+    assert blocks[1]["type"] == "image" and blocks[1]["path"] == "/tmp/image.png"
 
 
 async def test_upload_requires_auth_origin_and_conversation_ownership(web_env):
@@ -219,7 +244,7 @@ async def test_node_binary_upload_to_backend_and_ws(web_env, monkeypatch):
         pytest.skip("Node is required for the frontend HTTP integration")
     row = await web_env.server._create_web_conversation(123, title="Node HTTP upload")
     cookie = await _login_cookie(web_env)
-    web_env.server.runs = RunRegistry()
+    web_env.server.runs = ControllerRuns()
     captured = []
     received = asyncio.Event()
     close_started = asyncio.Event()

@@ -19,7 +19,7 @@ const pending = computed(() => props.retryActionPending?.waitId === retry.value.
 
 <template>
 	<div class="conversation-retry retry-inline-event" role="status" aria-live="polite">
-		<div class="retry-summary">
+		<div class="retry-summary" :class="{'has-actions': retry.active && retry.cancellable && retry.waitId}">
 			<RotateCw class="retry-icon" :stroke-width="1.75" aria-hidden="true"/>
 			<span class="retry-kind" :class="{'work-status-sweep': retry.active}">模型重试</span>
 			<span class="retry-attempt">{{ attempt }}</span>
@@ -39,7 +39,7 @@ const pending = computed(() => props.retryActionPending?.waitId === retry.value.
 <style scoped>
 .conversation-retry { min-width: 0; margin: 0; color: var(--work-muted); font-size: 14px; line-height: 1.65; }
 .retry-summary { display: grid; grid-template-columns: 16px auto auto minmax(0, 1fr) auto; align-items: center; gap: 8px; min-width: 0; min-height: 24px; }
-.retry-summary:has(.retry-actions) { grid-template-columns: 16px auto auto minmax(0, 1fr) auto auto; }
+.retry-summary.has-actions { grid-template-columns: 16px auto auto minmax(0, 1fr) auto auto; }
 .retry-icon { width: 16px; height: 16px; color: var(--work-faint); }
 .retry-kind { color: var(--work-faint); font-weight: 400; white-space: nowrap; }
 .retry-attempt { color: var(--work-faint); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -54,7 +54,7 @@ const pending = computed(() => props.retryActionPending?.waitId === retry.value.
 .retry-action:disabled { opacity: .55; cursor: wait; }
 @media (max-width: 760px) {
 	.retry-summary { min-height: 32px; }
-	.retry-summary:has(.retry-actions) { grid-template-columns: 16px auto auto minmax(0, 1fr) auto; }
+	.retry-summary.has-actions { grid-template-columns: 16px auto auto minmax(0, 1fr) auto; }
 	.retry-actions { grid-column: 2 / -1; }
 	.retry-action { min-height: 32px; }
 }

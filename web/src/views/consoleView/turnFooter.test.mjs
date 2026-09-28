@@ -6,8 +6,11 @@ import vm from "node:vm";
 import {compile, createSSRApp, h, ref} from "vue";
 import {renderToString} from "vue/server-renderer";
 import {parse} from "@vue/compiler-sfc";
+import {Clock, Timer, Top, Bottom, Coin} from "@element-plus/icons-vue";
+import {Undo2} from "@lucide/vue";
 import {projectOperationMessages, eventDisplayTimeMs, eventStartedAtMs, eventUpdatedAtMs} from "../../timelineProjection.js";
 import {conversationTimelineEntries, shouldRenderAssistantDivider} from "./conversationTimeline.js";
+import {replyMarkdownText} from "./replyMarkdownShare.js";
 import {visibilitySelectionClasses, selectVisibilityRow} from './messageVisibility.js';
 import {isInlineProcess} from './conversationWork.js';
 
@@ -29,29 +32,30 @@ const render = compile(descriptor.template.content);
 const setupNames = [...script.matchAll(/^(?:async )?function (\w+)\(/gm)].map(match => match[1]);
 const slot = {inheritAttrs: false, setup: (_, {slots}) => () => slots.default?.()};
 function turnList(turns, running = false, hiddenIds = []) {
-  const copies = [];
+  const copies = [], emitted = [];
   const props = {turns, running, conversationUuid: "test-conversation", detailKey: () => "detail", isDetailOpen: () => false, activeToolResultIndex: () => 0};
   const hidden = new Set(hiddenIds);
-  const visibility = {hiddenIds: ref(hidden), selecting: ref(false), selected: ref(new Set()), canTarget: () => true, isHidden: value => hidden.has(value?.operation?.opId || value?.opId || value?.eventKey || value?.id)};
-  const context = vm.createContext({ref, ...display, isInlineProcess, conversationTimelineEntries, shouldRenderAssistantDivider, visibilitySelectionClasses, selectVisibilityRow,
+  const visibility = {hiddenIds: ref(hidden), selecting: ref(false), selected: ref(new Set()), busy: ref(false), canTarget: () => true, isHidden: value => hidden.has(value?.operation?.opId || value?.opId || value?.eventKey || value?.id), assistantTargets: turn => (turn.events || []).filter(event => !hidden.has(event.id))};
+  const context = vm.createContext({ref, ...display, isInlineProcess, conversationTimelineEntries, shouldRenderAssistantDivider, replyMarkdownText, visibilitySelectionClasses, selectVisibilityRow,
     useMessageVisibility: () => visibility,
     projectedEventDisplayTimeMs: eventDisplayTimeMs, projectedEventStartedAtMs: eventStartedAtMs, projectedEventUpdatedAtMs: eventUpdatedAtMs,
-    defineProps: () => props, defineEmits: () => () => {}, referenceDisplayText: value => value,
+    defineProps: () => props, defineEmits: () => (...args) => emitted.push(args), referenceDisplayText: value => value,
     copyTextToClipboard: async text => copies.push(text), ElMessage: {success() {}, error() {}},
     window: {clearTimeout() {}, setTimeout() { return 1; }},
   });
   vm.runInContext(script, context);
-  const app = createSSRApp({render, setup: () => vm.runInContext(`({props, emit, visibility, visibilitySelectionClasses, selectVisibilityRow, copiedMessageKey, ${setupNames.join(", ")}})`, context)});
-  for (const name of ["el-tooltip", "el-icon", "el-image", "Check", "CopyDocument", "RefreshLeft", "Link"]) app.component(name, slot);
+  const app = createSSRApp({render, setup: () => vm.runInContext(`({props, emit, visibility, visibilitySelectionClasses, selectVisibilityRow, copiedMessageKey, fmtTokens, cachePct, ${setupNames.join(", ")}})`, context)});
+  for (const name of ["el-tooltip", "el-icon", "el-image", "Check", "CopyDocument", "Link", "Hide"]) app.component(name, slot);
+  for (const [name, icon] of Object.entries({Clock, Timer, Top, Bottom, Coin, Undo2})) app.component(name, icon);
   app.component("MessageVisibilityAction", {render: () => null});
+  app.component("ReplyMarkdownShare", {props: ['content'], setup: p => () => h('button', {'aria-label': '分享回复 Markdown', 'data-share-content': p.content})});
   // This suite isolates footer/copy contracts. Work grouping itself is mounted
   // with its real lifecycle in conversationWork.integration.test.mjs.
   app.component('ConversationWorkBlock', {props: ['entries'], setup: (p, {slots}) => () => p.entries.map((entry, conversationIndex) => slots.default({entry, conversationIndex}))});
   app.component('ConversationProcessEvent', {props: ['event'], setup: p => () => h('div', {'data-event-id': p.event.id}, p.event.message?.reasoning || '上下文压缩')});
-  app.directive('message-long-press', {getSSRProps: () => ({})});
   app.component("ConsoleMarkdown", {props: ["text"], setup: props => () => h("p", props.text)});
   app.component("TurnEvent", {props: ["event"], setup: props => () => h("div", {"data-event-id": props.event.id}, props.event.message?.content || "上下文压缩")});
-  return {props, copies, hidden, html: () => renderToString(app), run: code => vm.runInContext(code, context)};
+  return {props, copies, emitted, hidden, html: () => renderToString(app), run: code => vm.runInContext(code, context)};
 }
 const answer = (id = "answer", content = "已完成") => ({kind: "answer", id, message: {content, createdAt: 1789044000, live: false}});
 const savedStats = () => ({live: false, durationMs: 128664,
@@ -62,6 +66,23 @@ const compact = strategy => ({kind: "tool", id: `compress-${strategy}`, toolName
   payload: {scope: "root", strategy, summary: "摘要不属于复制正文", durationMs: 1000},
 }});
 function footer(html) { return html.match(/<div class="assistant-message-meta">[\s\S]*?<\/div>/)?.[0] || ""; }
+
+test('restart action renders a non-circular Undo2 icon while retaining its label and guarded delete-suffix event', async () => {
+  const turn = {id:'rewind', user:{turnUuid:'rewind', opId:'saved-user', content:'从这一轮重新开始', deleteTraceable:true}, events:[]};
+  const component = turnList([turn]);
+  const button = html => html.match(/<button[^>]*class="message-icon-action restart-action"[\s\S]*?<\/button>/)?.[0] || '';
+  let markup = button(await component.html());
+  assert.match(markup, /aria-label="从此处重来"/);
+  assert.match(markup, /<svg[^>]*fill="none"[^>]*stroke="currentColor"/);
+  assert.match(markup, /aria-hidden="true"/);assert.doesNotMatch(markup, /disabled/);
+  assert.match(descriptor.scriptSetup.content, /import \{Undo2\} from "@lucide\/vue"/);
+  component.run('deleteTurnSuffix(props.turns[0])');
+  assert.equal(component.emitted.length, 1);assert.equal(component.emitted[0][0], 'delete-suffix');assert.equal(component.emitted[0][1].user.turnUuid, 'rewind');
+  for (const state of [{running:true,deletingTurnUuid:''},{running:false,deletingTurnUuid:'rewind'}]) {
+    Object.assign(component.props,state);markup=button(await component.html());assert.match(markup,/disabled/);
+    component.run('deleteTurnSuffix(props.turns[0])');assert.equal(component.emitted.length,1);
+  }
+});
 
 // Stats and ordering mirror the values established in the user's referenced investigation.
 // Projection inputs below are deterministic fixtures, not a second production DB read.
@@ -92,6 +113,20 @@ for (const strategy of ["historical", "sliding_window", "model_summary"]) {
     assert.equal(turn.stats.durationMs, 128664);
   });
 }
+
+test("footer adds five decorative metric icons while retaining time, duration, token values and cache percentage", async () => {
+  const html = footer(await turnList([{id:'icons',events:[answer()],stats:savedStats()}]).html());
+  assert.equal((html.match(/class="footer-meta-icon"/g) || []).length, 5);
+  assert.equal((html.match(/aria-hidden="true"/g) || []).length, 5, 'decorative icons do not replace accessible metric names');
+  assert.match(html, /aria-label="输入 Tokens：1\.32M"/);
+  assert.match(html, /aria-label="输出 Tokens：2\.6K"/);
+  assert.match(html, /aria-label="缓存 Tokens：824\.4K，命中率 62\.4%"/);
+  const text = html.replace(/<[^>]*>/g, '');
+  assert.match(text, /\d{2}:\d{2}:\d{2}/);
+  assert.match(text, /2m 9s/);
+  assert.match(text, /↑1\.32M · ↓2\.6K · 缓存 824\.4K（62\.4%）/);
+  assert.match(html, /aria-label="复制消息"/);assert.match(html, /aria-label="隐藏回复"/);
+});
 
 test("multiple replies and trailing compression produce one footer and copy only answer content", async () => {
   const turn = {id: "many", events: [answer("a1", "进度"), compact("model_summary"), answer("a2", "最终结果"), compact("sliding_window")], stats: savedStats()};
@@ -126,6 +161,22 @@ test("stats remain visible without answer text while copy stays absent and empty
     assert.doesNotMatch(footer(html), /aria-label="复制消息"/);
   }
   assert.equal(footer(await turnList([{id: "empty", events: []}]).html()), "");
+});
+
+test("share control receives only visible answer Markdown, never reasoning or hidden answers", async () => {
+  const turn = {id: 'share', user: {opId: 'u', content: '用户私密提问'}, events: [
+    {...answer('a', '不公开'), message: {content: '不公开', reasoning: '私密思考'}},
+    {...answer('b', '  # 原文\n'), message: {content: '  # 原文\n', reasoning: '其它思考'}},
+    compact('sliding_window'),
+  ], stats: savedStats()};
+  const hidden = await turnList([turn], false, ['a']).html();
+  assert.match(hidden, /aria-label="分享回复 Markdown"/);
+  assert.match(hidden, /data-share-content="  # 原文\n"/);
+  assert.doesNotMatch(hidden, /data-share-content="[^"]*(?:不公开|私密思考|其它思考)/);
+  const allHidden = await turnList([turn], false, ['a', 'b']).html();
+  assert.doesNotMatch(allHidden, /aria-label="分享回复 Markdown"/);
+  const running = await turnList([turn], true).html();
+  assert.doesNotMatch(running, /aria-label="分享回复 Markdown"/);
 });
 
 test("ordinary and legacy answers retain the same footer and intermediate hover timestamps", async () => {

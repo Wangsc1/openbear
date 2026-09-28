@@ -14,6 +14,7 @@ const props = defineProps({
 	contextDisplay: {type: String, default: "—"},
 	tokensText: {type: String, default: "0"},
 	tokensDetail: {type: String, default: ""},
+	cachePercentText: {type: String, default: "—"},
 	durationMs: {type: Number, default: 0},
 	costText: {type: String, default: "$0.0000"},
 });
@@ -51,6 +52,10 @@ const durationParts = computed(() => headerDurationParts(props.durationMs));
 			<div class="header-metric" :title="props.tokensDetail">
 				<dt>总 Tokens</dt>
 				<dd><span class="header-number">{{ tokenValue }}<span class="header-unit">{{ tokenUnit }}</span></span></dd>
+			</div>
+			<div class="header-metric" title="会话累计读缓存 Tokens / 累计完整输入 Tokens（含读缓存与写缓存）">
+				<dt>缓存命中</dt>
+				<dd><span class="header-number">{{ props.cachePercentText }}</span></dd>
 			</div>
 			<div class="header-metric">
 				<dt>总耗时</dt>
@@ -166,8 +171,8 @@ const durationParts = computed(() => headerDurationParts(props.durationMs));
 		border-bottom-color: var(--ob-chat-line);
 	}
 
-	.header-mobile-navigation,
-	.header-mobile-actions { display: flex; flex: 0 0 44px; }
+	.header-mobile-navigation { display: flex; flex: 0 0 44px; }
+	.header-mobile-actions { display: flex; flex: 0 0 88px; }
 	.header-subtitle { display: block; font-size: 10px; line-height: 17px; }
 	.header-title { margin-top: 0; }
 	.header-mobile-running { display: inline-flex; flex: none; align-items: center; gap: 5px; height: 22px; padding: 0 7px; border: 1px solid rgb(var(--ob-success-rgb) / 0.18); border-radius: 7px; background: rgb(var(--ob-success-rgb) / 0.09); color: var(--ob-success); font-size: 11px; font-weight: 500; line-height: 1; white-space: nowrap; }

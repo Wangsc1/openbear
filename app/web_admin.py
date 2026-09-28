@@ -16,8 +16,9 @@ from app.control_actions import schedule_openbear_restart
 from app.db.engine import DB
 from app.interaction_telegram import InteractionTelegram
 from app.operation_locks import ChatOperationLocks
-from app.rath.dao import RathDAO
-from app.rath.manager import RathTaskManager
+from app.agents.dao import AgentDAO
+from app.agents.control import AgentControlService
+from app.runtime.scheduler import ControllerRuns, ExecutionScheduler
 from app.user_interactions import InteractionService
 from app.web_console.artifacts_api import WebAdminArtifactsMixin
 from app.web_console.auth_api import WebAdminAuthMixin
@@ -27,6 +28,7 @@ from app.web_console.chat_state import WebAdminChatStateMixin
 from app.web_console.config_api import WebAdminSettingsChannelsMixin
 from app.web_console.conversation_overview import WebAdminConversationOverviewMixin
 from app.web_console.conversation_prompt import WebAdminConversationPromptMixin
+from app.web_console.context_editor import WebAdminContextEditorMixin
 from app.web_console.conversation_tree import WebAdminConversationTreeMixin
 from app.web_console.conversations import WebAdminConversationsMixin
 from app.web_console.core import (
@@ -64,7 +66,7 @@ from app.web_console.live_stream import (
 from app.web_console.memory_api import WebAdminMemoryMixin
 from app.web_console.message_visibility import WebAdminMessageVisibilityMixin
 from app.web_console.operation_store import WebAdminOperationsMixin
-from app.web_console.rath_api import WebAdminRathMixin
+from app.web_console.agents_api import WebAdminAgentsMixin
 from app.web_console.realtime import WebAdminRealtimeMixin
 from app.web_console.reference_api import WebAdminReferenceMixin
 from app.web_console.routing import WebAdminAppMixin
@@ -74,10 +76,13 @@ from app.web_console.task_memory_api import WebAdminTaskMemoryMixin
 from app.web_console.update_api import WebAdminUpdateMixin
 from app.web_console.uploads import WebAdminUploadsMixin
 from app.web_task_telegram import WebTaskTelegramNotifier
+from app.web_push import BrowserPush
+from app.web_console.push_api import WebAdminPushMixin
 from app.web_telegram_replies import WebTelegramReplies
 
 
 class WebAdminServer(
+    WebAdminPushMixin,
     WebAdminAppMixin,
     WebAdminRealtimeMixin,
     WebAdminReferenceMixin,
@@ -87,9 +92,10 @@ class WebAdminServer(
     WebAdminConversationTreeMixin,
     WebAdminConversationOverviewMixin,
     WebAdminConversationPromptMixin,
+    WebAdminContextEditorMixin,
     WebAdminOperationsMixin,
     WebAdminMessageVisibilityMixin,
-    WebAdminRathMixin,
+    WebAdminAgentsMixin,
     WebAdminSystemMcpMixin,
     WebAdminStatisticsMixin,
     WebAdminUpdateMixin,
@@ -112,7 +118,7 @@ class WebAdminServer(
         runs: Any = None,
         llm_factory: Any = None,
         model_selection: Any = None,
-        rath: RathTaskManager | None = None,
+        agents: AgentControlService | None = None,
         tools: Any = None,
         messages: Any = None,
         config_store: Any = None,
@@ -126,11 +132,18 @@ class WebAdminServer(
         self.bot = bot
         self.operation_locks = operation_locks or ChatOperationLocks()
         self.control_actions = control_actions
-        self.runs = runs
+        # Both role facades must use the same scheduler even in standalone Web setup.
+        self.runtime = agents.scheduler if agents is not None else (
+            runs.scheduler if runs is not None else ExecutionScheduler())
+        if runs is not None and runs.scheduler is not self.runtime:
+            if runs.count():
+                raise RuntimeError("cannot rebind an active controller scheduler")
+            runs.scheduler = self.runtime
+        self.runs = runs if runs is not None else ControllerRuns(self.runtime)
         self.llm_factory = llm_factory
         self.model_selection = model_selection
-        self.rath = rath or RathTaskManager(RathDAO(db))
-        self.rath_dao = self.rath.dao
+        self.agents = agents or AgentControlService(AgentDAO(db), scheduler=self.runtime)
+        self.agent_dao = self.agents.dao
         self.mcp = None
         self.tools = tools
         self.messages = messages
@@ -157,7 +170,7 @@ class WebAdminServer(
         self._web_live_streams: dict[str, _WebLiveStream] = {}
         # Foreground turn startup spans several awaited steps: persist accepted,
         # persist the user operation, create the controller task, then register
-        # it in RunRegistry. Reconciliation must not classify that short window
+        # it in ControllerRuns. Reconciliation must not classify that short window
         # as a stale inactive run merely because process-local facts are not all
         # visible yet. Values are turn UUID sets so concurrent starters cannot
         # clear each other's guard.
@@ -178,6 +191,8 @@ class WebAdminServer(
         self._web_stopped_task_uuids: dict[str, set[str]] = {}
         self.interactions = InteractionService(db)
         self.interactions.add_listener(self._interaction_changed)
+        self.browser_push = BrowserPush(db)
+        self.interactions.add_listener(self.browser_push.on_interaction)
         # Compatibility aliases; all mutations go through the shared service.
         self._web_confirmations = self.interactions.pending
         self._web_confirm_by_conversation = self.interactions.by_conversation
@@ -270,7 +285,7 @@ class WebAdminServer(
         # run/status/reasoning operations durable across restart.
         if self._runner is not None:
             # cleanup() stops all sites and drains already-accepted HTTP/WS
-            # handlers. Do this before snapshotting RunRegistry so an in-flight
+            # handlers. Do this before snapshotting ControllerRuns so an in-flight
             # composer POST cannot register a new controller after cancellation.
             await self._runner.cleanup()
             self._runner = None

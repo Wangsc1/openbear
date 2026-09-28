@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
+import threading
 
 import pytest
 
@@ -380,6 +382,62 @@ async def test_reader_does_not_observe_uncommitted_single_writer_state(db):
     await asyncio.wait_for(holder, timeout=1)
     cur = await db.conn.execute("SELECT 1 FROM sessions WHERE chat_id=96")
     assert await cur.fetchone() is not None
+
+
+@pytest.mark.parametrize("repeat_cancel", [False, True])
+async def test_cancelled_reader_execute_releases_snapshot(db, monkeypatch, repeat_cancel):
+    await db.conn.execute("CREATE TABLE cancelled_read (status TEXT)")
+    await db.conn.execute("INSERT INTO cancelled_read VALUES ('stopping')")
+    await db.conn.commit()
+    reader = db._router()._reader
+    execute = reader._execute
+    sql = "SELECT status FROM cancelled_read"
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    cursors = []
+
+    async def hold_cursor_handoff(fn, *args, **kwargs):
+        if fn == reader._conn.execute and args[0] == sql and not cursors:
+            def held_execute():
+                cursor = fn(*args, **kwargs)
+                cursors.append(cursor)
+                loop.call_soon_threadsafe(entered.set)
+                if not release.wait(timeout=5):
+                    raise TimeoutError("test did not release cursor handoff")
+                return cursor
+
+            return await execute(held_execute)
+        return await execute(fn, *args, **kwargs)
+
+    monkeypatch.setattr(reader, "_execute", hold_cursor_handoff)
+    task = asyncio.create_task(db.conn.execute(sql))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        task.cancel()
+        # Let cancellation reach the router while SQLite still owns the cursor.
+        await asyncio.sleep(0)
+        if repeat_cancel:
+            task.cancel()
+            await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+
+        await db.conn.execute("UPDATE cancelled_read SET status='cancelled'")
+        await db.conn.commit()
+        with sqlite3.connect(db.path) as fresh:
+            assert fresh.execute(sql).fetchone()[0] == "cancelled"
+        async with await db.conn.execute(sql) as cursor:
+            assert (await cursor.fetchone())[0] == "cancelled"
+        # Retaining the original native cursor must not retain an old snapshot.
+        with pytest.raises(sqlite3.ProgrammingError, match="closed cursor"):
+            await reader._execute(cursors[0].fetchone)
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        for cursor in cursors:
+            await reader._execute(cursor.close)
 
 
 async def test_latest_controller_prompt_tokens_filters_child_and_old_compaction_epoch(db):

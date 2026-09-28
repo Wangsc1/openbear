@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,27 @@ SPEC = importlib.util.spec_from_file_location("pwa_release_validation", ROOT / "
 assert SPEC and SPEC.loader
 validator = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(validator)
+
+
+class FaviconLinks(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.paths = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "link" and "icon" in attrs.get("rel", "").split():
+            self.paths.append(attrs["href"].lstrip("/"))
+
+
+favicon_links = FaviconLinks()
+favicon_links.feed((ROOT / "web/index.html").read_text())
+CURRENT_FAVICONS = tuple(favicon_links.paths)
+UNREFERENCED_FAVICONS = tuple(
+    f"assets/brand/{path.name}"
+    for path in sorted((ROOT / "web/public/assets/brand").glob("favicon-*"))
+    if f"assets/brand/{path.name}" not in CURRENT_FAVICONS
+)
 
 
 @pytest.fixture
@@ -69,13 +91,20 @@ def test_new_pwa_tree_includes_real_icons_and_preserves_version_checks(release):
 
 @pytest.mark.parametrize("filename", [
     "manifest.webmanifest", "icons/openbear-192.png", "icons/openbear-512.png", "icons/apple-touch-icon.png", "assets/theme-tokens.css",
-    *[f"assets/brand/{path.name}" for path in sorted((ROOT / "web/public/assets/brand").glob("favicon-*"))],
+    *CURRENT_FAVICONS,
 ])
 def test_new_pwa_tree_rejects_missing_files_even_manifest_only_indirect_512(release, filename):
     dist = add_pwa(release)
     (dist / filename).unlink()
     with pytest.raises(validator.ReleaseValidationError):
         validator.validate_release_tree(release, "1.2.3")
+
+
+@pytest.mark.parametrize("filename", UNREFERENCED_FAVICONS)
+def test_unreferenced_legacy_favicon_is_not_required(release, filename):
+    dist = add_pwa(release)
+    (dist / filename).unlink()
+    assert validator.validate_release_tree(release, "1.2.3")["ok"]
 
 
 @pytest.mark.parametrize("link", ["manifest", "apple-touch-icon"])

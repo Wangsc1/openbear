@@ -52,6 +52,40 @@ test('wide fine-pointer desktop never receives viewport attributes/styles even t
   }
 });
 
+// Logical-screen references, not fixed browser viewport heights. Browser chrome
+// and the keyboard shrink the visible area below these dimensions on real phones.
+const phoneScreens = [
+  ['narrow stress case', 320, 568], ['narrow Android test size', 360, 800],
+  ['iPhone SE 3', 375, 667], ['iPhone 13 mini', 375, 812],
+  ['iPhone 13', 390, 844], ['iPhone 15', 393, 852],
+  ['iPhone 16 Pro', 402, 874], ['wide Android test size', 412, 915],
+  ['iPhone 14 Pro Max', 430, 932], ['iPhone 16 Pro Max', 440, 956],
+];
+for (const [label, width, height] of phoneScreens) {
+  test(`viewport sizing matrix: ${label} (${width}×${height}), toolbar / keyboard / landscape`, () => {
+    for (const visual of [true, false]) {
+      const h = environment({visual});
+      h.win.innerWidth = width; h.win.innerHeight = height - 96;
+      if (h.viewport) Object.assign(h.viewport, {width, height: height - 96});
+      const stop = installMobileViewport({window: h.win});
+      assert.equal(h.value('height'), `${height - 96}px`);
+      for (const next of [height, Math.max(180, height - 380), height - 96]) {
+        h.win.innerHeight = next;
+        if (h.viewport) {h.viewport.height = next; h.viewport.offsetTop = next < height - 96 ? 20 : 0; h.viewport.emit('resize');}
+        h.win.emit('resize'); h.flush();
+        assert.equal(h.value('height'), `${next}px`);
+        assert.equal(h.value('top'), `${visual && next < height - 96 ? 20 : 0}px`);
+      }
+      // A wide landscape touch device stays on the mobile viewport path.
+      h.win.innerWidth = height; h.win.innerHeight = width - 80;
+      if (h.viewport) Object.assign(h.viewport, {width: height, height: width - 80, offsetTop: 0});
+      h.win.emit('orientationchange'); h.flush();
+      assert.equal(h.value('height'), `${width - 80}px`);
+      stop(); assert.equal(h.attributes.size, 0); assert.equal(h.styles.size, 0);
+    }
+  });
+}
+
 test('phone keyboard resize, viewport offset/scroll, keyboard dismissal and rotation track one visual height', () => {
   const h = environment(), calls = [];
   const stop = installMobileViewport({ window: h.win, beforeChange: () => { calls.push('before'); return 'anchor'; }, afterChange: anchor => calls.push(anchor) });
@@ -98,18 +132,24 @@ test('pinch zoom and zoom pan remain native; layout resumes only when scale retu
 const settle = async () => { for (let i = 0; i < 8; i++) await nextTick(); };
 const source = fs.readFileSync(new URL('./views/consoleView/ConsoleView.vue', import.meta.url), 'utf8');
 const actualAnchors = source.slice(source.indexOf('function captureMobileViewportAnchor()'), source.indexOf('function updateActiveTurnFromScroll()'));
+const actualBottom = source.slice(source.indexOf('async function scrollBottom('), source.indexOf('function cancelScheduledUiWork('));
+const actualComposerHeight = source.slice(source.indexOf('function onComposerHeightChange('), source.indexOf('async function focusComposer('));
 function anchorHarness() {
-  const props = { conversationUuid: 'A' }, writes = [];
+  const props = { conversationUuid: 'A' }, writes = [], frames = new Map(), media = {matches:true};
+  let frameId = 0;
   let shift = 0, scrollTop = 300;
   const node = { dataset: { turnIndex: '2' }, getBoundingClientRect: () => ({ top: 80 + shift - (scrollTop - 300), bottom: 200 + shift - (scrollTop - 300) }) };
-  const scroller = { get scrollTop() { return scrollTop; }, set scrollTop(value) { scrollTop = value; writes.push(value); },
+  const scroller = { get scrollTop() { return scrollTop; }, set scrollTop(value) { scrollTop = Math.min(Math.max(0,value),this.scrollHeight-this.clientHeight); writes.push(scrollTop); },
     scrollHeight: 2400, clientHeight: 500, getBoundingClientRect: () => ({ top: 100, bottom: 600 }), querySelectorAll: () => [node], querySelector: () => node };
   const ctx = vm.createContext({ props, ref, nextTick, captureTranscriptContentAnchor, transcriptContentAnchorDelta,
-    scroller: ref(scroller), autoScrollLocked: ref(false),
+    scroller: ref(scroller), autoScrollLocked: ref(false), composerHeight:ref(135),
+    window:{matchMedia:()=>media,requestAnimationFrame:fn=>{frames.set(++frameId,fn);return frameId;}},
     runProgrammaticScroll: fn => fn(), updateScrollerOverflow() {}, scheduleActiveTurnFromScroll() {} });
-  vm.runInContext('let componentMounted = true, loadRequestGeneration = 1;\n' + actualAnchors, ctx);
+  vm.runInContext('let componentMounted = true, loadRequestGeneration = 1, scrollFrame = 0;\n' + actualAnchors + actualBottom + actualComposerHeight, ctx);
   const run = text => vm.runInContext(text, ctx);
-  return { ctx, run, writes, props, shift(value) { shift = value; } };
+  return { ctx, run, writes, props, media, frames,
+    async flush() {const jobs=[...frames.values()];frames.clear();await Promise.all(jobs.map(fn=>fn()));},
+    shift(value) { shift = value; } };
 }
 
 test('actual ConsoleView anchor survives mobile safe-area/keyboard change without a new scroll runtime or forced bottom', async () => {
@@ -126,9 +166,50 @@ test('actual ConsoleView anchor survives mobile safe-area/keyboard change withou
   h.root.style.setProperty = (...args) => { originalWrite(...args); if (args[0].endsWith('height')) a.shift(40); };
   h.viewport.height = 430; h.viewport.emit('resize'); h.flush(); await settle();
   assert.deepEqual(a.writes, [340]);
-  a.run('autoScrollLocked.value = true'); a.writes.length = 0;
-  h.standalone.emit('change'); h.flush(); await settle(); assert.deepEqual(a.writes, []);
+  a.writes.length = 0;
+  h.standalone.emit('change'); h.flush(); await settle(); assert.equal(a.ctx.autoScrollLocked.value,false);
   stop();
+});
+
+test('keyboard opening and dismissal keep the latest message fully above the raised composer', async () => {
+  const h=environment(),a=anchorHarness();
+  a.run('autoScrollLocked.value=true;scroller.value.scrollTop=1900');
+  const originalWrite=h.root.style.setProperty;
+  h.root.style.setProperty=(key,value,...rest)=>{
+    originalWrite(key,value,...rest);
+    if(key.endsWith('height'))a.ctx.scroller.value.clientHeight=parseFloat(value)-300;
+  };
+  const stop=installMobileViewport({window:h.win,
+    beforeChange:()=>a.run('captureMobileViewportAnchor()'),
+    afterChange:snapshot=>{a.ctx.snapshot=snapshot;void a.run('restoreMobileViewportAnchor(snapshot)');},
+  });
+  await settle();a.writes.length=0;
+  for(const height of [600,430,410,800]) {
+    h.viewport.height=height;h.viewport.emit('resize');h.flush();await settle();
+    const el=a.ctx.scroller.value;
+    assert.equal(el.scrollTop+el.clientHeight,el.scrollHeight,`viewport ${height}: newest footer is not below the visible bottom`);
+    assert.equal(a.ctx.autoScrollLocked.value,true);
+  }
+  assert.deepEqual(a.writes,[2100,2270,2290,1900]);stop();
+});
+
+test('late mobile composer resize follows once and stops following immediately on user unlock',async()=>{
+  const a=anchorHarness();a.run('autoScrollLocked.value=true;scroller.value.clientHeight=130;scroller.value.scrollTop=2270');a.writes.length=0;
+  a.run('scroller.value.clientHeight=100;onComposerHeightChange(165);onComposerHeightChange(165)');
+  assert.equal(a.frames.size,1);await a.flush();assert.deepEqual(a.writes,[2300]);
+  a.run('onComposerHeightChange(180);autoScrollLocked.value=false');await a.flush();assert.deepEqual(a.writes,[2300]);
+  a.run('onComposerHeightChange(190)');assert.equal(a.frames.size,0,'history readers do not get scheduled tail jumps');
+  a.run('autoScrollLocked.value=true');a.media.matches=false;a.run('onComposerHeightChange(200)');assert.equal(a.frames.size,0,'desktop behavior is unchanged');
+  a.media.matches=true;a.run('componentMounted=false;onComposerHeightChange(210)');assert.equal(a.frames.size,0);
+  a.run('onComposerHeightChange(NaN);onComposerHeightChange(0)');assert.equal(a.ctx.composerHeight.value,210);
+});
+
+test('pending keyboard tail restoration cannot cross navigation, a newer load, user unlock or unmount',async()=>{
+  for(const change of ["props.conversationUuid='B'",'loadRequestGeneration++','autoScrollLocked.value=false','componentMounted=false']) {
+    const a=anchorHarness();a.run('autoScrollLocked.value=true');a.ctx.snapshot=a.run('captureMobileViewportAnchor()');
+    const job=a.run('restoreMobileViewportAnchor(snapshot)');a.run(change);await job;
+    assert.deepEqual(a.writes,[],change);
+  }
 });
 
 test('actual mobile anchor restoration ignores navigation, superseding load, relock and destruction', async () => {

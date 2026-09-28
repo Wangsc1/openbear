@@ -8,11 +8,11 @@ from copy import deepcopy
 import pytest
 
 from app.db.engine import DB
-from app.rath.builtin_workflows import ensure_builtin_workflows
-from app.rath.dao import RathDAO
-from app.rath.manager import RathTaskManager
-from app.rath.plan import AgentPlanCoordinator, PlanError, normalize_plan, register_agent_plan_tools
-from app.rath.runner import RathWorkflowRunner
+from app.agents.profiles import ensure_builtin_workflows
+from app.agents.dao import AgentDAO
+from app.agents.control import AgentControlService
+from app.agents.plan import AgentPlanCoordinator, PlanError, normalize_plan, register_agent_plan_tools
+from app.agents.task_context import AgentTaskContext
 from app.tools.base import ToolRegistry, ToolRuntimeContext
 
 
@@ -20,9 +20,9 @@ from app.tools.base import ToolRegistry, ToolRuntimeContext
 async def env(tmp_path):
     db = DB(str(tmp_path / "plan.db"))
     await db.connect()
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow_uuid = await ensure_builtin_workflows(dao)
-    manager = RathTaskManager(dao, max_concurrent_tasks=1)
+    manager = AgentControlService(dao, max_concurrent_tasks=1)
     coordinator = AgentPlanCoordinator(dao, manager)
     task_uuid = await dao.create_task(
         chat_id=123,
@@ -35,10 +35,10 @@ async def env(tmp_path):
     try:
         yield db, dao, manager, coordinator, task_uuid, workflow_uuid
     finally:
-        for task in list(manager._runs.values()):
+        for task in manager.scheduler.tasks(kind="agent"):
             task.cancel()
-        if manager._runs:
-            await asyncio.gather(*manager._runs.values(), return_exceptions=True)
+        if manager.count():
+            await asyncio.gather(*manager.scheduler.tasks(kind="agent"), return_exceptions=True)
         await db.close()
 
 
@@ -99,12 +99,12 @@ def criterion_evidence(criterion_id: str, reference: str = "pytest: passed"):
     }]
 
 
-async def approve(coordinator, task_uuid: str, version: int, request_id: str = "approve-1"):
+async def approve(coordinator, task_uuid: str, version: int, request_id: str | None = None):
     return await coordinator.decide(
         task_uuid,
         expected_version=version,
         action="approve",
-        request_id=request_id,
+        request_id=request_id or f"approve-{version}",
         reason="Plan covers the requested scope",
     )
 
@@ -245,7 +245,7 @@ async def test_agent_control_response_is_explicit_and_durable(env):
             "criterionIds": ["c1"],
         },
     )
-    runner = RathWorkflowRunner(dao, task_uuid)
+    runner = AgentTaskContext(dao, task_uuid)
     await runner.checkpoint("before_model", agent_key="worker")
     assert runner.steers[0]["controlUuid"] == control_uuid
 
@@ -931,6 +931,46 @@ async def test_delete_task_records_removes_plan_owned_rows(env):
     ):
         cur = await _db.conn.execute(f"SELECT COUNT(*) FROM {table} WHERE task_uuid=?", (task_uuid,))
         assert (await cur.fetchone())[0] == 0
+
+
+@pytest.mark.parametrize("outcome", ["row", "missing", "cancelled_fetch"])
+async def test_get_task_closes_read_cursor(env, monkeypatch, outcome):
+    db, dao, _manager, _coordinator, task_uuid, _workflow_uuid = env
+    execute = db.conn.execute
+    cursors = []
+    fetching = asyncio.Event()
+    never = asyncio.Event()
+
+    async def capture_cursor(sql, parameters=None):
+        cursor = await execute(sql, parameters)
+        cursors.append(cursor)
+        if outcome == "cancelled_fetch":
+            async def blocked_fetchone():
+                fetching.set()
+                await never.wait()
+
+            monkeypatch.setattr(cursor, "fetchone", blocked_fetchone)
+        return cursor
+
+    monkeypatch.setattr(db.conn, "execute", capture_cursor)
+    task = asyncio.create_task(dao.get_task("missing-task" if outcome == "missing" else task_uuid))
+    try:
+        if outcome == "cancelled_fetch":
+            await asyncio.wait_for(fetching.wait(), timeout=2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            row = await task
+            assert (row is None) == (outcome == "missing")
+        assert len(cursors) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match="closed cursor"):
+            await cursors[0].fetchall()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for cursor in cursors:
+            await cursor.close()
 
 
 async def test_stop_cancels_plan_waiter_without_reacquiring_slot(env):

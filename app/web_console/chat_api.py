@@ -425,6 +425,118 @@ class WebAdminChatHandlersMixin:
             "beforeDisplaySeq": page.get("beforeDisplaySeq"),
         })
 
+    async def handle_api_conversation_search(self, request: web.Request) -> web.Response:
+        """Seek durable user/assistant text only, independent of the timeline page."""
+        row = await self._conversation_from_request(request)
+        conv_uuid = str(row["conversation_uuid"])
+        query = str(request.query.get("q") or "").strip()
+        if not query or len(query) > 200:
+            return web.json_response({"ok": False, "error": "invalid_search_query"}, status=400)
+        include_hidden = request.query.get("includeHidden", "false").lower() in {"1", "true"}
+        cursor = str(request.query.get("cursor") or "")
+        if len(cursor) > 2048:
+            return web.json_response({"ok": False, "error": "invalid_search_cursor"}, status=400)
+        if cursor:
+            try:
+                decoded = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+                if (not isinstance(decoded, list) or len(decoded) != 5
+                        or decoded[0] != query or decoded[1] is not include_hidden
+                        or any(type(value) is not int or value < 0 for value in decoded[2:])):
+                    raise ValueError("cursor does not match query")
+                watermark, before_seq, before_id = decoded[2:]
+            except (ValueError, TypeError, UnicodeError, base64.binascii.Error):
+                return web.json_response({"ok": False, "error": "invalid_search_cursor"}, status=400)
+        else:
+            cur = await self.db.conn.execute(
+                "SELECT COALESCE(MAX(id),0) AS max_id FROM web_operations WHERE conversation_uuid=?", (conv_uuid,),
+            )
+            watermark = int((await cur.fetchone())["max_id"])
+            before_seq = before_id = 0
+        # instr is a literal substring search: %, _, and backslashes cannot turn
+        # into LIKE wildcards. JSON text alone excludes reasoning, tools and files.
+        cur = await self.db.conn.execute(
+            """SELECT o.id, o.op_id, o.op_type, o.display_seq, o.created_at_ms,
+                      json_extract(o.payload_json,'$.text') AS body,
+                      CASE WHEN h.op_id IS NULL THEN 0 ELSE 1 END AS is_hidden
+               FROM web_operations o
+               LEFT JOIN web_hidden_operations h ON h.conversation_uuid=o.conversation_uuid AND h.op_id=o.op_id
+               WHERE o.conversation_uuid=? AND o.id<=?
+                 AND o.op_type IN ('user_message','assistant_message')
+                 AND COALESCE(o.internal,0)=0
+                 AND COALESCE(json_extract(o.payload_json,'$.internal'),0)=0
+                 AND COALESCE(json_extract(o.payload_json,'$.hidden'),0)=0
+                 AND COALESCE(json_extract(o.payload_json,'$.error'),0)=0
+                 AND json_type(o.payload_json,'$.text')='text'
+                 AND instr(lower(json_extract(o.payload_json,'$.text')),lower(?))>0
+                 AND (? OR h.op_id IS NULL)
+                 AND (?=0 OR o.display_seq<? OR (o.display_seq=? AND o.id<?))
+               ORDER BY o.display_seq DESC, o.id DESC LIMIT 21""",
+            (conv_uuid, watermark, query, int(include_hidden), before_id,
+             before_seq, before_seq, before_id),
+        )
+        found = await cur.fetchall()
+        items = []
+        for hit in found[:20]:
+            text = str(hit["body"] or "")
+            position = text.lower().find(query.lower())
+            position = max(0, position)
+            start = max(0, position - 65)
+            excerpt = text[start:position + len(query) + 95].replace("\n", " ")
+            items.append({
+                "opId": hit["op_id"], "type": hit["op_type"], "displaySeq": hit["display_seq"],
+                "createdAtMs": hit["created_at_ms"], "hidden": bool(hit["is_hidden"]),
+                "snippet": None if hit["is_hidden"] else (("…" if start else "") + excerpt + ("…" if start + len(excerpt) < len(text) else "")),
+            })
+        next_cursor = None
+        if len(found) > 20:
+            last = found[19]
+            value = [query, include_hidden, watermark, int(last["display_seq"]), int(last["id"])]
+            next_cursor = base64.urlsafe_b64encode(json.dumps(value, ensure_ascii=False).encode()).decode().rstrip("=")
+        return web.json_response({"ok": True, "conversationUuid": conv_uuid,
+                                  "items": items, "nextCursor": next_cursor})
+
+    async def handle_api_conversation_operation_window(self, request: web.Request) -> web.Response:
+        """Materialize a short, complete-turn window around one owned operation."""
+        row = await self._conversation_from_request(request)
+        conv_uuid = str(row["conversation_uuid"])
+        op_id = str(request.match_info.get("operation_id") or "")
+        if not op_id or len(op_id) > 512:
+            return web.json_response({"ok": False, "error": "invalid_operation_id"}, status=400)
+        cur = await self.db.conn.execute(
+            "SELECT display_seq FROM web_operations WHERE conversation_uuid=? AND op_id=? AND op_type IN ('user_message','assistant_message')",
+            (conv_uuid, op_id),
+        )
+        target = await cur.fetchone()
+        if target is None:
+            return web.json_response({"ok": False, "error": "operation_not_found"}, status=404)
+        seq = int(target["display_seq"])
+        # Seed 20 operations on either side, then close over their full turns.
+        # A single exceptionally long turn can exceed this seed by necessity.
+        seed = []
+        for ordering, comparison in (("DESC", "<="), ("ASC", ">")):
+            cur = await self.db.conn.execute(
+                f"""SELECT display_seq FROM web_operations WHERE conversation_uuid=?
+                    AND display_seq {comparison} ? ORDER BY display_seq {ordering}, id {ordering} LIMIT 20""",
+                (conv_uuid, seq),
+            )
+            seed.extend(int(item["display_seq"]) for item in await cur.fetchall())
+        lower, upper = min(seed), max(seed)
+        turn_key = "COALESCE(NULLIF(run_root_turn_uuid,''),NULLIF(turn_uuid,''),CASE WHEN target_type='run' THEN COALESCE(NULLIF(run_id,''),NULLIF(target_id,'')) END,'')"
+        cur = await self.db.conn.execute(
+            f"SELECT DISTINCT {turn_key} AS turn_key FROM web_operations WHERE conversation_uuid=? AND display_seq BETWEEN ? AND ?",
+            (conv_uuid, lower, upper),
+        )
+        keys = [str(item["turn_key"]) for item in await cur.fetchall() if item["turn_key"]]
+        extra = f" OR {turn_key} IN ({','.join('?' for _ in keys)})" if keys else ""
+        cur = await self.db.conn.execute(
+            f"""SELECT * FROM web_operations WHERE conversation_uuid=?
+                 AND (display_seq BETWEEN ? AND ? {extra}) ORDER BY display_seq,id""",
+            (conv_uuid, lower, upper, *keys),
+        )
+        operations = [operation_public(dict(item), include_tool_details=False) for item in await cur.fetchall()]
+        return web.json_response({"ok": True, "conversationUuid": conv_uuid, "operations": operations,
+                                  "nextBeforeDisplaySeq": min(op["displaySeq"] for op in operations)})
+
     async def handle_api_conversation_operation_detail(self, request: web.Request) -> web.Response:
         """Return one full tool snapshot after conversation ownership validation."""
         row = await self._conversation_from_request(request)
@@ -543,13 +655,13 @@ class WebAdminChatHandlersMixin:
                 self.control_actions.consume_soft_stop(internal_chat_id)
         stopped_tasks = 0
         stopped_task_uuids: set[str] = set()
-        if self.rath is not None:
+        if self.agents is not None:
             # Web 多会话用 internal_chat_id 隔离 Rath 任务；不会误停其他 live 会话。
             # 这里必须覆盖 detached Agent：它不拦截新消息，但仍属于当前会话生命周期。
             with contextlib.suppress(Exception):
-                stopped_task_uuids = {str(getattr(task, "task_uuid", "") or "") for task in await self.rath.all_controllable_tasks_for_chat(internal_chat_id)}
+                stopped_task_uuids = {str(getattr(task, "task_uuid", "") or "") for task in await self.agents.all_controllable_tasks_for_chat(internal_chat_id)}
                 stopped_task_uuids.discard("")
-            stopped_tasks = await self.rath.stop_all_for_chat(
+            stopped_tasks = await self.agents.stop_all_for_chat(
                 internal_chat_id,
                 requested_by=requested_by,
                 message=message,
@@ -630,6 +742,7 @@ class WebAdminChatHandlersMixin:
 
     async def handle_api_conversation_compact(self, request: web.Request) -> web.Response:
         from app.context.builder import build_controller_history
+        from app.context.editor import branch_settings
         from app.context.request_view import expanded_request_view
         from app.context.runtime import ContextManager
         from app.context.store import ContextOwner, WindowStore
@@ -703,12 +816,16 @@ class WebAdminChatHandlersMixin:
                 await publish("completed", detail)
             async def strategy() -> str:
                 return "model_summary"  # This already-started manual operation keeps its strategy.
+            edited_context = await branch_settings(self.db, conv_uuid)
             manager = ContextManager(store, WindowPolicy(self.llm_factory.context_window(label),
                 trigger_tokens=trigger, trigger_ratio=self.config.agent.compact_ratio,
                 retain_ratio=self.config.context_management.retain_ratio, max_output_tokens=max_tokens),
                 backend=backend, model=model, model_label=label, strategy_resolver=strategy, on_rotated=done,
+                frozen_system=bool(edited_context),
                 strategies={"model_summary": ModelSummaryStrategy(self.config, self.llm_factory, label, on_model_call=account)})
             async def refresh_runtime(request_messages: list[Message]) -> list[Message]:
+                if edited_context:
+                    return request_messages
                 epoch = reset_task_memory_runtime_epoch(request_messages)
                 return await reconcile_task_memory_runtime_state(
                     request_messages, TaskMemoryDAO(self.db), conversation_uuid=conv_uuid, epoch=epoch,
@@ -721,10 +838,10 @@ class WebAdminChatHandlersMixin:
                 manager.bind_sources(history)
                 expanded = await self._reference_store().overlay(history, conversation_uuid=conv_uuid)
                 request_view = expanded_request_view(expanded)
-                system = await messages.get_system_snapshot(chat_id) or await self._build_system_prompt_for_chat(conversation_uuid=conv_uuid)
+                system = edited_context['system'] if edited_context else (await messages.get_system_snapshot(chat_id) or await self._build_system_prompt_for_chat(conversation_uuid=conv_uuid))
                 cur = await self.db.conn.execute("SELECT COALESCE(MAX(id),0) AS n FROM messages WHERE chat_id=?", (chat_id,))
                 high_water = int((await cur.fetchone())["n"])
-                await manager.prepare(history, system=system, tools=self.tools.schemas(scope="main"),
+                await manager.prepare(history, system=system, tools=edited_context['tools'] if edited_context else self.tools.schemas(scope="main"),
                                       force=True, source="manual", expected_message_high_water=high_water,
                                       refresh_after_rotation=refresh_runtime, request_view=request_view,
                                       request_options=request_options)
@@ -759,7 +876,7 @@ class WebAdminChatHandlersMixin:
         scope = "main"
         if task_uuid:
             scope = "agent"
-            task = await self.rath_dao.get_task(task_uuid) if self.rath_dao is not None else None
+            task = await self.agent_dao.get_task(task_uuid) if self.agent_dao is not None else None
             if task is None or int(task.chat_id or 0) != internal_chat_id:
                 return web.json_response({"ok": False, "error": "retry_task_not_found"}, status=404)
             retry_state = task.output.get("retry") if isinstance(task.output, dict) else None
@@ -767,7 +884,7 @@ class WebAdminChatHandlersMixin:
                 if not wait_id and action == "cancel":
                     wait_id = str(retry_state.get("waitId") or "")
                 if retry_state.get("waitId") == wait_id:
-                    accepted = bool(self.rath is not None and self.rath.request_retry_action(task_uuid, wait_id, action))
+                    accepted = bool(self.agents is not None and self.agents.request_retry_action(task_uuid, wait_id, action))
         elif self.control_actions is not None:
             live = self._live_for(row)
             retry_state = getattr(live, "active_retry", {})
@@ -1228,7 +1345,7 @@ class WebAdminChatHandlersMixin:
                     transcript_deleted = await MessageDAO(self.db).delete_from_message_id(
                         internal_chat_id, first_message_id, restart_messages=restart_messages,
                     )
-                    rath_deleted = await self.rath_dao.delete_task_suffix_records(
+                    rath_deleted = await self.agent_dao.delete_task_suffix_records(
                         deleted_task_uuids, chat_id=internal_chat_id, deleted_roots=deleted_roots,
                     )
                     await conn.execute(
@@ -1348,9 +1465,9 @@ class WebAdminChatHandlersMixin:
                     status=409,
                 )
         stopped_tasks = 0
-        if self.rath is not None:
+        if self.agents is not None:
             try:
-                stopped_tasks = await self.rath.stop_all_for_chat(
+                stopped_tasks = await self.agents.stop_all_for_chat(
                     internal_chat_id,
                     requested_by="web",
                     message="会话已删除",
@@ -1393,7 +1510,7 @@ class WebAdminChatHandlersMixin:
             await self.db.conn.execute("DELETE FROM controller_model_contexts WHERE chat_id=?", (internal_chat_id,))
             await self.db.conn.execute("DELETE FROM web_controller_context_snapshots WHERE chat_id=?", (internal_chat_id,))
             await self.db.conn.execute("DELETE FROM web_memory_reminders WHERE chat_id=?", (internal_chat_id,))
-            rath_deleted = await self.rath_dao.delete_task_records_for_chat(internal_chat_id)
+            rath_deleted = await self.agent_dao.delete_task_records_for_chat(internal_chat_id)
             task_memory_deleted = await TaskMemoryDAO(self.db).hard_delete_conversation(
                 conv_uuid,
                 conn=self.db.conn,
@@ -1793,9 +1910,9 @@ class WebAdminChatHandlersMixin:
         visible_user_text = (text or "").strip() or ("请根据我发送的附件内容回答。" if media else "")
         attachments_public: list[dict[str, Any]] = []
         active_background_tasks = []
-        if self.rath_dao is not None:
+        if self.agent_dao is not None:
             with contextlib.suppress(Exception):
-                active_background_tasks = await self.rath_dao.active_tasks_for_chat(internal_chat_id, limit=100, controllable=True)
+                active_background_tasks = await self.agent_dao.active_tasks_for_chat(internal_chat_id, limit=100, controllable=True)
         active_background_tasks = [
             task_row for task_row in active_background_tasks
             if not conv_uuid or str(getattr(task_row, "parent_session_uuid", "") or "") == conv_uuid
@@ -1833,6 +1950,20 @@ class WebAdminChatHandlersMixin:
             # Composer interruptions always target the main controller.  The
             # model may then decide to call AgentMessage/AgentStop, but the Web
             # routing layer never interprets or forwards the user's text itself.
+            await live.publish({
+                "type": "queued",
+                **input_metadata,
+                "turnUuid": root_turn_uuid,
+                "rootTurnUuid": root_turn_uuid,
+                "messageUuid": user_message_uuid,
+                "text": visible_user_text,
+                "status": "已追加到当前轮",
+                "activeReasons": active_round.get("activeReasons") if isinstance(active_round.get("activeReasons"), list) else [],
+            })
+            from app.runtime.lifecycle import controller_session
+            session = controller_session(self.db, internal_chat_id)
+            if session:
+                await session.accept_control(user_message_uuid, source_ref=f"input:{user_message_uuid}")
             item = steering.enqueue(
                 internal_chat_id,
                 text,
@@ -1850,16 +1981,6 @@ class WebAdminChatHandlersMixin:
             wake_event = self._web_controller_wake_events.get(conv_uuid)
             if wake_event is not None:
                 wake_event.set()
-            await live.publish({
-                "type": "queued",
-                **input_metadata,
-                "turnUuid": root_turn_uuid,
-                "rootTurnUuid": root_turn_uuid,
-                "messageUuid": user_message_uuid,
-                "text": visible_user_text,
-                "status": "已追加到当前轮",
-                "activeReasons": active_round.get("activeReasons") if isinstance(active_round.get("activeReasons"), list) else [],
-            })
             pending_items = steering.pending_items(internal_chat_id)
             await live.publish({
                 "type": "pending_steering",
@@ -1886,7 +2007,7 @@ class WebAdminChatHandlersMixin:
                     "currentStatus": getattr(task_row, "current_status", "") or "",
                     "agentSessionUuid": getattr(task_row, "agent_session_uuid", "") or "",
                 }
-                coordinator = getattr(self.rath, "plan_coordinator", None) if self.rath is not None else None
+                coordinator = getattr(self.agents, "plan_coordinator", None) if self.agents is not None else None
                 if coordinator is not None and task_uuid:
                     with contextlib.suppress(Exception):
                         plan_snapshot = await coordinator.snapshot(task_uuid)
@@ -1987,7 +2108,9 @@ class WebAdminChatHandlersMixin:
             "path": str(request.rel_url),
         })
 
-        async def _send_json(payload: dict[str, Any]) -> None:
+        send_lock = asyncio.Lock()
+
+        async def _send_json_unlocked(payload: dict[str, Any]) -> None:
             nonlocal send_index
             if ws.closed:
                 return
@@ -2051,20 +2174,36 @@ class WebAdminChatHandlersMixin:
                 "payload": payload,
             })
 
+        async def _send_json(payload: dict[str, Any]) -> None:
+            async with send_lock:
+                await _send_json_unlocked(payload)
+
         async def _send_frame_once(frame: dict[str, Any]) -> bool:
             nonlocal last_sent_frame_seq
-            frame_seq = int(frame.get("frameSeq") or 0)
-            if frame_seq > 0 and frame_seq <= last_sent_frame_seq:
-                return False
-            await _send_json({"type": "frame", "frame": frame})
-            if frame_seq > 0:
-                last_sent_frame_seq = frame_seq
-            return True
+            async with send_lock:
+                frame_seq = int(frame.get("frameSeq") or 0)
+                if frame_seq > 0 and frame_seq <= last_sent_frame_seq:
+                    return False
+                await _send_json_unlocked({"type": "frame", "frame": frame})
+                if frame_seq > 0:
+                    last_sent_frame_seq = frame_seq
+                return True
 
         async def _writer() -> None:
             try:
                 while True:
-                    event = await sub.get()
+                    # The handshake only authenticates once. Recheck an idle
+                    # subscription as well as every outgoing frame so a revoked
+                    # cookie cannot continue reading the live conversation.
+                    try:
+                        event = await asyncio.wait_for(sub.get(), timeout=20)
+                    except TimeoutError:
+                        event = None
+                    if await self.session_from_request(request) is None:
+                        await ws.close(code=1008, message=b"session expired")
+                        return
+                    if event is None:
+                        continue
                     if event.get("_webLiveStreamControl") == "overflow":
                         _log_web_ws_audit({
                             "stage": "ws.queue_overflow",
@@ -2109,6 +2248,10 @@ class WebAdminChatHandlersMixin:
                 raise
             except Exception:
                 log.exception("WebSocket event writer failed", 会话=row.get("conversation_uuid"))
+                # An open receiver with a dead writer silently loses every later
+                # durable frame. Force cursor-based reconnect instead.
+                with contextlib.suppress(Exception):
+                    await ws.close(code=1011, message=b"event writer failed; reconnect")
 
         async def _send_incremental_bootstrap() -> None:
             nonlocal last_sent_frame_seq
@@ -2188,6 +2331,11 @@ class WebAdminChatHandlersMixin:
             writer = asyncio.create_task(_writer())
             async for msg in ws:
                 if msg.type == web.WSMsgType.TEXT:
+                    # A still-open socket is a command channel, not just a
+                    # subscriber. Revocation must precede send/stop/refresh.
+                    if await self.session_from_request(request) is None:
+                        await ws.close(code=1008, message=b"session expired")
+                        break
                     try:
                         data = json.loads(msg.data or "{}")
                     except Exception:
@@ -2200,8 +2348,14 @@ class WebAdminChatHandlersMixin:
                     if kind == "ping":
                         await _send_json({"type": "pong", "ts": now_ts()})
                     elif kind == "refresh":
-                        row = await self._conversation_row(session.chat_id, str(row["conversation_uuid"]), require=True)  # type: ignore[assignment]
-                        await _send_json({"type": "state", "state": await self._chat_payload(int(row["internal_chat_id"]), row), "conversations": await self._list_web_conversations(session.chat_id, limit=100)})
+                        # A refresh replaces the browser's operation snapshot.
+                        # Hold the WS send boundary across materialization and
+                        # transmission so a newer live frame cannot overtake it.
+                        async with send_lock:
+                            row = await self._conversation_row(session.chat_id, str(row["conversation_uuid"]), require=True)  # type: ignore[assignment]
+                            state = await self._chat_payload(int(row["internal_chat_id"]), row)
+                            conversations = await self._list_web_conversations(session.chat_id, limit=100)
+                            await _send_json_unlocked({"type": "state", "state": state, "conversations": conversations})
                     elif kind == "stop":
                         result = await self._stop_web_conversation(row, message="已停止")
                         if result.get("ok"):

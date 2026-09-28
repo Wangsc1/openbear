@@ -8,12 +8,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.agent.loop import Agent
-from app.agent.runs import RunRegistry
+from app.runtime.scheduler import ControllerRuns
 from app.db.dao import MessageDAO
 from app.llm.base import OpenBearLLMError
 from app.llm.events import StreamEvent
 from app.llm.retry import wait_for_retry
-from app.rath.single_agent import SingleAgentWorkflowRunner
+from app.agents.execution import AgentExecutor
 from app.tools.base import ToolRegistry
 from app.web_console.live_stream import _WebStreamRenderer
 from app.web_console.notification_delivery import notification_context_messages
@@ -48,7 +48,7 @@ async def setup_server(web_env, monkeypatch, kind, strategy, *, original=None, t
     server = web_env.server
     cfg = _cfg()
     server.config = cfg
-    server.runs = RunRegistry()
+    server.runs = ControllerRuns()
     backend = AlwaysError(kind)
     server.llm_factory = FakeRunFactory(backend, context_window=128000)
     server.model_selection = SimpleNamespace(current="openai/gpt")
@@ -58,7 +58,7 @@ async def setup_server(web_env, monkeypatch, kind, strategy, *, original=None, t
         return "sys"
 
     monkeypatch.setattr(server, "_build_system_prompt_for_chat", system_prompt)
-    monkeypatch.setattr("app.agent.loop.wait_for_retry", no_delay)
+    monkeypatch.setattr("app.runtime.model_call.wait_for_retry", no_delay)
     # Test owns the worker; real recover/claim/persist/run behavior is unchanged.
     monkeypatch.setattr(server, "_ensure_web_task_notification_worker", lambda *a, **kw: None)
     row = await server._create_web_conversation(123, title="persistent upstream failure", model="openai/gpt")
@@ -85,7 +85,7 @@ async def setup_server(web_env, monkeypatch, kind, strategy, *, original=None, t
             conversation_uuid=row["conversation_uuid"], turn_uuid=root, run_root_turn_uuid=root,
             op_ids=op_ids, **{key: message[key] for key in ("tool_calls", "tool_call_id", "name") if key in message},
         )
-    await server.rath_dao.create_task(
+    await server.agent_dao.create_task(
         chat_id=row["internal_chat_id"], parent_session_uuid=row["conversation_uuid"],
         workflow_uuid="notification-fixture", title="Background inspection", status="completed", task_uuid=task_uuid,
     )
@@ -213,7 +213,7 @@ async def test_agent_compression_does_not_reset_transient_retry_budget(env, monk
             yield StreamEvent(kind="finish")
 
     backend = MixedErrors("no_channels")
-    runner = SingleAgentWorkflowRunner(dao, task_uuid, agent=agent, backend=backend,
+    runner = AgentExecutor(dao, task_uuid, agent=agent, backend=backend,
         model="test", max_tokens=1024, tools=ToolRegistry(), context_window=128000)
     prepare = runner._prepare_context_window
 
@@ -221,7 +221,7 @@ async def test_agent_compression_does_not_reset_transient_retry_budget(env, monk
         return True if kwargs.get("force") else await prepare(*args, **kwargs)
 
     monkeypatch.setattr(runner, "_prepare_context_window", successful_overflow_recovery)
-    monkeypatch.setattr("app.rath.single_agent.wait_for_retry", no_delay)
+    monkeypatch.setattr("app.runtime.model_call.wait_for_retry", no_delay)
     with pytest.raises(OpenBearLLMError):
         await runner.run()
     assert backend.calls == 12  # first + ten retries + one separate overflow recovery, not 22
@@ -241,7 +241,7 @@ async def test_retry_wait_is_not_success_until_model_returns(monkeypatch):
         [StreamEvent(kind="error", error="service unavailable", status=503, retryable=True)],
         [StreamEvent(kind="content", text="recovered"), StreamEvent(kind="finish", finish_reason="stop")],
     ])
-    monkeypatch.setattr("app.agent.loop.wait_for_retry", no_delay)
+    monkeypatch.setattr("app.runtime.model_call.wait_for_retry", no_delay)
     renderer = Renderer()
     result = await Agent(backend, ToolRegistry()).run([{"role": "user", "content": "run"}], renderer, model="test")
     assert result.model_retry == 2

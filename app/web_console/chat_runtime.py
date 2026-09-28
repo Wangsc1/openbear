@@ -5,6 +5,7 @@ import inspect
 
 from app.agent.native_continuation import deserialize_messages, validate_model_context
 from app.context.configuration import conversation_strategy
+from app.context.editor import branch_settings, EditedToolRegistry
 from app.context.prompts import effective_context_prompt
 from app.context.resume import restore_controller_run_inputs
 from app.context.runtime import ContextManager
@@ -96,16 +97,21 @@ class WebAdminChatRunMixin:
             live_run_uuid = str(getattr(renderer.live, "current_run_uuid", "") or "") if renderer.live is not None else ""
             if live_run_uuid:
                 stats_identity["runUuid"] = live_run_uuid
+            edited_context = await branch_settings(self.db, conversation_uuid)
+            run_tools = EditedToolRegistry(self.tools, edited_context['tools']) if edited_context else self.tools
             prompt_builder = self._build_system_prompt_for_chat
             # Keep compatibility with focused tests/integrations that replace the
             # historical no-argument builder while production passes the owning
             # conversation explicitly for folder inheritance.
-            if "conversation_uuid" in inspect.signature(prompt_builder).parameters:
+            if edited_context:
+                system_live = edited_context['system']
+            elif "conversation_uuid" in inspect.signature(prompt_builder).parameters:
                 system_live = await prompt_builder(conversation_uuid=conversation_uuid)
             else:
                 system_live = await prompt_builder()
-            system = await messages.get_or_set_system_snapshot(chat_id, system_live)
-            system = effective_context_prompt(system, await conversation_strategy(self.db, conversation_uuid, self.config.context_management.default_strategy))
+            system = edited_context['system'] if edited_context else await messages.get_or_set_system_snapshot(chat_id, system_live)
+            if not edited_context:
+                system = effective_context_prompt(system, await conversation_strategy(self.db, conversation_uuid, self.config.context_management.default_strategy))
             # The live render is only a candidate; the frozen value below is the
             # actual system input for this run. Never log either prompt body.
             log.info(
@@ -256,6 +262,8 @@ class WebAdminChatRunMixin:
             task_memory_epoch = task_memory_runtime_epoch(history)
 
             async def _refresh_task_memory_request(request_messages: list[Message]) -> list[Message]:
+                if edited_context:
+                    return request_messages
                 return await reconcile_task_memory_runtime_state(
                     request_messages,
                     task_memory_dao,
@@ -267,6 +275,8 @@ class WebAdminChatRunMixin:
                 # The shared selector accounts for expanded material before deciding
                 # what can be evicted. A separate pre-selection size gate would
                 # incorrectly reject a request whose optional history can fit.
+                # Edited entries were materialized/unbound at branch creation;
+                # new attachments still resolve for the new user turn.
                 return await self._reference_store().overlay(request_messages, conversation_uuid=conversation_uuid)
 
             if task_notification and conversation_uuid:
@@ -315,7 +325,7 @@ class WebAdminChatRunMixin:
                 )
 
             agent = Agent(
-                backend, self.tools,
+                backend, run_tools,
                 max_run_wall_seconds=self.config.agent.max_run_wall_seconds,
                 no_progress_rounds=self.config.agent.no_progress_rounds,
                 tool_result_max_chars=max_tool_result_chars(
@@ -400,6 +410,8 @@ class WebAdminChatRunMixin:
 
             async def _refresh_window_request(request_messages: list[Message]) -> list[Message]:
                 nonlocal task_memory_epoch
+                if edited_context:
+                    return request_messages
                 # The manager supplies a replacement copy. Drop obsolete catalog
                 # snapshots only at this boundary, not from the live/cache prefix.
                 task_memory_epoch = reset_task_memory_runtime_epoch(
@@ -447,6 +459,7 @@ class WebAdminChatRunMixin:
                 on_rotated=_on_window_rotated, on_state=_compression_state,
                 active_run_root_turn_uuid=root_turn_uuid,
                 restored_controller_anchor=restored_controller_anchor,
+                frozen_system=bool(edited_context),
                 strategy_resolver=lambda: conversation_strategy(self.db, conversation_uuid, self.config.context_management.default_strategy),
                 strategies={"model_summary": ModelSummaryStrategy(self.config, self.llm_factory, model_label, on_model_call=_summary_model_call)},
             )
@@ -550,9 +563,9 @@ class WebAdminChatRunMixin:
             last_agent_review: dict[str, dict[str, Any]] = {}
 
             async def _scoped_agent_tasks(*, include_terminal: bool = True) -> list[Any]:
-                if self.rath_dao is None:
+                if self.agent_dao is None:
                     return []
-                tasks = await self.rath_dao.list_tasks(chat_id=chat_id, limit=200)
+                tasks = await self.agent_dao.list_tasks(chat_id=chat_id, limit=200)
                 tasks = [task for task in tasks if str(getattr(task, "parent_session_uuid", "") or "") == conversation_uuid]
                 tasks = await self._filter_tasks_for_root_turn(conversation_uuid, tasks, root_turn_uuid)
                 if include_terminal:
@@ -579,9 +592,9 @@ class WebAdminChatRunMixin:
                     self._merge_agent_task_stats(result, task, status=status, task_uuid=task_uuid)
                     previous = last_agent_review.get(task_uuid, {})
                     after_seq = int(previous.get("lastEventSeq") or 0)
-                    events = await self.rath_dao.events(task_uuid, after_seq=after_seq, limit=50)
+                    events = await self.agent_dao.events(task_uuid, after_seq=after_seq, limit=50)
                     if not events and after_seq <= 0:
-                        events = await self.rath_dao.events(task_uuid, limit=8)
+                        events = await self.agent_dao.events(task_uuid, limit=8)
                     last_event_seq = max([int(getattr(event, "seq", 0) or 0) for event in events] + [after_seq])
                     previous_status = str(previous.get("status") or "")
                     previous_current = str(previous.get("currentStatus") or "")
@@ -742,7 +755,7 @@ class WebAdminChatRunMixin:
                 }
 
             async def _agent_wait(wait_request: dict[str, Any]) -> str:
-                if not conversation_uuid or self.rath_dao is None:
+                if not conversation_uuid or self.agent_dao is None:
                     return json.dumps({"ok": False, "error": "agent_wait_not_supported"}, ensure_ascii=False)
                 mode = str(wait_request.get("mode") or "event_only")
                 review_after_s = float(wait_request.get("reviewAfterSeconds") or 0.0)

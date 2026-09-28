@@ -9,10 +9,10 @@ from app.context.store import ContextOwner, WindowStore
 from app.db.engine import DB
 from app.llm.base import AgentResult
 from app.llm.events import ToolCall, Usage
-from app.rath.builtin_workflows import ensure_builtin_workflows
-from app.rath.dao import RathDAO
-from app.rath.schemas import RathAgentDef
-from app.rath.single_agent import SingleAgentWorkflowRunner
+from app.agents.profiles import ensure_builtin_workflows
+from app.agents.dao import AgentDAO
+from app.agents.schemas import AgentDefinition
+from app.agents.execution import AgentExecutor
 from app.tools.agent_history import register_agent_history_tool
 from app.tools.base import ToolRegistry, ToolRuntimeContext
 
@@ -21,14 +21,14 @@ from app.tools.base import ToolRegistry, ToolRuntimeContext
 async def env(tmp_path):
     db = DB(str(tmp_path / "agent-window.db"))
     await db.connect()
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow = await ensure_builtin_workflows(dao)
     task_uuid = await dao.create_task(
         chat_id=123, workflow_uuid=workflow, title="Window acceptance",
         input_data={"instruction": "Write exactly six numbered lines. Do not deploy. Then recover the first result from your own history."},
         parent_session_uuid="test-parent",
     )
-    agent = RathAgentDef(
+    agent = AgentDefinition(
         workflow_uuid=workflow, agent_key="window-test", name="Window test", id=1,
         system_prompt="Execute the bounded test", tool_allowlist=["Write"],
         model="test/model", enabled=True,
@@ -81,7 +81,7 @@ async def test_actual_agent_finishes_once_across_windows_and_recovers_evicted_re
             return AgentResult(text="Six lines verified; original first result recovered. No deployment.", usage=usage)
 
     backend = Backend()
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao, task_uuid, agent=agent, backend=backend, model="test-model", max_tokens=1024,
         tools=registry, context_window=40_000, rollover_trigger_tokens=8000,
         window_retain_ratio=0.15, model_call_limit=20, tool_call_limit=20,

@@ -23,6 +23,7 @@ from app.context.window import (
 )
 from app.llm.base import Message
 from app.llm.events import Usage
+from app.runtime.model_call import PreparedRequest, execute_attempt
 from app.utils import estimate_tokens
 
 
@@ -131,30 +132,36 @@ class ModelSummaryStrategy:
                 text = prompt
                 if attempt and missing:
                     text = "Regenerate with all required headings, including: " + ", ".join(missing) + "\n\n" + text
-                t0 = time.monotonic()
                 calls += 1
+
+                async def settle(outcome):
+                    response = outcome.response
+                    usage.merge(response.usage)
+                    await self._account({
+                        "kind": "context_compaction", "status": outcome.status,
+                        "model": label, "protocol": str(getattr(backend, "protocol", "")),
+                        "usage": response.usage, "attemptId": outcome.attempt_id,
+                        "usageReported": outcome.usage_reported,
+                        "promptUsageReported": outcome.prompt_usage_reported,
+                        "totalTimeMs": outcome.total_time_ms,
+                        "outputTokens": response.usage.output_tokens,
+                        "serviceTier": response.service_tier, "providerCostUsd": response.provider_cost_usd,
+                        "errorType": outcome.error.reason if outcome.error else "",
+                    })
+
                 try:
                     async with asyncio.timeout(cfg.compact_timeout_s):
-                        response = await backend.complete(
-                            [{"role": "user", "content": text}], model=model,
-                            max_tokens=cfg.compact_max_tokens, read_timeout_s=cfg.compact_timeout_s,
-                        )
-                except Exception as exc:
-                    await self._account({
-                        "kind": "context_compaction", "status": "error", "model": label,
-                        "protocol": str(getattr(backend, "protocol", "")),
-                        "totalTimeMs": int((time.monotonic() - t0) * 1000), "errorType": type(exc).__name__,
-                        "serviceTier": getattr(exc, "service_tier", ""),
-                        "providerCostUsd": getattr(exc, "provider_cost_usd", None),
-                    })
+                        outcome = await execute_attempt(PreparedRequest(
+                            backend, [{"role": "user", "content": text}], {
+                                "model": model, "max_tokens": cfg.compact_max_tokens,
+                                "read_timeout_s": cfg.compact_timeout_s,
+                            }), settle=settle, mode="complete")
+                except TimeoutError:
+                    # The physical request already settled its known usage on cancel.
                     continue
-                usage.merge(response.usage)
-                await self._account({
-                    "kind": "context_compaction", "status": "ok", "model": label,
-                    "protocol": str(getattr(backend, "protocol", "")), "usage": response.usage,
-                    "totalTimeMs": int((time.monotonic() - t0) * 1000), "outputTokens": response.usage.output_tokens,
-                    "serviceTier": response.service_tier, "providerCostUsd": response.provider_cost_usd,
-                })
+                if outcome.status != "ok":
+                    continue
+                response = outcome.response
                 summary = str(response.text or "").strip()
                 missing = _summary_missing_sections(summary)
                 if not summary or missing:

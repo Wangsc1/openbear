@@ -21,7 +21,7 @@ from app.context.window import (
 )
 from app.db.dao import MessageDAO
 from app.llm.base import Message
-from app.rath.controller_projection import project_history_message_for_controller
+from app.agents.controller_projection import project_history_message_for_controller
 
 
 async def restore_controller_run_inputs(

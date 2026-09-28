@@ -59,12 +59,12 @@
     max-height: calc(var(--mobile-viewport-height, 100dvh) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
     padding: 0; display: flex; flex-direction: column; overflow: hidden; border-radius: 10px 10px 0 0;
   }
-  .admin-dialog .el-dialog__header { flex: none; height: 46px; margin: 0; padding: 12px 48px 10px 14px; border-bottom: 1px solid var(--el-border-color-lighter); }
+  .admin-dialog .el-dialog__header { flex: none; height: 46px; margin: 0; padding: 12px calc(44px + max(5px, env(safe-area-inset-right, 0px))) 10px max(14px, env(safe-area-inset-left, 0px)); border-bottom: 1px solid var(--el-border-color-lighter); }
   .admin-dialog .el-dialog__title, .admin-drawer .el-drawer__title { display: block; font-size: 15px; font-weight: 600; line-height: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .admin-dialog .el-dialog__headerbtn { top: 1px; right: 5px; width: 42px; height: 42px; }
-  .admin-dialog .el-dialog__body { flex: 1 1 0%; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; padding: 12px 14px; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .admin-dialog .el-dialog__headerbtn { top: 1px; right: max(5px, env(safe-area-inset-right, 0px)); width: 42px; height: 42px; }
+  .admin-dialog .el-dialog__body { flex: 1 1 0%; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; padding: 12px max(14px, env(safe-area-inset-right, 0px)) 12px max(14px, env(safe-area-inset-left, 0px)); -webkit-overflow-scrolling: touch; scrollbar-width: none; }
   .admin-dialog .el-dialog__body::-webkit-scrollbar, .admin-drawer .el-drawer__body::-webkit-scrollbar { display: none; }
-  .admin-dialog .el-dialog__footer { flex: none; display: flex; flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 14px; border-top: 1px solid var(--el-border-color-lighter); background: var(--ob-header); }
+  .admin-dialog .el-dialog__footer { flex: none; display: flex; flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px max(14px, env(safe-area-inset-right, 0px)) 8px max(14px, env(safe-area-inset-left, 0px)); border-top: 1px solid var(--el-border-color-lighter); background: var(--ob-header); }
   .admin-dialog .el-dialog__footer > span { flex: 1 1 0%; min-width: 0; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
   .admin-dialog .el-dialog__footer .el-button { flex: none; min-width: 58px; height: 32px; }
   .admin-dialog .el-dialog__footer .asset-footer-time { display: none; }
@@ -72,10 +72,10 @@
   .admin-dialog .asset-footer > div:first-child { display: none; }
   .admin-dialog .asset-footer > div:last-child { display: flex; flex-wrap: nowrap; gap: 8px; flex: none; }
   .admin-drawer.el-drawer { width: 100% !important; max-width: 100%; top: calc(var(--mobile-viewport-top, 0px) + env(safe-area-inset-top, 0px)); bottom: auto; height: calc(var(--mobile-viewport-height, 100dvh) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); }
-  .admin-drawer .el-drawer__header { flex: none; margin-bottom: 0; padding: 4px 14px; gap: 8px; min-height: 46px; border-bottom: 1px solid var(--el-border-color-lighter); }
+  .admin-drawer .el-drawer__header { flex: none; margin-bottom: 0; padding: 4px max(14px, env(safe-area-inset-right, 0px)) 4px max(14px, env(safe-area-inset-left, 0px)); gap: 8px; min-height: 46px; border-bottom: 1px solid var(--el-border-color-lighter); }
   .admin-drawer .el-drawer__close-btn { width: 36px; height: 36px; }
-  .admin-drawer .el-drawer__body { min-width: 0; min-height: 0; padding: 12px 14px; overflow-y: auto; overflow-wrap: anywhere; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
-  .admin-drawer .el-drawer__footer { flex: none; padding: 8px 14px; border-top: 1px solid var(--el-border-color-lighter); }
+  .admin-drawer .el-drawer__body { min-width: 0; min-height: 0; padding: 12px max(14px, env(safe-area-inset-right, 0px)) 12px max(14px, env(safe-area-inset-left, 0px)); overflow-y: auto; overflow-wrap: anywhere; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  .admin-drawer .el-drawer__footer { flex: none; padding: 8px max(14px, env(safe-area-inset-right, 0px)) 8px max(14px, env(safe-area-inset-left, 0px)); border-top: 1px solid var(--el-border-color-lighter); }
   .admin-dialog pre, .admin-drawer pre { max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
   .admin-dialog .el-input__inner, .admin-dialog .el-textarea__inner, .admin-dialog .el-select__wrapper, .admin-drawer .el-input__inner, .admin-drawer .el-select__wrapper { font-size: 13px; }
   .admin-dialog .el-select, .admin-drawer .el-select { max-width: 100%; min-width: 0; }

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.agent.runs import RunRegistry
+from app.runtime.scheduler import ControllerRuns
 from app.web_console import operation_store, realtime
 from tests.test_web_admin import _login_cookie, web_env
 
@@ -49,17 +49,17 @@ async def completed_exchange(env, row, clock, ms):
     await publish(env, row, clock, "done")
 
 
-async def test_recent_top_five_owner_folders_read_archive_delete_and_ties(web_env, clock):
+async def test_recent_top_fifteen_owner_folders_read_archive_delete_and_ties(web_env, clock):
     env = web_env
     cookie = await _login_cookie(env)
     first_folder = (await api(env, cookie, "POST", "/api/conversation-folders", json={"name": "Project"}))["folder"]["folderId"]
     leaf_folder = (await api(env, cookie, "POST", "/api/conversation-folders", json={"name": "Nested", "parentId": first_folder}))["folder"]["folderId"]
     rows = []
     times = {}
-    for index in range(6):
+    for index in range(16):
         row = await env.server._create_web_conversation(123, title=f"Recent {index}", conversation_uuid=f"recent-{index}", folder_uuid=leaf_folder if index % 2 else "")
         rows.append(row)
-        ms = BASE + min(index, 4) * 100  # The last two tie; UUID is the stable tie-break.
+        ms = BASE + min(index, 14) * 100  # The last two tie; UUID is the stable tie-break.
         await completed_exchange(env, row, clock, ms)
         times[row["conversation_uuid"]] = ms + 10
 
@@ -83,7 +83,7 @@ async def test_recent_top_five_owner_folders_read_archive_delete_and_ties(web_en
                 payload={"text": "PRIVATE HIDDEN BODY", "complete": True, "hidden": kind == "hidden"},
             )
 
-    expected = ["recent-4", "recent-5", "recent-3", "recent-2", "recent-1"]
+    expected = ["recent-14", "recent-15", *[f"recent-{index}" for index in range(13, 0, -1)]]
     state = await status(env, cookie)
     assert recent_ids(state) == expected
     bootstrap = await api(env, cookie, "GET", "/api/conversation-tree/bootstrap")
@@ -109,12 +109,12 @@ async def test_recent_top_five_owner_folders_read_archive_delete_and_ties(web_en
     assert read_state["folderConversationCounts"] == state["folderConversationCounts"]
     assert read_state["folderRunningCounts"] == state["folderRunningCounts"]
 
-    await api(env, cookie, "PATCH", "/api/conversations/recent-4", json={"archived": True})
-    assert recent_ids(await status(env, cookie)) == ["recent-5", "recent-3", "recent-2", "recent-1", "recent-0"]
-    await api(env, cookie, "PATCH", "/api/conversations/recent-4", json={"archived": False})
+    await api(env, cookie, "PATCH", "/api/conversations/recent-14", json={"archived": True})
+    assert recent_ids(await status(env, cookie)) == ["recent-15", *[f"recent-{index}" for index in range(13, -1, -1)]]
+    await api(env, cookie, "PATCH", "/api/conversations/recent-14", json={"archived": False})
     assert recent_ids(await status(env, cookie)) == expected
-    await api(env, cookie, "DELETE", "/api/conversations/recent-4")
-    assert recent_ids(await status(env, cookie)) == ["recent-5", "recent-3", "recent-2", "recent-1", "recent-0"]
+    await api(env, cookie, "DELETE", "/api/conversations/recent-14")
+    assert recent_ids(await status(env, cookie)) == ["recent-15", *[f"recent-{index}" for index in range(13, -1, -1)]]
 
 
 async def test_recent_ignores_metadata_tools_streaming_and_uses_user_and_reply_boundaries(web_env, clock):
@@ -136,7 +136,7 @@ async def test_recent_ignores_metadata_tools_streaming_and_uses_user_and_reply_b
     assert old_item["title"] == "Renamed" and old_item["path"] == "Moved"
 
     # A real registered execution owns streaming state while HTTP status reads.
-    env.server.runs = RunRegistry()
+    env.server.runs = ControllerRuns()
     gate = asyncio.Event()
     task = asyncio.create_task(gate.wait())
     env.server.runs.register(int(older["internal_chat_id"]), task)

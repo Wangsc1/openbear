@@ -10,7 +10,7 @@ from app.config import Config
 from app.db.engine import DB
 from app.llm.base import AgentResult
 from app.llm.events import Usage
-from app.rath.builtin_workflows import ensure_builtin_workflows
+from app.agents.profiles import ensure_builtin_workflows
 from app.tools.base import ToolRegistry
 from app.web_admin import WebAdminServer, _sha256
 
@@ -67,7 +67,7 @@ async def web_env(tmp_path):
         tools.add(name, name, {"type": "object"}, builtin)
     server = WebAdminServer(_cfg(), db, bot, tools=tools)  # type: ignore[arg-type]
     await server.ensure_secret_key()
-    await ensure_builtin_workflows(server.rath_dao)
+    await ensure_builtin_workflows(server.agent_dao)
     client = TestClient(TestServer(server.make_app()))
     await client.start_server()
     try:
@@ -88,16 +88,16 @@ async def test_agent_retry_action_targets_current_task_wait(web_env, action):
     row = await web_env.server._create_web_conversation(123, title="agent retry")
     chat_id = int(row["internal_chat_id"])
     conv_uuid = str(row["conversation_uuid"])
-    workflow = await web_env.server.rath_dao.workflow_by_slug("single-agent")
-    task_uuid = await web_env.server.rath_dao.create_task(
+    workflow = await web_env.server.agent_dao.workflow_by_slug("single-agent")
+    task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=chat_id, workflow_uuid=workflow.workflow_uuid, title="agent retry", status="running",
         parent_session_uuid=conv_uuid,
     )
-    await web_env.server.rath_dao.update_task(
+    await web_env.server.agent_dao.update_task(
         task_uuid, output={"retry": {"active": True, "waitId": "wait-1"}},
     )
     running = asyncio.create_task(asyncio.Event().wait())
-    web_env.server.rath.register(task_uuid, chat_id, running)
+    web_env.server.agents.register(task_uuid, chat_id, running)
     try:
         url = f"/api/conversations/{conv_uuid}/retry/{action}"
         stale = await web_env.client.post(url, json={"taskUuid": task_uuid, "waitId": "wait-old"}, cookies=web_env.cookie)
@@ -106,8 +106,8 @@ async def test_agent_retry_action_targets_current_task_wait(web_env, action):
         assert (await accepted.json())["accepted"] is True
         duplicate = await web_env.client.post(url, json={"taskUuid": task_uuid, "waitId": "wait-1"}, cookies=web_env.cookie)
         assert (await duplicate.json())["accepted"] is False
-        assert web_env.server.rath.consume_retry_action(task_uuid, "wait-old") == ""
-        assert web_env.server.rath.consume_retry_action(task_uuid, "wait-1") == ("retry" if action == "now" else "cancel")
+        assert web_env.server.agents.consume_retry_action(task_uuid, "wait-old") == ""
+        assert web_env.server.agents.consume_retry_action(task_uuid, "wait-1") == ("retry" if action == "now" else "cancel")
     finally:
         running.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -194,7 +194,7 @@ async def test_rath_web_agent_update_preserves_and_can_remove_unavailable_legacy
         ("legacy-search", "旧搜索预设", "before", "custom prompt", '["WebSearch","Read"]', 1, 1, 1),
     )
     await web_env.db.conn.commit()
-    row = await web_env.server.rath_dao.agent_by_key("legacy-search")
+    row = await web_env.server.agent_dao.agent_by_key("legacy-search")
     assert row is not None
 
     listed = await web_env.client.get("/api/rath/agents?disabled=1", cookies=web_env.cookie)
@@ -234,9 +234,9 @@ async def test_rath_web_agent_update_preserves_and_can_remove_unavailable_legacy
 async def test_rath_web_agent_trial_requires_controller_or_explicit_legacy_mode(web_env):
     web_env.server.llm_factory = FakeFactory()
     web_env.server.model_selection = SimpleNamespace(current="openai/gpt")
-    wf = await web_env.server.rath_dao.workflow_by_slug("single-agent")
+    wf = await web_env.server.agent_dao.workflow_by_slug("single-agent")
     assert wf is not None
-    agent_id = await web_env.server.rath_dao.create_agent(
+    agent_id = await web_env.server.agent_dao.create_agent(
         agent_key="trial-agent",
         name="试运行员",
         description="用于试运行",
@@ -254,7 +254,7 @@ async def test_rath_web_agent_trial_requires_controller_or_explicit_legacy_mode(
     assert resp.status == 409
     assert (await resp.json())["error"] == "controller_runtime_required"
 
-    web_env.server.config.rath.agent_plan_enabled = False
+    web_env.server.config.agents.agent_plan_enabled = False
     resp = await web_env.client.post(
         f"/api/rath/agents/{agent_id}/trial",
         json={"instruction": "介绍一下自己"},
@@ -263,19 +263,19 @@ async def test_rath_web_agent_trial_requires_controller_or_explicit_legacy_mode(
     assert resp.status == 200
     task_uuid = (await resp.json())["taskUuid"]
     for _ in range(50):
-        task = await web_env.server.rath_dao.get_task(task_uuid)
+        task = await web_env.server.agent_dao.get_task(task_uuid)
         if task and task.status == "completed":
             break
         await asyncio.sleep(0.02)
-    task = await web_env.server.rath_dao.get_task(task_uuid)
+    task = await web_env.server.agent_dao.get_task(task_uuid)
     assert task is not None
     assert task.status == "completed"
     assert task.model_call_count == 1
 
 async def test_rath_task_events_support_gap_safe_incremental_and_backward_pagination(web_env):
-    workflow = await web_env.server.rath_dao.workflow_by_slug("single-agent")
+    workflow = await web_env.server.agent_dao.workflow_by_slug("single-agent")
     assert workflow is not None
-    task_uuid = await web_env.server.rath_dao.create_task(
+    task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=123,
         workflow_uuid=workflow.workflow_uuid,
         title="event pagination",
@@ -284,7 +284,7 @@ async def test_rath_task_events_support_gap_safe_incremental_and_backward_pagina
     )
     event_seqs = []
     for index in range(1, 6):
-        event_seqs.append(await web_env.server.rath_dao.append_event(
+        event_seqs.append(await web_env.server.agent_dao.append_event(
             task_uuid,
             "tool_result" if index % 2 else "control_requested",
             summary=f"event-{index}",
@@ -331,9 +331,9 @@ async def test_rath_task_events_support_gap_safe_incremental_and_backward_pagina
 
 
 async def test_rath_task_event_totals_classify_monitor_events_consistently(web_env):
-    workflow = await web_env.server.rath_dao.workflow_by_slug("single-agent")
+    workflow = await web_env.server.agent_dao.workflow_by_slug("single-agent")
     assert workflow is not None
-    task_uuid = await web_env.server.rath_dao.create_task(
+    task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=123,
         workflow_uuid=workflow.workflow_uuid,
         title="event totals",
@@ -341,7 +341,7 @@ async def test_rath_task_event_totals_classify_monitor_events_consistently(web_e
         status="running",
     )
     for kind in ("plan_progress_started", "plan_approve", "model_context_compaction_finished", "tool_result"):
-        await web_env.server.rath_dao.append_event(task_uuid, kind, summary=kind)
+        await web_env.server.agent_dao.append_event(task_uuid, kind, summary=kind)
 
     response = await web_env.client.get(
         f"/api/conversations/conversation-event-totals/agents/{task_uuid}/events?limit=1",

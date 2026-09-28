@@ -1,6 +1,7 @@
+import mobileCompat from './postcss-mobile-compat.js';
+import tailwindcss from 'tailwindcss';
+import autoprefixer from 'autoprefixer';
+
 export default {
-  plugins: {
-    tailwindcss: {},
-    autoprefixer: {},
-  },
+  plugins: [mobileCompat(), tailwindcss(), autoprefixer()],
 };

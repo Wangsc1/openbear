@@ -9,7 +9,7 @@ import pytest
 
 from app.db.engine import DB
 from app.operation_locks import ChatOperationLocks
-from app.rath.agent_prompt import agent_system_prompt_params
+from app.agents.agent_prompt import agent_system_prompt_params
 from app.web_console.conversation_tree import WebAdminConversationTreeMixin
 from app.web_console.conversations import WebAdminConversationsMixin
 from app.web_console.core import _WEB_SESSION_KEY, WebSession
@@ -22,7 +22,7 @@ class _TreeHarness(WebAdminConversationTreeMixin, WebAdminConversationsMixin):
         self._web_starting_turns: dict[str, Any] = {}
         self._web_live_streams: dict[str, Any] = {}
         self.runs = None
-        self.rath = None
+        self.agents = None
         self.operation_locks = ChatOperationLocks()
         self._conversation_tree_lock = asyncio.Lock()
         self.rendered: list[tuple[str, tuple[str, str] | None]] = []

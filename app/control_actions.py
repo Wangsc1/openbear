@@ -231,9 +231,9 @@ class ControlActionQueue:
         async with svc.operation_locks.chat(chat_id, "new"):
             current_session_uuid = getattr(svc.messages, "current_session_uuid", None)
             session_uuid = await current_session_uuid(chat_id) if current_session_uuid is not None else ""
-            rath_dao = getattr(svc, "rath_dao", None)
-            if session_uuid and rath_dao is not None:
-                await rath_dao.close_agent_sessions_for_openbear_session(
+            agent_dao = getattr(svc, "agent_dao", None)
+            if session_uuid and agent_dao is not None:
+                await agent_dao.close_agent_sessions_for_openbear_session(
                     session_uuid,
                     reason="openbear_control_new_session",
                 )

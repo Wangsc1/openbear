@@ -6,7 +6,7 @@ import copy
 from types import SimpleNamespace
 
 from app.agent import steering
-from app.agent.runs import RunRegistry
+from app.runtime.scheduler import ControllerRuns
 from app.context.builder import build_controller_history
 from app.context.window import source_of
 from app.db.dao import MessageDAO
@@ -36,7 +36,7 @@ async def test_failed_run_restores_pending_steer_before_new_input_without_changi
     server.llm_factory = FakeRunFactory(backend, context_window=128000)
     server.model_selection = SimpleNamespace(current="openai/gpt")
     server.tools = ToolRegistry()
-    server.runs = RunRegistry()
+    server.runs = ControllerRuns()
 
     async def system():
         return "sys"

@@ -89,8 +89,10 @@ class SQLiteConnectionRouter:
         self._writer = writer
         self._writer_lock = asyncio.Lock()
         self._owner: asyncio.Task[Any] | None = None
+        self._owner_callback: Callable[[asyncio.Task[Any]], None] | None = None
         self._lock_retries = max(0, int(lock_retries))
         self._closed = False
+        self._transaction_depth = 0
         # Notifications only wake consumers; callbacks must not perform database
         # work or delay the owning transaction. No uncommitted data is broadcast.
         self.commit_listeners: set[Callable[[], None]] = set()
@@ -134,12 +136,16 @@ class SQLiteConnectionRouter:
                     )
                 )
 
+        self._owner_callback = _owner_done
         task.add_done_callback(_owner_done)
         return task, True
 
     def _release_writer(self, task: asyncio.Task[Any]) -> None:
         if self._owner is not task:
             return
+        if self._owner_callback is not None:
+            task.remove_done_callback(self._owner_callback)
+            self._owner_callback = None
         self._owner = None
         if self._writer_lock.locked():
             self._writer_lock.release()
@@ -148,13 +154,30 @@ class SQLiteConnectionRouter:
         if self._owner is not task:
             return
         try:
-            if self._writer.in_transaction:
-                await asyncio.shield(self._writer.rollback())
+            await self._drain_cleanup(self._writer.rollback())
             log.warning("已回滚未正常结束的 SQLite 写事务", 任务=task.get_name())
         except BaseException as exc:  # pragma: no cover - catastrophic connection failure
             log.error("SQLite 写事务自动回滚失败", 错误=f"{type(exc).__name__}: {exc}")
         finally:
             self._release_writer(task)
+
+    async def _drain_cleanup(self, operation: Awaitable[_T]) -> _T:
+        """Keep ownership until SQLite has processed cleanup, even on repeated stop.
+
+        Cancelling an aiosqlite await does not remove its queued SQL. A rollback
+        must be queued unconditionally behind it, not gated on in_transaction.
+        """
+        cleanup = asyncio.ensure_future(operation)
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        result = cleanup.result()
+        if cancelled:
+            raise asyncio.CancelledError()
+        return result
 
     async def _retry_locked(self, operation: Callable[[], Awaitable[_T]], *, label: str) -> _T:
         for attempt in range(self._lock_retries + 1):
@@ -173,16 +196,41 @@ class SQLiteConnectionRouter:
                 await asyncio.sleep(delay)
         raise AssertionError("unreachable")
 
+    async def _execute_read(self, sql: str, parameters: Any) -> aiosqlite.Cursor:
+        # SQLite keeps executing queued SQL after its caller is cancelled. Keep
+        # the result alive until we can close the otherwise unclaimed cursor;
+        # an unfinished SELECT would pin the shared reader to an old WAL snapshot.
+        pending = asyncio.ensure_future(self._reader.execute(sql, parameters))
+        try:
+            return await asyncio.shield(pending)
+        except asyncio.CancelledError:
+            async def close_unclaimed_cursor() -> None:
+                cursor = await pending
+                await cursor.close()
+
+            # Repeated cancellation must not abandon cursor cleanup either.
+            # A query failure during cancellation must not replace cancellation.
+            with contextlib.suppress(Exception):
+                await self._drain_cleanup(close_unclaimed_cursor())
+            raise
+
     async def execute(self, sql: str, parameters: Any = None) -> aiosqlite.Cursor:
         params = () if parameters is None else parameters
         task = asyncio.current_task()
         if task is not None and self._owner is task:
-            return await self._retry_locked(
-                lambda: self._writer.execute(sql, params),
-                label=_statement_token(sql) or "execute",
-            )
+            try:
+                return await self._retry_locked(
+                    lambda: self._writer.execute(sql, params),
+                    label=_statement_token(sql) or "execute",
+                )
+            except BaseException:
+                if not self._transaction_depth:
+                    with contextlib.suppress(BaseException):
+                        await self._drain_cleanup(self._writer.rollback())
+                    self._release_writer(task)
+                raise
         if _is_read_statement(sql):
-            return await self._reader.execute(sql, params)
+            return await self._execute_read(sql, params)
 
         owner, acquired = await self._acquire_writer()
         try:
@@ -199,18 +247,24 @@ class SQLiteConnectionRouter:
         except BaseException:
             if acquired or self._owner is owner:
                 with contextlib.suppress(BaseException):
-                    if self._writer.in_transaction:
-                        await asyncio.shield(self._writer.rollback())
+                    await self._drain_cleanup(self._writer.rollback())
                 self._release_writer(owner)
             raise
 
     async def executemany(self, sql: str, parameters: Any) -> aiosqlite.Cursor:
         task = asyncio.current_task()
         if task is not None and self._owner is task:
-            return await self._retry_locked(
-                lambda: self._writer.executemany(sql, parameters),
-                label=f"executemany:{_statement_token(sql) or 'SQL'}",
-            )
+            try:
+                return await self._retry_locked(
+                    lambda: self._writer.executemany(sql, parameters),
+                    label=f"executemany:{_statement_token(sql) or 'SQL'}",
+                )
+            except BaseException:
+                if not self._transaction_depth:
+                    with contextlib.suppress(BaseException):
+                        await self._drain_cleanup(self._writer.rollback())
+                    self._release_writer(task)
+                raise
         if _is_read_statement(sql):
             return await self._reader.executemany(sql, parameters)
         owner, _ = await self._acquire_writer()
@@ -225,8 +279,7 @@ class SQLiteConnectionRouter:
             return cursor
         except BaseException:
             with contextlib.suppress(BaseException):
-                if self._writer.in_transaction:
-                    await asyncio.shield(self._writer.rollback())
+                await self._drain_cleanup(self._writer.rollback())
             self._release_writer(owner)
             raise
 
@@ -243,23 +296,30 @@ class SQLiteConnectionRouter:
             return cursor
         except BaseException:
             with contextlib.suppress(BaseException):
-                if self._writer.in_transaction:
-                    await asyncio.shield(self._writer.rollback())
+                await self._drain_cleanup(self._writer.rollback())
             self._release_writer(owner)
             raise
 
     async def commit(self) -> None:
+        # DAO-level commits join an explicit transaction owned by this task.
+        # Only its outer context manager can commit/notify; other tasks still wait.
+        if self._owner is asyncio.current_task() and self._transaction_depth:
+            return
         owner, _ = await self._acquire_writer()
         try:
             await self._retry_locked(self._writer.commit, label="commit")
             self._notify_commit()
+        except BaseException:
+            with contextlib.suppress(BaseException):
+                await self._drain_cleanup(self._writer.rollback())
+            raise
         finally:
             self._release_writer(owner)
 
     async def rollback(self) -> None:
         owner, _ = await self._acquire_writer()
         try:
-            await asyncio.shield(self._writer.rollback())
+            await self._drain_cleanup(self._writer.rollback())
         finally:
             self._release_writer(owner)
 
@@ -286,7 +346,11 @@ class SQLiteConnectionRouter:
                     lambda: self._writer.execute("BEGIN IMMEDIATE"),
                     label=f"{label}:begin",
                 )
-            yield self._writer
+            self._transaction_depth += 1
+            try:
+                yield self._writer
+            finally:
+                self._transaction_depth -= 1
             if nested:
                 await self._writer.execute(f"RELEASE {savepoint}")
             else:
@@ -295,10 +359,10 @@ class SQLiteConnectionRouter:
         except BaseException:
             with contextlib.suppress(BaseException):
                 if nested:
-                    await asyncio.shield(self._writer.execute(f"ROLLBACK TO {savepoint}"))
-                    await asyncio.shield(self._writer.execute(f"RELEASE {savepoint}"))
+                    await self._drain_cleanup(self._writer.execute(f"ROLLBACK TO {savepoint}"))
+                    await self._drain_cleanup(self._writer.execute(f"RELEASE {savepoint}"))
                 else:
-                    await asyncio.shield(self._writer.rollback())
+                    await self._drain_cleanup(self._writer.rollback())
             raise
         finally:
             if acquired:

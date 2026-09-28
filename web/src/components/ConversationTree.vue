@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import {
-  Box, ArrowDown, ArrowRight, ChatLineRound, Check, Delete, DocumentCopy,
+  Aim, Box, ArrowDown, ArrowRight, ChatLineRound, Check, Delete, DocumentCopy,
   EditPen, Folder, FolderAdd, FolderOpened, InfoFilled, Loading, MagicStick, MoreFilled,
   Plus, Refresh, RefreshLeft, Search, Star, StarFilled,
 } from "@element-plus/icons-vue";
@@ -13,8 +13,8 @@ import ContextStrategySwitch from "./ContextStrategySwitch.vue";
 import "./conversationTreeProperties.css";
 import ConversationPromptDialog from "./ConversationPromptDialog.vue";
 import ConversationOverview from "./ConversationOverview.vue";
-import ConversationActivityFolder from "./ConversationActivityFolder.vue";
-import {activityReadRequests, activityLabel} from "../conversationActivity.js";
+import {activityReadRequests, activityLabel, activityState} from "../conversationActivity.js";
+import {useRecentConversationRows} from "./conversationRecentRows.js";
 import { treeItemId as rowId, treeItemParent, compareTreeItems, resolveTreeDrop } from "./conversationTreeInteractions.js";
 import { referenceCatalog, referenceItem, acceptActivityReadReceipt } from "../references/catalog.js";
 import { REFERENCE_MIME, referenceToken } from "../references/codec.js";
@@ -49,6 +49,37 @@ defineExpose({
 const activityItems = ref([]);
 const recentItems = ref([]);
 const activityReadBusy = ref(false);
+function savedSidebarView() {
+  try { return window.localStorage?.getItem('openbear:conversation-sidebar-view') === 'folders' ? 'folders' : 'recent'; }
+  catch { return 'recent'; }
+}
+const sidebarView = ref(savedSidebarView());
+const sidebarScroll = {recent: 0, folders: 0, search: 0};
+const locatingConversation = ref(false);
+const recentClock = ref(Date.now());
+let recentClockTimer;
+const {rows: recentConversationRows} = useRecentConversationRows({
+  get items() { return activityItems.value; },
+  get recentItems() { return recentItems.value; },
+  get activeConversationUuid() { return props.activeConversationUuid; },
+  get readVersions() { return referenceCatalog.activityReadVersions || new Map(); },
+});
+const recentUnreadCount = computed(() => recentConversationRows.value.filter(row => row.activityUnread).length);
+const recentWaitingCount = computed(() => recentConversationRows.value.filter(row => !isTitleGenerating(row) && (row.activityPending?.length || activityState({...row, readWhileSelected: false}) === 'waiting')).length);
+const recentRunningCount = computed(() => recentConversationRows.value.filter(row => !isTitleGenerating(row) && !row.activityPending?.length && activityState(row) === 'running').length);
+function recentLabel(row) {
+  const state = row.activityPending?.length ? 'waiting' : activityState({...row, readWhileSelected: false});
+  const label = activityLabel({...row, activityState: state, readWhileSelected: false});
+  if (state === 'waiting' || state === 'running') return label;
+  const settled = ['completed', 'idle', 'read'].includes(state);
+  if (row.activityUnread) return settled ? '完成待查看' : `${label}待查看`;
+  if (!settled) return label;
+  const at = Number(row.lastInteractionAtMs || row.activityAtMs || 0);
+  if (!at) return activityLabel(row);
+  const elapsed = Math.max(0, recentClock.value - at);
+  return elapsed < 60000 ? '刚刚' : elapsed < 3600000 ? `${Math.floor(elapsed / 60000)} 分钟前`
+    : elapsed < 86400000 ? `${Math.floor(elapsed / 3600000)} 小时前` : `${Math.floor(elapsed / 86400000)} 天前`;
+}
 const rootFolders = ref([]);
 const branchState = reactive({});
 const expanded = ref(new Set());
@@ -66,7 +97,7 @@ const searchHasMore = ref(false);
 const searchCursor = ref("");
 const searchArchived = ref(false);
 const archiveUnlocked = ref(false);
-const menu = ref({ open: false, x: 0, y: 0, row: null });
+const menu = ref({ open: false, x: 0, y: 0, row: null, recent: false });
 const drag = ref({ row: null, target: null, zone: "", busy: false });
 const moveInFlight = ref(false);
 const movingRowId = ref("");
@@ -109,6 +140,7 @@ let dragExpandTimer = null;
 let dragExpandTarget = "";
 const overview = ref({ open: false, row: null, anchor: null });
 let overviewOpenTimer = null, overviewCloseTimer = null;
+let menuAnchor = null;
 function closeOverview() {
   clearTimeout(overviewOpenTimer); clearTimeout(overviewCloseTimer);
   overview.value = { open: false, row: null, anchor: null };
@@ -163,7 +195,7 @@ function setTitleGenerating(conversationUuid, generating) {
   if (generating) next.add(uuid); else next.delete(uuid);
   titleGenerating.value = next;
 }
-function nodePath(row) { return String(row?.path || (row?.folderId ? "" : "临时会话")); }
+function nodePath(row) { return String(row?.path || (row?.folderId ? folderPath(row.folderId) || '所属目录' : '临时会话')); }
 function indentation(depth) { return `${Math.min(7, Math.max(0, Number(depth || 0))) * 14}px`; }
 function rowLoading(row) {
   if (!["folder", "conversation", "system"].includes(row.kind)) return false;
@@ -223,7 +255,50 @@ const visibleRows = computed(() => {
   }
   return output;
 });
-const displayRows = computed(() => query.value.trim() ? searchRows.value.map((row) => ({ ...row, depth: 0, search: true })) : visibleRows.value);
+const isDirectoryView = computed(() => sidebarView.value === 'folders' && !query.value.trim());
+const sidebarScrollKey = computed(() => query.value.trim() ? 'search' : sidebarView.value);
+const displayRows = computed(() => {
+  if (query.value.trim()) return searchRows.value.map(row => ({...row, depth: 0, search: true}));
+  if (sidebarView.value === 'folders') return visibleRows.value;
+  return recentConversationRows.value.map(row => ({...row, kind: 'conversation', recentAlias: true, depth: 0}));
+});
+const activeConversationRow = computed(() => displayRows.value.find(row => row.kind === 'conversation' && row.conversationUuid === props.activeConversationUuid) || null);
+async function switchSidebarView(view) {
+  if (!['recent', 'folders'].includes(view)) return;
+  closeOverview(); closeMenu(); clearDrag();
+  sidebarView.value = view;
+  try { window.localStorage?.setItem('openbear:conversation-sidebar-view', view); } catch { /* storage may be unavailable */ }
+  await nextTick();
+}
+async function sidebarTabKeydown(event) {
+  const views = ['recent', 'folders'];
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const view = event.key === 'Home' ? 'recent' : event.key === 'End' ? 'folders' : views[1 - views.indexOf(sidebarView.value)];
+  const tabList = event.currentTarget;
+  await switchSidebarView(view);
+  tabList.querySelector(`[data-sidebar-view="${view}"]`)?.focus();
+}
+async function showRecentActivity() {
+  query.value = '';
+  await switchSidebarView('recent');
+}
+async function revealInFolders(row = null) {
+  const uuid = String(row?.conversationUuid || props.activeConversationUuid || '');
+  if (!uuid || locatingConversation.value) return;
+  locatingConversation.value = true;
+  try {
+    query.value = '';
+    await switchSidebarView('folders');
+    if (props.draftConversation?.conversationUuid === uuid) await revealDraft(props.draftConversation.folderId || '');
+    else await refreshTree({preserve: true, conversationUuid: uuid, reveal: true, refreshLoaded: false});
+  } finally { locatingConversation.value = false; }
+}
+watch(sidebarScrollKey, (key, previous) => {
+  sidebarScroll[previous] = listRef.value?.scrollTop || 0;
+  closeOverview(); closeMenu(); clearDrag();
+  nextTick(() => { if (sidebarScrollKey.value === key && listRef.value) listRef.value.scrollTop = sidebarScroll[key] || 0; });
+});
 const selectedTargetLabel = computed(() => selectedFolderId.value ? folderPath(selectedFolderId.value) || "所选目录" : "临时会话");
 const filteredMoveFolders = computed(() => {
   const q = moveFolderQuery.value.trim().toLowerCase();
@@ -659,8 +734,8 @@ function applyStatus(data = {}) {
   };
   activityItems.value = (data.activityItems || data.items || []).map(adjust).filter(item => !item.archived && (item.running || item.activityUnread));
   // Recency is independent of completion/read state; server supplies the newest
-  // five actual interactions, including rows absent from the loaded tree pages.
-  recentItems.value = (data.recentItems || []).map(adjust).filter(item => !item.archived && !item.local).slice(0, 5);
+  // fifteen actual interactions, including rows absent from the loaded tree pages.
+  recentItems.value = (data.recentItems || []).map(adjust).filter(item => !item.archived && !item.local).slice(0, 15);
   latestStatusState = {
     raw: data,
     activityLookup: new Map(activityItems.value.map(item => [item.conversationUuid, item])),
@@ -731,6 +806,7 @@ function selectFolder(folderId, notify = true) {
 async function revealDraft(folderId = "") {
   const target = String(folderId || "");
   query.value = "";
+  await switchSidebarView('folders');
   try {
     if (target) {
       const data = await Api.locateConversationFolderInTree(target);
@@ -755,12 +831,19 @@ async function activateRow(row) {
     return;
   }
   if (row.kind !== "conversation") return;
+  if (row.recentAlias) {
+    const {recentAlias, depth, ...original} = row;
+    openActivityConversation(original);
+    return;
+  }
   if (!row.archived) selectFolder(String(row.folderId || ""));
   emit("open", row);
 }
 async function locateAndOpen(row) {
   closeOverview();
   if (row.kind === "folder") {
+    query.value = '';
+    await switchSidebarView('folders');
     const data = await Api.locateConversationFolderInTree(row.folderId);
     await ensurePaths([data.folderPath || []], data.folderItems || [row]);
     selectFolder(row.folderId);
@@ -816,10 +899,13 @@ async function openMenu(event, row) {
   closeOverview();
   if (!["folder", "conversation", "system", "root"].includes(row?.kind)) return;
   event?.preventDefault?.(); event?.stopPropagation?.();
+  const recent = Boolean(row.recentAlias);
+  if (row.recentAlias) { const {recentAlias, depth, ...original} = row; row = original; }
   const pad = 8;
   const pointerX = Math.max(pad, Number(event?.clientX || pad));
   const pointerY = Math.max(pad, Number(event?.clientY || pad));
-  menu.value = { open: true, row, x: pointerX, y: pointerY };
+  menuAnchor = event?.currentTarget || null;
+  menu.value = { open: true, row, recent, x: pointerX, y: pointerY };
   await nextTick();
   if (!menu.value.open || String(menu.value.row?.id || rowId(menu.value.row) || "") !== String(row.id || rowId(row) || "")) return;
   const element = document.querySelector("[data-conversation-tree-menu]");
@@ -841,16 +927,22 @@ function moreMenuKeydown(event) {
 }
 function openMoreMenu(event, row) {
   if (event?.type === "contextmenu") return openMenu(event, row);
+  if (menu.value.open && menuAnchor === event.currentTarget && menu.value.row?.kind === row.kind && rowId(menu.value.row) === rowId(row)) {
+    event.preventDefault(); event.stopPropagation();
+    closeMenu();
+    return;
+  }
   const rect = event.currentTarget.getBoundingClientRect();
   return openMenu({
     preventDefault: () => event.preventDefault(),
     stopPropagation: () => event.stopPropagation(),
     clientX: rect.right - 8,
     clientY: rect.bottom + 4,
+    currentTarget: event.currentTarget,
   }, row);
 }
 function openRootMenu(event) { return openMenu(event, rootDropTarget); }
-function closeMenu() { menu.value = { open: false, x: 0, y: 0, row: null }; }
+function closeMenu() { menu.value = { open: false, x: 0, y: 0, row: null, recent: false }; menuAnchor = null; }
 async function promptFolder(parentId = "") {
   try {
     const { value } = await ElMessageBox.prompt("目录可继续包含任意深度的子目录和会话。", "新建目录", { inputPlaceholder: "目录名称", inputValidator: (v) => String(v || "").trim() ? true : "名称不能为空", confirmButtonText: "创建", cancelButtonText: "取消" });
@@ -1379,9 +1471,15 @@ async function refreshAffected(row) {
 }
 
 async function runMenuAction(action) {
-  const row = menu.value.row; closeMenu(); if (!row) return;
+  const { row, recent } = menu.value; closeMenu(); if (!row) return;
   try {
-    if (action === "new-conversation") {
+    if (action === "locate") await revealInFolders(row);
+    else if (action === "new-sibling" && row.kind === "conversation") {
+      const folderId = String(row.folderId || "");
+      selectFolder(folderId);
+      emit("new-conversation", folderId, { revealInFolders: !recent });
+    }
+    else if (action === "new-conversation") {
       const folderId = row.kind === "folder" ? String(row.folderId || "") : "";
       selectFolder(folderId);
       emit("new-conversation", folderId);
@@ -1405,7 +1503,7 @@ async function runMenuAction(action) {
 
 function dragStart(event, row) {
   closeOverview();
-  if (moveInFlight.value || !["folder", "conversation"].includes(row.kind) || row.local || (row.kind === 'folder' && (query.value || row.archived))) { event.preventDefault(); return; }
+  if (moveInFlight.value || row.recentAlias || !["folder", "conversation"].includes(row.kind) || row.local || (row.kind === 'folder' && (query.value || row.archived))) { event.preventDefault(); return; }
   closeMenu();
   const canMove = !query.value && !row.archived;
   drag.value = { row: canMove ? row : null, target: null, zone: "", busy: false };
@@ -1421,6 +1519,7 @@ function dragStart(event, row) {
   }
 }
 function dropIntent(event, target) {
+  if (!isDirectoryView.value) return null;
   const rect = event.currentTarget.getBoundingClientRect();
   const ratio = (event.clientY - rect.top) / Math.max(1, rect.height);
   return resolveTreeDrop(drag.value.row, target, ratio, everyKnownNode());
@@ -1478,7 +1577,7 @@ function clearDrag() {
   drag.value = { row: null, target: null, zone: "", busy: false };
 }
 function rowKeydown(event, row) {
-  if (event.key === "Enter") { event.preventDefault(); void activateRow(row); }
+  if (event.key === "Enter") { event.preventDefault(); void (row.search ? locateAndOpen(row) : activateRow(row)); }
   else if (event.key === "ArrowRight" && ["folder", "system"].includes(row.kind) && !isExpanded(row.kind === "system" ? row.id : row.folderId)) { event.preventDefault(); void toggleRow(row); }
   else if (event.key === "ArrowLeft" && ["folder", "system"].includes(row.kind) && isExpanded(row.kind === "system" ? row.id : row.folderId)) { event.preventDefault(); void toggleRow(row); }
   else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openMenu({ preventDefault(){}, stopPropagation(){}, clientX: rect.right - 8, clientY: rect.top + 8 }, row); }
@@ -1495,12 +1594,14 @@ watch(() => referenceCatalog.treeStatus, data => { if (data) { statusRequestGene
 watch(() => referenceCatalog.activityReadVersions, () => { if (latestStatusState) applyStatus(latestStatusState.raw); });
 watch(() => [referenceCatalog.connected, referenceCatalog.ready], scheduleStatus);
 onMounted(async () => {
+  recentClockTimer = window.setInterval(() => { recentClock.value = Date.now(); }, 60000);
   window.addEventListener("keydown", globalKeydown);
   window.addEventListener("blur", closeOverview);
   await refreshTree({ preserve: false });
   scheduleStatus();
 });
 onBeforeUnmount(() => {
+  window.clearInterval(recentClockTimer);
   closeOverview();
   window.removeEventListener("blur", closeOverview);
   window.removeEventListener("keydown", globalKeydown);
@@ -1512,22 +1613,35 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="conversation-tree" aria-label="会话目录树" @contextmenu.self="openRootMenu">
+  <section class="conversation-tree" aria-label="会话导航" @contextmenu.self="openRootMenu">
     <header class="tree-toolbar">
       <div class="tree-title"><el-icon><ChatLineRound /></el-icon><strong>会话</strong><span>{{ activeCount }}</span></div>
       <div class="tree-tools">
         <el-dropdown trigger="click" placement="bottom-end">
-          <button class="tree-tool primary" type="button" :title="`新建到：${selectedTargetLabel}`"><el-icon><Plus /></el-icon></button>
+          <button class="tree-tool primary" type="button" title="新建会话或目录" aria-label="新建会话或目录"><el-icon><Plus /></el-icon></button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item @click="emit('new-conversation', selectedFolderId)"><el-icon><ChatLineRound /></el-icon>新建会话 · {{ selectedTargetLabel }}</el-dropdown-item>
-              <el-dropdown-item @click="promptFolder(selectedFolderId)"><el-icon><FolderAdd /></el-icon>新建目录 · {{ selectedTargetLabel }}</el-dropdown-item>
+              <el-dropdown-item v-if="selectedFolderId" @click="emit('new-conversation', selectedFolderId)"><el-icon><ChatLineRound /></el-icon>新建会话 · {{ selectedTargetLabel }}</el-dropdown-item>
+              <el-dropdown-item @click="promptFolder(selectedFolderId)"><el-icon><FolderAdd /></el-icon>{{ selectedFolderId ? `新建目录 · ${selectedTargetLabel}` : '新建根级目录' }}</el-dropdown-item>
+              <el-dropdown-item divided @click="emit('new-conversation', '')"><el-icon><ChatLineRound /></el-icon>新建临时会话</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
         <button class="tree-tool" type="button" title="刷新目录树" :disabled="loading" @click="refreshTree({ preserve: true })"><el-icon :class="loading && 'is-spinning'"><Refresh /></el-icon></button>
       </div>
     </header>
+    <div class="sidebar-activity">
+      <button class="sidebar-activity-summary" type="button" aria-label="查看最近会话动态" @click="showRecentActivity">
+        <span class="recent-waiting-count" :class="{'is-empty': !recentWaitingCount}">待处理 {{ recentWaitingCount }}</span>
+        <span class="sidebar-unread-count" :class="{'is-empty': !recentUnreadCount}">未读 {{ recentUnreadCount }}</span>
+        <span :class="{'is-empty': !recentRunningCount}">运行 {{ recentRunningCount }}</span>
+      </button>
+      <button v-if="recentUnreadCount" class="recent-read-all" type="button" :disabled="activityReadBusy" aria-label="全部标为已读" title="全部标为已读" @click="markActivityRead(recentConversationRows)"><el-icon><Check /></el-icon></button>
+    </div>
+    <div class="sidebar-tabs" role="tablist" aria-label="会话视图" @keydown="sidebarTabKeydown">
+      <button id="conversation-recent-tab" data-sidebar-view="recent" type="button" role="tab" aria-controls="conversation-sidebar-panel" :aria-selected="sidebarView === 'recent'" :tabindex="sidebarView === 'recent' ? 0 : -1" @click="switchSidebarView('recent')">最近</button>
+      <button id="conversation-folders-tab" data-sidebar-view="folders" type="button" role="tab" aria-controls="conversation-sidebar-panel" :aria-selected="sidebarView === 'folders'" :tabindex="sidebarView === 'folders' ? 0 : -1" @click="switchSidebarView('folders')">目录</button>
+    </div>
     <div class="tree-search">
       <el-icon :class="{ 'is-spinning': searchLoading }"><component :is="searchLoading ? Loading : Search" /></el-icon>
       <input v-model="query" aria-label="搜索目录或会话" placeholder="搜索目录或会话…" />
@@ -1535,24 +1649,21 @@ onBeforeUnmount(() => {
       <button v-if="query" type="button" title="清空搜索" @click="query = ''">×</button>
     </div>
 
-    <ConversationActivityFolder :items="activityItems" :recent-items="recentItems" :active-conversation-uuid="activeConversationUuid" :read-versions="referenceCatalog.activityReadVersions" :busy="activityReadBusy" :title-generating="titleGenerating"
-      @open="openActivityConversation" @read="markActivityRead([$event])" @read-all="markActivityRead(activityItems)"
-      @more="openMoreMenu($event.event, $event.row)" @overview-enter="enterOverview" @overview-leave="leaveOverview" @overview-close="closeOverview" />
-
-    <div ref="listRef" class="tree-list" :class="{ 'drop-root': drag.target?.kind === 'root' }" role="tree" aria-label="会话和目录"
+    <div id="conversation-sidebar-panel" class="sidebar-panel" role="tabpanel" :aria-labelledby="`conversation-${sidebarView}-tab`">
+    <div ref="listRef" class="tree-list" :class="{ 'drop-root': drag.target?.kind === 'root', 'recent-list': sidebarView === 'recent' && !query.trim() }" :role="isDirectoryView ? 'tree' : 'list'" :aria-label="query.trim() ? '搜索结果' : isDirectoryView ? '会话和目录' : '最近会话'"
       @contextmenu.prevent.stop="openRootMenu" @dragover.self="dragOver($event, rootDropTarget)" @drop.self="drop($event, rootDropTarget)"
       @dragleave.self="clearDropTarget" @scroll.passive="closeOverview">
       <div v-if="loading && !initialized" class="tree-placeholder"><el-icon class="is-spinning"><Loading /></el-icon> 正在定位最近会话…</div>
       <template v-else>
         <div
-          v-for="row in displayRows" :key="`${row.kind}:${row.id || rowId(row)}`"
-          :data-tree-id="row.id || rowId(row)" :data-kind="row.kind"
-          class="tree-row-wrap" :class="[`kind-${row.kind}`, { 'drop-inside': drag.target && rowId(drag.target) === rowId(row) && drag.zone === 'inside', 'drop-before': drag.target && rowId(drag.target) === rowId(row) && drag.zone === 'before', 'drop-after': drag.target && rowId(drag.target) === rowId(row) && drag.zone === 'after' }]"
+          v-for="row in displayRows" :key="`${row.recentAlias ? 'recent:' : ''}${row.kind}:${row.id || rowId(row)}`"
+          :data-tree-id="row.recentAlias ? `recent:${row.conversationUuid}` : row.id || rowId(row)" :data-kind="row.kind"
+          class="tree-row-wrap" :class="[`kind-${row.kind}`, { 'is-chat-active-row': row.kind === 'conversation' && activeConversationRow === row, 'drop-inside': drag.target && rowId(drag.target) === rowId(row) && drag.zone === 'inside', 'drop-before': drag.target && rowId(drag.target) === rowId(row) && drag.zone === 'before', 'drop-after': drag.target && rowId(drag.target) === rowId(row) && drag.zone === 'after' }]"
           :style="{ '--indent': indentation(row.depth) }"
-          role="treeitem" :aria-level="Number(row.depth || 0) + 1" :aria-busy="rowLoading(row) || isTitleGenerating(row)"
+          :role="isDirectoryView ? 'treeitem' : 'listitem'" :aria-level="isDirectoryView ? Number(row.depth || 0) + 1 : undefined" :aria-busy="rowLoading(row) || isTitleGenerating(row)"
           :aria-expanded="['folder','system'].includes(row.kind) ? String(isExpanded(row.kind === 'system' ? row.id : row.folderId)) : undefined"
           :tabindex="['folder','conversation','system'].includes(row.kind) ? 0 : -1"
-          :draggable="!row.local && !moveInFlight && (row.kind === 'conversation' || (row.kind === 'folder' && !query && !row.archived))"
+          :draggable="!row.recentAlias && !row.local && !moveInFlight && (row.kind === 'conversation' || (row.kind === 'folder' && !query && !row.archived))"
           @keydown="rowKeydown($event, row)" @contextmenu="openMenu($event, row)"
           @pointerenter="enterOverview($event, row)" @pointerleave="leaveOverview"
           @dragstart="dragStart($event, row)" @dragover="dragOver($event, row)" @drop="drop($event, row)" @dragend="clearDrag"
@@ -1561,7 +1672,7 @@ onBeforeUnmount(() => {
             <button class="tree-chevron" type="button" :aria-label="isExpanded(row.kind === 'system' ? row.id : row.folderId) ? '折叠' : '展开'" @click.stop="toggleRow(row)">
               <el-icon><component :is="isExpanded(row.kind === 'system' ? row.id : row.folderId) ? ArrowDown : ArrowRight" /></el-icon>
             </button>
-            <button class="tree-node-main" type="button" :class="{ 'is-folder-target': (row.kind === 'folder' && selectedFolderId === row.folderId) || (row.kind === 'system' && row.systemNode === 'temporary' && selectedFolderId === '') }" :title="row.path || row.name" @click="activateRow(row)" @contextmenu="openMenu($event, row)">
+            <button class="tree-node-main" type="button" :class="{ 'is-folder-target': (row.kind === 'folder' && selectedFolderId === row.folderId) || (row.kind === 'system' && row.systemNode === 'temporary' && selectedFolderId === '') }" :title="row.path || row.name" @click="row.search ? locateAndOpen(row) : activateRow(row)" @contextmenu="openMenu($event, row)">
               <el-icon class="node-icon" :class="{ 'is-spinning': rowLoading(row) }"><component :is="rowLoading(row) ? Loading : row.kind === 'system' ? (row.systemNode === 'archive' ? Box : ChatLineRound) : (isExpanded(row.folderId) ? FolderOpened : Folder)" /></el-icon>
               <span class="node-label">{{ row.name }}</span>
               <span v-if="row.pinned" class="node-star" title="同级置顶"><el-icon><StarFilled /></el-icon></span>
@@ -1570,14 +1681,15 @@ onBeforeUnmount(() => {
           </template>
 
           <template v-else-if="row.kind === 'conversation'">
-            <span class="tree-leaf-spacer"></span>
-            <button class="tree-node-main conversation" type="button" :class="{ 'is-chat-active': activeConversationUuid === row.conversationUuid, 'is-title-generating': isTitleGenerating(row) }" :title="isTitleGenerating(row) ? '正在生成会话名称' : (row.local ? row.title : undefined)" @click="row.search ? locateAndOpen(row) : activateRow(row)" @contextmenu="openMenu($event, row)">
+            <span v-if="!row.recentAlias" class="tree-leaf-spacer"></span>
+            <button class="tree-node-main conversation" type="button" :class="{ 'is-chat-active': activeConversationRow === row, 'is-title-generating': isTitleGenerating(row) }" :title="isTitleGenerating(row) ? '正在生成会话名称' : (row.local ? row.title : undefined)" @click="row.search ? locateAndOpen(row) : activateRow(row)" @contextmenu="openMenu($event, row)">
               <el-icon class="node-icon" :class="{ 'is-spinning': rowLoading(row) || isTitleGenerating(row), 'is-working': running(row) && !rowLoading(row) && !isTitleGenerating(row) }"><component :is="rowLoading(row) || isTitleGenerating(row) ? Loading : ChatLineRound" /></el-icon>
-              <span class="node-copy"><span class="node-label"><AnimatedConversationTitle :text="liveConversationTitle(row)" :identity="row.conversationUuid" /></span><small v-if="row.search">{{ row.path }}</small></span>
+              <span class="node-copy"><span class="node-label"><AnimatedConversationTitle :text="liveConversationTitle(row)" :identity="row.conversationUuid" /></span><small v-if="row.search || row.recentAlias">{{ nodePath(row) }}</small></span>
               <span v-if="row.pinned" class="node-star"><el-icon><StarFilled /></el-icon></span>
               <span v-if="isTitleGenerating(row)" class="title-generating-state" role="status" aria-live="polite">命名中</span>
               <span v-else-if="running(row)" class="running-leaf" role="img" :aria-label="`${activityLabel(row)}${row.activityUnread ? ' · 未读' : ''}`" :title="`${row.currentStatus || activityLabel(row)}${row.activityUnread ? ' · 未读' : ''}`"></span>
               <span v-else-if="row.activityUnread" class="conversation-unread-dot" aria-label="未读" :title="`${activityLabel(row)} · 未读`"></span>
+              <span v-if="row.recentAlias && !isTitleGenerating(row)" class="recent-row-status" :class="{'is-waiting': row.activityPending?.length}">{{ recentLabel(row) }}</span>
             </button>
           </template>
 
@@ -1593,13 +1705,16 @@ onBeforeUnmount(() => {
         </div>
         <button v-if="query && searchHasMore" class="search-more" type="button" :disabled="searchLoading" @click="runSearch({ append: true })">{{ searchLoading ? '加载中…' : '更多搜索结果' }}</button>
         <div v-else-if="query && !searchLoading && !searchRows.length" class="tree-placeholder">没有匹配的目录或会话</div>
+        <div v-else-if="!query.trim() && sidebarView === 'recent' && !displayRows.length" class="tree-placeholder">暂无最近会话</div>
       </template>
+    </div>
     </div>
 
     <ConversationOverview :open="overview.open" :row="overview.row" :anchor="overview.anchor" @close="closeOverview" @enter="keepOverview" @leave="leaveOverview"/>
 
     <Teleport to="body">
-      <div v-if="menu.open" class="tree-menu-shield" @pointerdown.self="closeMenu" @click.self="closeMenu" @contextmenu.prevent.self="closeMenu">
+      <!-- Keep the shield until click completes so a touch cannot reopen the trigger beneath it. -->
+      <div v-if="menu.open" class="tree-menu-shield" @pointerdown.self.stop @click.self.prevent.stop="closeMenu" @contextmenu.prevent.self.stop="closeMenu">
         <div data-conversation-tree-menu class="tree-context-menu" :style="{ left: `${menu.x}px`, top: `${menu.y}px` }" role="menu" :aria-label="menu.row?.kind === 'folder' ? `${menu.row.name}目录菜单` : menu.row?.kind === 'root' ? '会话列表菜单' : menu.row?.kind === 'system' ? `${menu.row.name}菜单` : `${menu.row?.title || '会话'}菜单`" @pointerdown.stop @click.stop @contextmenu.prevent.stop>
           <template v-if="menu.row?.kind === 'folder'">
             <button role="menuitem" @click="runMenuAction('new-conversation')"><el-icon><ChatLineRound /></el-icon><span>在此新建会话</span></button>
@@ -1621,11 +1736,14 @@ onBeforeUnmount(() => {
             </template>
           </template>
           <template v-else>
+            <button role="menuitem" @click="runMenuAction('new-sibling')"><el-icon><ChatLineRound /></el-icon><span>新建同级会话</span></button>
             <button v-if="menu.row?.activityUnread" role="menuitem" :disabled="activityReadBusy" @click="markActivityRead([menu.row]); closeMenu()"><el-icon><Check /></el-icon><span>标为已读</span></button>
             <button role="menuitem" :disabled="menu.row?.local || running(menu.row) || !hasConversationMessages(menu.row) || isTitleGenerating(menu.row)" @click="runMenuAction('generate-title')"><el-icon :class="{'is-spinning': isTitleGenerating(menu.row)}"><component :is="isTitleGenerating(menu.row) ? Loading : MagicStick" /></el-icon><span>{{ isTitleGenerating(menu.row) ? '正在生成…' : '生成会话名称' }}</span></button>
             <button role="menuitem" :disabled="menu.row?.local" @click="runMenuAction('rename')"><el-icon><EditPen /></el-icon><span>重命名</span></button>
             <button role="menuitem" :disabled="menu.row?.local || running(menu.row)" @click="runMenuAction('duplicate')"><el-icon><DocumentCopy /></el-icon><span>复制会话</span></button>
             <button role="menuitem" :disabled="menu.row?.local" @click="runMenuAction('pin')"><el-icon><component :is="menu.row?.pinned ? Star : StarFilled" /></el-icon><span>{{ menu.row?.pinned ? '取消置顶' : '置顶' }}</span></button>
+            <hr />
+            <button v-if="menu.recent" role="menuitem" :disabled="locatingConversation" @click="runMenuAction('locate')"><el-icon><Aim /></el-icon><span>在目录中定位</span></button>
             <button role="menuitem" :disabled="menu.row?.local" @click="runMenuAction('move')"><el-icon><FolderOpened /></el-icon><span>移动到…</span></button>
             <button role="menuitem" :disabled="menu.row?.local || running(menu.row)" @click="runMenuAction('refresh-prompt')"><el-icon><Refresh /></el-icon><span>更新系统提示词…</span></button>
             <button role="menuitem" :disabled="menu.row?.local" @click="runMenuAction('archive')"><el-icon><component :is="menu.row?.archived ? RefreshLeft : Box" /></el-icon><span>{{ menu.row?.archived ? '取消归档' : '归档' }}</span></button>
@@ -1638,7 +1756,7 @@ onBeforeUnmount(() => {
 
     <ConversationPromptDialog v-model="promptDialog" :conversation="promptRow" />
 
-    <el-dialog v-model="propertiesDialog" width="min(760px, calc(100vw - 24px))" append-to-body class="folder-properties-dialog" :close-on-click-modal="false" :close-on-press-escape="!propertiesSaving" :show-close="!propertiesSaving">
+    <el-dialog v-model="propertiesDialog" width="min(760px, calc(100vw - 24px))" append-to-body class="folder-properties-dialog mobile-viewport-dialog" :close-on-click-modal="false" :close-on-press-escape="!propertiesSaving" :show-close="!propertiesSaving">
       <template #header>
         <div class="folder-properties-heading">
           <h2>{{ propertiesForm.temporary ? '临时会话属性' : '目录属性' }}</h2>
@@ -1800,7 +1918,7 @@ onBeforeUnmount(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="moveDialog" width="min(560px, calc(100vw - 24px))" append-to-body :title="moveMode === 'delete' ? '迁移目录内容后删除' : '移动到…'" :close-on-click-modal="false">
+    <el-dialog v-model="moveDialog" class="mobile-viewport-dialog" width="min(560px, calc(100vw - 24px))" append-to-body :title="moveMode === 'delete' ? '迁移目录内容后删除' : '移动到…'" :close-on-click-modal="false">
       <el-input v-model="moveFolderQuery" clearable placeholder="搜索完整目录路径" :prefix-icon="Search" />
       <div class="folder-picker" role="listbox">
         <button type="button" :class="{ selected: moveFolderId === '' }" @click="moveFolderId = ''"><el-icon><Folder /></el-icon><span>{{ moveRow?.kind === 'conversation' ? '临时会话' : '根级目录' }}</span></button>
@@ -1813,7 +1931,7 @@ onBeforeUnmount(() => {
       <template #footer><el-button @click="moveDialog = false">取消</el-button><el-button type="primary" :loading="moveBusy" @click="submitMove">{{ moveMode === 'delete' ? '下一步' : '移动' }}</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="impactDialog" width="min(600px, calc(100vw - 24px))" append-to-body :show-close="false" :close-on-click-modal="false" :close-on-press-escape="false" title="是否同时更新已有会话的系统提示词？">
+    <el-dialog v-model="impactDialog" class="mobile-viewport-dialog" width="min(600px, calc(100vw - 24px))" append-to-body :show-close="false" :close-on-click-modal="false" :close-on-press-escape="false" title="是否同时更新已有会话的系统提示词？">
       <div class="impact-copy">
         <p>此次{{ impactState.action }}影响 <strong>{{ impactState.impact?.affectedCount || 0 }}</strong> 个已有会话：可更新 {{ impactState.impact?.updatableCount || 0 }} 个；运行中 {{ impactState.impact?.runningCount || 0 }} 个，本次将跳过。<span v-if="impactState.impact?.archivedCount">其中已归档 {{ impactState.impact.archivedCount }} 个。</span></p>
         <p>更新会用当前模板和各会话自己的当前参数重新组装完整系统提示词。这会使对应提示词/Provider continuation 缓存失效，可能增加后续输入开销和延迟。</p>
@@ -1841,6 +1959,17 @@ onBeforeUnmount(() => {
 .tree-tool { display:grid; width:27px; height:27px; place-items:center; border:0; border-radius:8px; background:transparent; color:var(--ob-text-subtle); cursor:pointer; }
 .tree-tool:hover,.tree-tool:focus-visible { background:var(--ob-surface-soft); color:var(--ob-text-strong); outline:none; }
 .tree-tool.primary { color:var(--ob-chat-subtle); }
+.sidebar-tabs { display:flex; flex:none; gap:3px; margin:0 10px 8px; padding:3px; border-radius:8px; background:var(--ob-hover); }
+.sidebar-tabs button { flex:1; min-width:0; min-height:28px; padding:3px 8px; border:0; border-radius:6px; background:transparent; color:var(--ob-text-muted); font-size:12px; cursor:pointer; }
+.sidebar-tabs button[aria-selected="true"] { background:var(--ob-surface-raised); color:var(--ob-text); box-shadow:0 1px 3px rgb(0 0 0 / .06); }
+.sidebar-tabs button:focus-visible,.sidebar-activity-summary:focus-visible { outline:2px solid var(--ob-blue); outline-offset:-2px; }
+.sidebar-activity { display:flex; flex:none; height:27px; align-items:center; gap:5px; margin:0 11px 5px; }
+.sidebar-activity-summary { display:flex; flex:1; min-width:0; flex-wrap:nowrap; align-items:center; justify-content:space-between; gap:8px; height:100%; min-height:27px; padding:3px 6px; border:0; border-radius:6px; background:transparent; color:var(--ob-text-subtle); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; cursor:pointer; }
+.sidebar-activity-summary .is-empty { color:var(--ob-text-muted); }
+.sidebar-activity-summary:hover { background:var(--ob-hover); }
+.sidebar-unread-count { color:var(--ob-blue); }
+.sidebar-panel { display:flex; flex:1; min-height:0; flex-direction:column; }
+.recent-list .tree-node-main { height:auto; min-height:43px; padding:5px 7px; }
 .tree-search { display:flex; align-items:center; gap:6px; margin:0 10px 7px; padding:0 9px; height:31px; border:1px solid var(--ob-border-soft); border-radius:9px; background:var(--ob-chat-hover); color:var(--ob-chat-muted); }
 .tree-search:focus-within { border-color:var(--ob-border-strong); }
 .tree-search input { min-width:0; flex:1; border:0; outline:0; background:transparent; color:var(--ob-text); font-size:12px; }
@@ -1889,12 +2018,27 @@ onBeforeUnmount(() => {
 @media (prefers-reduced-motion: reduce) { .is-spinning,.running-leaf { animation:none; } }
 @media (pointer:coarse) { .tree-row-wrap { min-height:36px; } .tree-node-main { height:34px; } }
 .tree-touch-more { display:none; }
+.recent-row-status { flex:0 1 auto; min-width:0; max-width:42%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; color:var(--ob-text-subtle); }
+.recent-row-status.is-waiting { color:var(--ob-warning); }
+.recent-waiting-count { flex:none; font-size:11px; white-space:nowrap; color:var(--ob-warning); }
+.recent-read-all { display:grid; flex:0 0 27px; width:27px; height:27px; padding:0; place-items:center; border:0; border-radius:7px; background:transparent; color:var(--ob-text-subtle); cursor:pointer; }
+.recent-read-all:hover { background:var(--ob-hover); }
+.recent-read-all:focus-visible { outline:2px solid var(--ob-blue); outline-offset:-2px; }
+.recent-read-all:disabled { opacity:.4; cursor:default; }
 @media (max-width:760px), (hover:none) and (pointer:coarse) {
+  .sidebar-activity { height:44px; }
+  .sidebar-tabs button,.sidebar-activity-summary { min-height:44px; }
+  .recent-read-all { width:44px; height:44px; flex-basis:44px; }
   .tree-row-wrap { min-height:44px; }
+  .tree-row-wrap.is-chat-active-row { background:var(--ob-chat-selected); color:var(--ob-chat-text); }
+  .tree-row-wrap.is-chat-active-row .tree-node-main { background:transparent; color:inherit; }
   .tree-node-main { min-height:44px; }
   .tree-touch-more { display:grid; width:44px; height:44px; flex:0 0 44px; place-items:center; border:0; border-radius:8px; background:transparent; color:inherit; font-size:14px; }
   .tree-touch-more:focus-visible { outline:2px solid var(--ob-blue); outline-offset:-3px; }
   .tree-touch-more:active { background:var(--ob-selected); }
+}
+@media (max-width:760px) {
+  .tree-chevron { height:44px; }
 }
 </style>
 

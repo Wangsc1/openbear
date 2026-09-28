@@ -31,12 +31,41 @@ function harness({rows=[local(),conv('saved')],active='local:new',confirm=async(
  function setDraftFolderId(id){draftFolderId.value=id;}
  ${between(app,'function localConversation(', 'function currentRouteConversationUuid(')}
  ${between(app,'function focusLocalConversation(', 'async function startConsoleNewSession(')}
+ ${between(app,'async function handleTreeNewConversation(', 'function handleTreeRows(')}
  ${between(app,'function handleTreeFolderRemoved(', 'async function handleTreeOpen(')}
  ${between(app,'function currentDraftConversation(', 'async function openConversation(')}
  ${between(app,'function discardConversationDraft(', 'function closeConversationMenu(')}
  `,ctx);
  return{ctx,calls,storage,run:s=>vm.runInContext(s,ctx),remove:row=>{ctx.target=row;return vm.runInContext('deleteConversation(target)',ctx);}};
 }
+
+for (const folderId of ['b', '']) test(`recent sibling creation targets ${folderId || 'temporary'} without revealing the directory tree`, async () => {
+ const h=harness({rows:[conv('saved')],active:'saved'});
+ h.ctx.targetFolder=folderId;
+ await h.run('handleTreeNewConversation(targetFolder, {revealInFolders:false})');
+ await nextTick();
+ assert.equal(h.ctx.activeConversationUuid.value,'local:new');
+ assert.equal(h.ctx.draftFolderId.value,folderId);
+ assert.equal(h.ctx.conversations.value.find(isLocalConversation).folderId,folderId);
+ assert.deepEqual(h.calls.reveals,[]);assert.deepEqual(h.calls.confirms,[]);
+ assert.deepEqual(h.calls.clears,[]);assert.deepEqual(h.calls.deletes,[]);
+});
+test('ordinary new conversation retains automatic draft reveal',async()=>{
+ const h=harness({rows:[conv('saved')],active:'saved'});
+ await h.run("handleTreeNewConversation('b')");await nextTick();
+ assert.equal(h.ctx.conversations.value.find(isLocalConversation).folderId,'b');
+ assert.deepEqual(h.calls.reveals,['draft:b']);
+});
+for (const cancel of [false,true]) test(`recent sibling creation ${cancel?'cancelled':'confirmed'} draft reassignment keeps existing draft protection`,async()=>{
+ const h=harness({confirm:async()=>{if(cancel)throw 'cancel';}});
+ const stored=h.storage.get('openbear.console.drafts.v1');
+ await h.run("handleTreeNewConversation('b', {revealInFolders:false})");await nextTick();
+ assert.equal(h.calls.confirms.length,1);
+ assert.equal(h.ctx.conversations.value.filter(isLocalConversation).length,1);
+ assert.equal(h.ctx.conversations.value.find(isLocalConversation).folderId,cancel?'a':'b');
+ assert.equal(h.storage.get('openbear.console.drafts.v1'),stored);
+ assert.deepEqual(h.calls.clears,[]);assert.deepEqual(h.calls.reveals,[]);
+});
 
 test('tree delete delegates to the App lifecycle owner for both draft and persisted rows',()=>{
  const emitted=[];const ctx=vm.createContext({running:()=>false,emit:(...a)=>emitted.push(a),ElMessage:{warning(){}},row:local()});

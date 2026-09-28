@@ -7,7 +7,7 @@ from app.models.agent_runtime import (
     agent_runtime_snapshot_fields,
     resolve_agent_runtime_config,
 )
-from app.rath.schemas import RathAgentDef
+from app.agents.schemas import AgentDefinition
 
 
 class _Model:
@@ -58,7 +58,7 @@ def _agent(**kwargs):
         enabled=True,
     )
     base.update(kwargs)
-    return RathAgentDef(**base)
+    return AgentDefinition(**base)
 
 
 def test_resolve_falls_back_to_main_model_and_default_think():

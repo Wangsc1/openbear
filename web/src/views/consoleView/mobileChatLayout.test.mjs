@@ -37,6 +37,16 @@ test('phone header shows compact path/title/navigation/More without cumulative m
   assert.match(sources[header],/<slot name="mobile-actions"\/>/);
 });
 
+test('phone portrait and touch landscape hide the bottom keyboard hints without hiding usage or changing desktop',()=>{
+  for(const env of [320,360,390,430,760,844,932].map(width=>({...phone,width}))){
+    assert.equal(css('ConsoleComposer.vue','.composer-hints',env).display,'none');
+    if(env.width<=760)assert.equal(css('ConsoleComposer.vue','.composer-usage-summary',env).display,'flex');
+  }
+  assert.notEqual(css('ConsoleComposer.vue','.composer-hints',desktop).display,'none');
+  const hint=nodes('ConsoleComposer.vue').find(n=>hasClass(n,'composer-hints'));
+  assert.ok(hasClass(hint,'flex'));assert.match(hint.loc.source,/Enter 发送 · Ctrl\/⌘\+Enter 也可发送/);
+});
+
 test('phone gives all width back to transcript, with no permanent number strip or floating tools',()=>{
   for(const width of [320,360,390,430,760]){
     const env={...phone,width};
@@ -79,7 +89,7 @@ test('editor has primary vertical space and model is an unboxed secondary text e
     assert.equal(css(f,link,env)['min-width'],'0','long model names shrink instead of pushing send off-screen');
     assert.equal(css(f,'.run-config-chip-model',env)['font-weight'],'500');
     assert.equal(css(f,'.run-config-chip-meta',env).display,'none','phone model entry must not repeat thinking/context metadata');
-    assert.equal(css(f,'.composer-status .run-config-chip-strategy',env).display,'none');
+    assert.equal(css(f,'.composer-status .run-config-chip-strategy',env).display,'inline');
     assert.equal(css(f,':deep(.reference-editor-content)',env)['min-height'],'min(3rem, calc(var(--mobile-viewport-height, 100dvh) * .22))');
     assert.equal(css(f,':deep(.reference-editor-content)',env)['font-size'],undefined);
     assert.equal(css(f,'.composer-clear:disabled',env).display,'none');
@@ -92,6 +102,30 @@ test('editor has primary vertical space and model is an unboxed secondary text e
   assert.ok(css(f,link+':focus-visible').outline,'keyboard focus remains visible');
 });
 
+test('phone cumulative footer wraps in normal flow, retaining one context owner and all input actions',()=>{
+  const file='ConsoleComposer.vue', all=nodes(file);
+  const footer=all.find(n=>hasClass(n,'composer-usage-summary'));
+  const box=all.find(n=>hasClass(n,'composer-box'));
+  assert.equal(walk([footer]).filter(n=>n.tag==='ContextUsageMeter').length,1);
+  assert.equal(walk([box]).filter(n=>n.tag==='ContextUsageMeter').length,0);
+  assert.equal(all.filter(n=>n.tag==='ContextUsageMeter').length,1);
+  for(const width of [320,360,390,430,760]){
+    const env={...phone,width}, style=css(file,'.composer-usage-summary',env);
+    assert.equal(style.display,'flex');
+    assert.equal(style['flex-wrap'],'wrap');
+    assert.equal(style.position,undefined);
+    assert.equal(css(file,'.composer-box',env)['margin-bottom'],undefined);
+    assert.equal(css(file,'.composer-total',env)['white-space'],'nowrap');
+  }
+  assert.equal(css(file,'.composer-usage-summary',desktop).display,'none');
+  assert.equal(css(file,'.composer-total::before',phone).content,'"·"');
+  assert.equal(css(file,'.composer-total > svg',phone).width,'11px');
+  const meter=fs.readFileSync(new URL('./ContextUsageMeter.vue',import.meta.url),'utf8');
+  const trigger=walk(baseParse(parse(meter).descriptor.template.content).children).find(n=>hasClass(n,'context-usage-trigger'));
+  assert.doesNotMatch(trigger.loc.source,/context-inline-strategy|滑窗压缩|摘要压缩/);
+  assert.match(trigger.loc.source,/context-ring-fill/);
+});
+
 test('desktop path/title header coexists with unchanged toolbar, editor size and floating rail',()=>{
   assert.deepEqual(css('../../App.vue','.app-shell.is-console .app-main',desktop),{});
   for(const s of ['.header-mobile-navigation','.header-mobile-actions','.header-mobile-running'])assert.equal(css('ConsoleHeader.vue',s,desktop).display,'none');
@@ -99,6 +133,13 @@ test('desktop path/title header coexists with unchanged toolbar, editor size and
   assert.equal(css('ConsoleHeader.vue','.header-metrics',desktop).display,'flex');
   assert.equal(css('ConsoleHeader.vue','.console-header',desktop)['min-height'],'66px');
   assert.equal(css('ConsoleView.vue','.console-controls',desktop).display,'contents');
+  assert.equal(css('ConsoleView.vue','.search-content-toggle',desktop).top,
+    'calc(var(--console-float-rail-top) - var(--console-float-control-size) - var(--console-float-control-gap))',
+    'search occupies the former hidden-content slot, below the moved hidden icon');
+  assert.equal(css('ConsoleView.vue','.hidden-content-toggle',desktop).top,
+    'calc(var(--console-float-rail-top) - 2 * (var(--console-float-control-size) + var(--console-float-control-gap)))');
+  assert.equal(css('TaskMemoryDrawer.vue','.task-memory-entry-wrap',desktop).top,'calc(48% - 3.25rem)',
+    'memory remains in its original rail slot; neither new button overlaps it');
   for(const [f,s] of [['ConsoleView.vue','.scroll-lock-toggle'],['TaskMemoryDrawer.vue','.task-memory-entry-wrap'],['TurnMinimap.vue','.turn-minimap']])assert.equal(css(f,s,desktop).position,'fixed');
   assert.equal(css('ConsoleComposer.vue','.composer-toolbar',desktop).display,'grid');
   assert.equal(css('ConsoleComposer.vue','.tool-btn',desktop).width,'2rem');
@@ -117,7 +158,7 @@ test('message hover timestamps stay hidden on phones and touch-only landscape sc
     assert.equal(css(file,'.time-float',env).display,'none',`resting time badge at ${env.width}px`);
     assert.equal(css(file,'.timed-row:hover > .time-float',env).display,'none',`sticky touch hover at ${env.width}px`);
     for(const selector of ['.user-message-meta','.assistant-message-meta'])
-      assert.equal(css(file,selector,env).display,'flex','persistent message metadata and actions remain available');
+      assert.equal(css(file,selector,env).display,selector==='.assistant-message-meta' && env.width<=760 ? 'grid' : 'flex','persistent message metadata and actions remain available in the compact phone footer');
   }
 });
 
@@ -156,28 +197,36 @@ function mobileRuntime(){
   return{context,props,media,calls,watchers,unmounted};
 }
 async function renderTools(runtime){
-  const bindings=vm.runInContext('({props,fmtTokens,cachePct,phone:phone.value,menuOpen:menuOpen.value,navigationOpen:navigationOpen.value,navigationList:null,chooseAction,openNavigation,chooseTurn,revealCurrentTurn,turnLabel})',runtime.context);
+  const bindings=vm.runInContext('({props,fmtTokens,cachePct,phone:phone.value,menuOpen:menuOpen.value,navigationOpen:navigationOpen.value,navigationList:null,chooseAction,openNavigation,chooseTurn,revealCurrentTurn,turnLabel,emit})',runtime.context);
   const slots=[],compiled=compile(descriptors['MobileConversationTools.vue'].template.content);let tree;
   const app=createSSRApp({render(){tree=compiled.call(this,bindings,[]);return tree;}});
   app.component('ElPopover',{inheritAttrs:false,props:['visible'],render(){const children=[...(this.$slots.reference?.()||[]),...(this.visible?(this.$slots.default?.()||[]):[])];slots.push(...children);return children;}});
   app.component('ElDrawer',{inheritAttrs:false,props:['modelValue'],emits:['opened'],render(){const children=this.modelValue?(this.$slots.default?.()||[]):[];slots.push(...children);return children;}});
-  for(const name of ['ChatLineRound','CollectionTag','DataAnalysis','Lock','Money','MoreFilled','Timer','Unlock','Hide'])app.component(name,{render:()=>h('svg')});
+  for(const name of ['ChatLineRound','CollectionTag','DataAnalysis','EditPen','Lock','Money','MoreFilled','Timer','Unlock','Hide','Search'])app.component(name,{render:()=>h('svg')});
   const html=await renderToString(app);return{html,nodes:walk([tree,...slots])};
 }
 
 test('mobile summary uses the same desktop total parts and formatters, with no new fetch or timer',()=>{
-  const all=nodes('ConsoleView.vue'),header=all.find(n=>n.tag==='ConsoleHeader'),tools=all.find(n=>n.tag==='MobileConversationTools');
+  const all=nodes('ConsoleView.vue'),header=all.find(n=>n.tag==='ConsoleHeader'),tools=all.find(n=>n.tag==='MobileConversationTools'),composer=all.find(n=>n.tag==='ConsoleComposer');
   const binding=(node,name)=>node.props.find(p=>p.name==='bind'&&p.arg?.content===name)?.exp?.content;
   assert.equal(binding(header,'tokens-text'),'totalTokensDisplay');
   assert.equal(binding(tools,'token-parts'),'totalTokenParts');
   assert.equal(binding(header,'tokens-detail'),'totalTokensDetail');
+  assert.equal(binding(header,'cache-percent-text'),'cachePct(totalTokenParts.cache, totalTokenParts.input)');
+  assert.equal(cachePct(30,135),'22.2%','cache is read hits / full prompt, not output or cache writes');
+  assert.equal(cachePct(0,0),'—');
+  assert.equal(cachePct(0,100),'0.0%');
   assert.match(sources['ConsoleView.vue'],/const totalTokens = computed\(\(\) => totalTokenParts.value.input \+ totalTokenParts.value.output\)/);
   assert.match(descriptors['MobileConversationTools.vue'].scriptSetup.content,/import \{cachePct, fmtTokens, shortText\} from "\.\/display.js"/);
   assert.equal(binding(header,'duration-ms'),'totalDurationMs');
   assert.equal(binding(tools,'duration-text'),'totalDurationDisplay');
+  assert.equal(binding(composer,'tokens-text'),'totalTokensDisplay');
+  assert.equal(binding(composer,'cache-percent-text'),'cachePct(totalTokenParts.cache, totalTokenParts.input)');
+  assert.equal(binding(composer,'duration-text'),'totalDurationDisplay');
   assert.match(sources['ConsoleView.vue'],/const totalDurationDisplay = computed\(\(\) => fmtMs\(totalDurationMs.value\)\)/);
   assert.equal(binding(header,'cost-text'),'totalCostDisplay');
   assert.equal(binding(tools,'cost-text'),'totalCostDisplay');
+  assert.equal(binding(composer,'cost-text'),'totalCostDisplay');
   assert.doesNotMatch(descriptors['MobileConversationTools.vue'].scriptSetup.content,/\bApi\b|fetch\(|setInterval\(/);
   assert.equal(css('MobileConversationTools.vue','.mobile-summary-metrics dd')['font-variant-numeric'],'tabular-nums');
   assert.equal(css('MobileConversationTools.vue','.mobile-summary-metrics dd')['overflow-wrap'],'anywhere');
@@ -192,7 +241,7 @@ test('More shows read-only live totals on demand and retains every action',async
   for(const text of ['会话统计','总 Tokens','总耗时','总花费','1.25M','12m 34s','$3.4567'])assert.ok(view.html.includes(text),text);
   const summary=view.nodes.find(n=>n.type==='section'&&n.props?.class==='mobile-conversation-summary');
   assert.equal(walk([summary]).filter(n=>n.type==='button').length,0);
-  assert.equal(view.nodes.filter(n=>n.type==='button').length,5);
+  assert.equal(view.nodes.filter(n=>n.type==='button').length,7);
   assert.doesNotMatch(view.html,/工作详情/);
   assert.match(view.html,/隐藏内容/);
   Object.assign(r.props,{tokenParts:{input:2500000,output:16600,cache:2000000},durationText:'25m 8s',costText:'$6.9134'});
@@ -257,12 +306,15 @@ test('More retains memory/follow actions and exposes titled turn navigation only
   let view=await renderTools(r);assert.match(view.html,/更多会话操作/);assert.doesNotMatch(view.html,/first|second/);
   vm.runInContext('menuOpen.value=true',r.context);view=await renderTools(r);
   const buttons=view.nodes.filter(n=>n.type==='button');
-  assert.equal(buttons.length,5);
-  for(const event of ['open-hidden','open-memory','toggle-scroll-lock']){
+  assert.equal(buttons.length,7);
+  assert.equal(buttons[0].props['aria-label'],'搜索此会话');
+  buttons[0].props.onClick(); assert.deepEqual(r.calls.at(-1),['open-search']);
+  r.calls.pop();
+  for(const event of ['open-hidden','open-memory','open-context','toggle-scroll-lock']){
     await vm.runInContext(`chooseAction('${event}')`,r.context);
     assert.equal(vm.runInContext('menuOpen.value',r.context),false);
   }
-  assert.deepEqual(r.calls,[['open-hidden'],['open-memory'],['toggle-scroll-lock']]);
+  assert.deepEqual(r.calls,[['open-hidden'],['open-memory'],['open-context'],['toggle-scroll-lock']]);
   vm.runInContext('openNavigation()',r.context);view=await renderTools(r);
   const rows=view.nodes.filter(n=>n.type==='button'&&n.props.class==='mobile-turn-row');
   assert.equal(rows.length,2);assert.equal(rows[1].props['aria-current'],'true');assert.match(view.html,/first/);assert.match(view.html,/second/);
@@ -273,8 +325,10 @@ test('new drafts disable scoped tools and empty navigation, and route/desktop ch
   const r=mobileRuntime();r.props.conversationUuid='local:draft';r.props.turns=[];
   vm.runInContext('menuOpen.value=true',r.context);const view=await renderTools(r);
   const buttons=view.nodes.filter(n=>n.type==='button');
-  assert.equal(buttons[1].props.disabled,true);assert.equal(buttons[2].props.disabled,true);assert.equal(buttons[3].props.disabled,true);
-  assert.equal(buttons[4].props.disabled,undefined,'following messages remains available');
+  assert.equal(buttons[0].props.disabled,true,'local drafts cannot search the server');
+  assert.equal(buttons[2].props.disabled,true);assert.equal(buttons[3].props.disabled,true);assert.equal(buttons[4].props.disabled,true);
+  assert.equal(buttons[5].props.disabled,true,'empty navigation remains disabled after context editor');
+  assert.equal(buttons[6].props.disabled,undefined,'following messages remains available');
   vm.runInContext('navigationOpen.value=true',r.context);r.watchers.forEach(fn=>fn());assert.equal(vm.runInContext('navigationOpen.value',r.context),false);
   vm.runInContext('menuOpen.value=true;navigationOpen.value=true',r.context);r.media.matches=false;vm.runInContext('updateMedia()',r.context);
   assert.equal(vm.runInContext('phone.value||menuOpen.value||navigationOpen.value',r.context),false);

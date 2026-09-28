@@ -9,13 +9,13 @@ import pytest
 from app.db.engine import DB
 from app.llm.base import AgentResult
 from app.llm.events import ToolCall, Usage
-from app.rath.builtin_workflows import ensure_builtin_workflows
-from app.rath.dao import RathDAO
-from app.rath.manager import RathTaskManager
-from app.rath.plan import AgentPlanCoordinator, register_agent_plan_tools
-from app.rath.runner import RathTaskCancelled, RathWorkflowRunner
-from app.rath.schemas import RathAgentDef
-from app.rath.single_agent import SingleAgentWorkflowRunner
+from app.agents.profiles import ensure_builtin_workflows
+from app.agents.dao import AgentDAO
+from app.agents.control import AgentControlService
+from app.agents.plan import AgentPlanCoordinator, register_agent_plan_tools
+from app.agents.task_context import AgentTaskCancelled, AgentTaskContext
+from app.agents.schemas import AgentDefinition
+from app.agents.execution import AgentExecutor
 from app.tools.base import ToolRegistry
 
 
@@ -23,7 +23,7 @@ from app.tools.base import ToolRegistry
 async def env(tmp_path):
     db = DB(str(tmp_path / "rath.db"))
     await db.connect()
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     workflow_uuid = await ensure_builtin_workflows(dao)
     task_uuid = await dao.create_task(chat_id=123, workflow_uuid=workflow_uuid, title="Runner 测试")
     try:
@@ -34,7 +34,7 @@ async def env(tmp_path):
 
 async def test_runner_pause_resume_and_steer(env):
     dao, task_uuid = env
-    runner = RathWorkflowRunner(dao, task_uuid, poll_interval_s=0.01)
+    runner = AgentTaskContext(dao, task_uuid, poll_interval_s=0.01)
 
     await dao.add_control(task_uuid, "pause", message="暂停")
 
@@ -97,7 +97,7 @@ async def test_single_agent_steer_is_injected_into_model_messages(env):
     task = await dao.get_task(task_uuid)
     assert task is not None
     await dao.add_control(task_uuid, "steer", message="重点确认 Bash 自保护")
-    agent = RathAgentDef(
+    agent = AgentDefinition(
         id=1,
         workflow_uuid=task.workflow_uuid,
         agent_key="security",
@@ -111,8 +111,8 @@ async def test_single_agent_steer_is_injected_into_model_messages(env):
     )
     backend = _CapturingSingleAgentBackend()
     registry = ToolRegistry()
-    register_agent_plan_tools(registry, AgentPlanCoordinator(dao, RathTaskManager(dao)))
-    runner = SingleAgentWorkflowRunner(
+    register_agent_plan_tools(registry, AgentPlanCoordinator(dao, AgentControlService(dao)))
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -132,10 +132,10 @@ async def test_single_agent_steer_is_injected_into_model_messages(env):
 
 async def test_runner_stop_at_checkpoint(env):
     dao, task_uuid = env
-    runner = RathWorkflowRunner(dao, task_uuid, poll_interval_s=0.01)
+    runner = AgentTaskContext(dao, task_uuid, poll_interval_s=0.01)
     await dao.add_control(task_uuid, "stop", message="结束")
 
-    with pytest.raises(RathTaskCancelled):
+    with pytest.raises(AgentTaskCancelled):
         await runner.checkpoint("before_model_call", agent_key="reader")
 
     events = await dao.events(task_uuid)
@@ -144,7 +144,7 @@ async def test_runner_stop_at_checkpoint(env):
 
 async def test_manager_start_marks_cancelled(env):
     dao, task_uuid = env
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
 
     async def runner_factory(_task_uuid: str):
         await asyncio.sleep(10)
@@ -164,7 +164,7 @@ async def test_manager_start_marks_cancelled(env):
 
 async def test_manager_execution_slot_respects_runtime_config(env):
     dao, _task_uuid = env
-    manager = RathTaskManager(dao, max_concurrent_tasks=1)
+    manager = AgentControlService(dao, max_concurrent_tasks=1)
     entered: list[str] = []
     release_first = asyncio.Event()
 
@@ -196,7 +196,7 @@ async def test_manager_stop_active_for_chat_stops_all_active_tasks(env):
     workflow = (await dao.list_workflows())[0]
     second_uuid = await dao.create_task(chat_id=123, workflow_uuid=workflow.workflow_uuid, title="second")
     other_chat_uuid = await dao.create_task(chat_id=999, workflow_uuid=workflow.workflow_uuid, title="other")
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
 
     async def runner_factory(_task_uuid: str):
         await asyncio.sleep(10)

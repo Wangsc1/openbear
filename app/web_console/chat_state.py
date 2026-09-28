@@ -6,7 +6,7 @@ import inspect
 from app.web_console.message_visibility import visibility_snapshot
 
 from app.interaction_data import normalize_questionnaire as _normalize_web_questionnaire
-from app.rath.controller_projection import project_history_message_for_controller
+from app.agents.controller_projection import project_history_message_for_controller
 from app.tools.base import current_tool_context
 from app.web_console.core import *
 from app.web_console.live_stream import *
@@ -480,9 +480,9 @@ class WebAdminChatStateMixin:
         )
         agent_run_config = agent_run_config_public(agent_runtime)
         active_rath_tasks = []
-        if self.rath is not None:
+        if self.agents is not None:
             with contextlib.suppress(Exception):
-                active_rath_tasks = await self.rath.all_active_tasks_for_chat(chat_id)
+                active_rath_tasks = await self.agents.all_active_tasks_for_chat(chat_id)
         rath_running = bool(active_rath_tasks)
         rath_started_candidates = [int(getattr(task, "started_at", 0) or getattr(task, "updated_at", 0) or 0) for task in active_rath_tasks]
         rath_started_candidates = [ts for ts in rath_started_candidates if ts > 0]
@@ -492,7 +492,7 @@ class WebAdminChatStateMixin:
         for task in active_rath_tasks:
             session = None
             with contextlib.suppress(Exception):
-                session = await self.rath_dao.agent_session(str(getattr(task, "agent_session_uuid", "") or ""))
+                session = await self.agent_dao.agent_session(str(getattr(task, "agent_session_uuid", "") or ""))
             snapshot = task.input.get("agentSnapshot") if isinstance(task.input, dict) else {}
             short_id = str(task.task_uuid or "")[:8]
             base_name = str((snapshot or {}).get("name") or (getattr(session, "title", "") if session else "") or task.current_agent_key or "Agent").strip() or "Agent"
@@ -637,7 +637,7 @@ class WebAdminChatStateMixin:
         """Merge one stable Rath task into a root turn exactly once.
 
         Live/public Agent payloads expose prompt input as a total that already
-        includes cache tokens, while durable ``RathTask`` rows expose the exact
+        includes cache tokens, while durable ``AgentTask`` rows expose the exact
         non-cache/cache split. Normalize both shapes into ``Usage`` here so the
         turn footer and historical stats share one accounting rule.
         """
@@ -897,6 +897,8 @@ class WebAdminChatStateMixin:
                 chat_id,
                 commit=False,
                 session_uuid=session_uuid,
+                attempt_id=str(call.get("attemptId") or ""),
+                usage_known=call.get("usageReported"),
                 model=model_label,
                 protocol=protocol,
                 think_level=think_level,

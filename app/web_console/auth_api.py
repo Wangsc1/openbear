@@ -7,6 +7,7 @@ from app.web_console.live_stream import *
 
 # Deliberately exact, public GET/HEAD resources. No root/static-directory wildcard.
 PWA_PUBLIC_FILES = {
+    "/openbear-push-sw.js": ("openbear-push-sw.js", "application/javascript"),
     "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
     "/icons/openbear-192.png": ("icons/openbear-192.png", "image/png"),
     "/icons/openbear-512.png": ("icons/openbear-512.png", "image/png"),
@@ -133,36 +134,39 @@ class WebAdminAuthMixin:
     async def _record_login_failure(self, ip: str) -> dict[str, Any]:
         if not ip:
             return {"blocked": False, "retryAfter": 0, "failedCount": 1}
-        ts = now_ts()
         cooldown = self._login_cooldown_seconds()
-        cur = await self.db.conn.execute(
-            "SELECT failed_count, first_failed_at, blocked_until FROM web_login_failures WHERE ip=?",
-            (ip,),
-        )
-        row = await cur.fetchone()
-        if row and int(row["blocked_until"] or 0) > ts:
-            retry_after = int(row["blocked_until"] or 0) - ts
-            return {"blocked": True, "retryAfter": retry_after, "failedCount": int(row["failed_count"] or 0)}
-        if row and ts - int(row["first_failed_at"] or ts) <= cooldown:
-            first_failed_at = int(row["first_failed_at"] or ts)
-            failed_count = int(row["failed_count"] or 0) + 1
-        else:
-            first_failed_at = ts
-            failed_count = 1
-        blocked_until = ts + cooldown if failed_count >= _LOGIN_FAIL_LIMIT else 0
-        await self.db.conn.execute(
-            """
-            INSERT INTO web_login_failures (ip, failed_count, first_failed_at, last_failed_at, blocked_until)
-            VALUES (?,?,?,?,?)
-            ON CONFLICT(ip) DO UPDATE SET
-              failed_count=excluded.failed_count,
-              first_failed_at=excluded.first_failed_at,
-              last_failed_at=excluded.last_failed_at,
-              blocked_until=excluded.blocked_until
-            """,
-            (ip, failed_count, first_failed_at, ts, blocked_until),
-        )
-        await self.db.conn.commit()
+        # Read/modify/write must share the one writer transaction. Concurrent
+        # incorrect secrets otherwise overwrite each other's count and postpone
+        # or bypass the cooldown even though every request was rejected.
+        async with self.db.write_transaction(label="record-web-login-failure") as conn:
+            ts = now_ts()
+            cur = await conn.execute(
+                "SELECT failed_count, first_failed_at, blocked_until FROM web_login_failures WHERE ip=?",
+                (ip,),
+            )
+            row = await cur.fetchone()
+            if row and int(row["blocked_until"] or 0) > ts:
+                retry_after = int(row["blocked_until"] or 0) - ts
+                return {"blocked": True, "retryAfter": retry_after, "failedCount": int(row["failed_count"] or 0)}
+            if row and ts - int(row["first_failed_at"] or ts) <= cooldown:
+                first_failed_at = int(row["first_failed_at"] or ts)
+                failed_count = int(row["failed_count"] or 0) + 1
+            else:
+                first_failed_at = ts
+                failed_count = 1
+            blocked_until = ts + cooldown if failed_count >= _LOGIN_FAIL_LIMIT else 0
+            await conn.execute(
+                """
+                INSERT INTO web_login_failures (ip, failed_count, first_failed_at, last_failed_at, blocked_until)
+                VALUES (?,?,?,?,?)
+                ON CONFLICT(ip) DO UPDATE SET
+                  failed_count=excluded.failed_count,
+                  first_failed_at=excluded.first_failed_at,
+                  last_failed_at=excluded.last_failed_at,
+                  blocked_until=excluded.blocked_until
+                """,
+                (ip, failed_count, first_failed_at, ts, blocked_until),
+            )
         return {
             "blocked": blocked_until > ts,
             "retryAfter": max(0, blocked_until - ts),
@@ -507,10 +511,12 @@ class WebAdminAuthMixin:
         row = await cur.fetchone()
         if not row:
             return "missing"
-        if row["status"] == "pending" and int(row["expires_at"] or 0) < now_ts():
+        if row["status"] in {"pending", "approved"} and int(row["expires_at"] or 0) <= now_ts():
+            ts = now_ts()
             await self.db.conn.execute(
-                "UPDATE web_login_requests SET status='expired', decided_at=? WHERE request_uuid=?",
-                (now_ts(), req_uuid),
+                "UPDATE web_login_requests SET status='expired', decided_at=? "
+                "WHERE request_uuid=? AND status IN ('pending','approved') AND expires_at<=?",
+                (ts, req_uuid, ts),
             )
             await self.db.conn.commit()
             return "expired"
@@ -521,14 +527,21 @@ class WebAdminAuthMixin:
         if status != "pending":
             return status
         new_status = "approved" if approved else "rejected"
-        await self.db.conn.execute(
-            """
-            UPDATE web_login_requests SET status=?, decided_at=?, decided_by=?
-            WHERE request_uuid=? AND status='pending'
-            """,
-            (new_status, now_ts(), decided_by, req_uuid),
-        )
-        await self.db.conn.commit()
+        # The request can expire while another task owns the shared writer.
+        # Check the TTL only after this decision actually acquires that writer.
+        async with self.db.write_transaction(label="decide-web-login-request") as conn:
+            ts = now_ts()
+            changed = await conn.execute(
+                """
+                UPDATE web_login_requests SET status=?, decided_at=?, decided_by=?
+                WHERE request_uuid=? AND status='pending' AND expires_at>?
+                """,
+                (new_status, ts, decided_by, req_uuid, ts),
+            )
+        if changed.rowcount != 1:
+            # Another decision or expiry won after the initial status read.
+            # Never report/audit an approval that did not take effect.
+            return await self.login_request_status(req_uuid)
         await self.audit(
             "web.login.approved" if approved else "web.login.denied",
             actor="telegram",
@@ -539,10 +552,10 @@ class WebAdminAuthMixin:
 
     async def create_session_from_request(self, req_uuid: str, request: web.Request) -> str:
         cur = await self.db.conn.execute(
-            "SELECT chat_id, status, nonce_hash FROM web_login_requests WHERE request_uuid=?", (req_uuid,)
+            "SELECT chat_id, status, nonce_hash, expires_at FROM web_login_requests WHERE request_uuid=?", (req_uuid,)
         )
         row = await cur.fetchone()
-        if not row or row["status"] != "approved":
+        if not row or row["status"] != "approved" or int(row["expires_at"] or 0) <= now_ts():
             raise web.HTTPForbidden(text="login request is not approved")
         expected_nonce_hash = str(row["nonce_hash"] or "")
         if expected_nonce_hash:
@@ -557,26 +570,31 @@ class WebAdminAuthMixin:
                 )
                 raise web.HTTPForbidden(text="login nonce mismatch")
         token = secrets.token_urlsafe(32)
-        ts = now_ts()
-        await self.db.conn.execute(
-            """
-            INSERT INTO web_sessions (session_token_hash, chat_id, created_at, expires_at, last_seen_at, ip, user_agent)
-            VALUES (?,?,?,?,?,?,?)
-            """,
-            (
-                _sha256(token),
-                int(row["chat_id"] or 0),
-                ts,
-                ts + self.config.web.session_days * 86400,
-                ts,
-                request.remote or "",
-                request.headers.get("User-Agent", "")[:500],
-            ),
-        )
-        await self.db.conn.execute(
-            "UPDATE web_login_requests SET status='consumed' WHERE request_uuid=?", (req_uuid,)
-        )
-        await self.db.conn.commit()
+        # Claim before issuing the cookie, atomically with its session row.
+        # Two simultaneous consume requests must never mint two sessions from
+        # the same Telegram approval, nor succeed after its TTL has elapsed.
+        async with self.db.write_transaction(label="consume-web-login-request") as conn:
+            # Acquiring the global writer can take longer than the login TTL.
+            # Both the claim condition and session lifetime use the real claim time.
+            ts = now_ts()
+            changed = await conn.execute(
+                "UPDATE web_login_requests SET status='consumed' "
+                "WHERE request_uuid=? AND status='approved' AND expires_at>?",
+                (req_uuid, ts),
+            )
+            if changed.rowcount != 1:
+                raise web.HTTPForbidden(text="login request is not approved")
+            await conn.execute(
+                """
+                INSERT INTO web_sessions (session_token_hash, chat_id, created_at, expires_at, last_seen_at, ip, user_agent)
+                VALUES (?,?,?,?,?,?,?)
+                """,
+                (
+                    _sha256(token), int(row["chat_id"] or 0), ts,
+                    ts + self.config.web.session_days * 86400, ts,
+                    request.remote or "", request.headers.get("User-Agent", "")[:500],
+                ),
+            )
         await self.audit("web.session.created", actor="web", chat_id=int(row["chat_id"] or 0), detail={})
         return token
 
@@ -595,16 +613,21 @@ class WebAdminAuthMixin:
         row = await cur.fetchone()
         if not row or int(row["revoked_at"] or 0) > 0:
             return None
-        if int(row["expires_at"] or 0) < now_ts():
+        if int(row["expires_at"] or 0) <= now_ts():
             return None
         ts = now_ts()
         last_seen = int(row["last_seen_at"] or 0) if "last_seen_at" in row.keys() else 0
         if ts - last_seen >= 300:
-            await self.db.conn.execute(
-                "UPDATE web_sessions SET last_seen_at=? WHERE session_token_hash=?",
-                (ts, token_hash),
+            changed = await self.db.conn.execute(
+                "UPDATE web_sessions SET last_seen_at=? "
+                "WHERE session_token_hash=? AND revoked_at=0 AND expires_at>?",
+                (ts, token_hash, ts),
             )
             await self.db.conn.commit()
+            # The cookie may have been revoked while the stale read waited to
+            # refresh last_seen. Do not authorize from that earlier snapshot.
+            if changed.rowcount != 1:
+                return None
         return WebSession(chat_id=int(row["chat_id"] or 0), expires_at=int(row["expires_at"] or 0))
 
     async def revoke_session(self, token: str) -> None:

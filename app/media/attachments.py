@@ -210,27 +210,30 @@ def build_user_text_with_media(text: str, media: list[InboundMedia]) -> str:
 
 
 def build_llm_media_text_summary(media: list[InboundMedia]) -> str:
-    """给模型看的附件说明：保留必要语义，不暴露本地路径。"""
+    """给模型看的附件说明：已保存的文件可通过其真实本机路径读取。"""
     if not media:
         return ""
     lines = ["[用户附件说明]"]
     for i, m in enumerate(media, 1):
         name = m.file_name or f"attachment_{i}"
+        # This is a real server-side file, not the browser's filename or a public URL.
+        # Failed/skipped downloads must never advertise a path as usable.
+        location = f"；本机路径: {m.path}" if m.path and not m.error and not m.skipped else ""
         if m.kind in {"image", "sticker"} and m.is_image_block:
             lines.append(
-                f"{i}. 图片：{name}；MIME: {m.mime_type or 'image/*'}；大小: {human_size(m.size)}。"
+                f"{i}. 图片：{name}；MIME: {m.mime_type or 'image/*'}；大小: {human_size(m.size)}{location}。"
                 "该图片已经作为多模态视觉输入随本消息提供，请直接阅读图片内容；不要声称缺少 OCR 工具。"
             )
         elif m.kind == "audio" and m.transcript:
-            lines.append(f"{i}. 音频：{name}；已转写如下。")
+            lines.append(f"{i}. 音频：{name}{location}；已转写如下。需要原始音频时可读取本机路径，转写不等于音频理解。")
             lines.append(f"[音频转写 {i} · 开始]\n{m.transcript}\n[音频转写 {i} · 结束]")
         elif m.kind == "file" and m.text_excerpt:
-            lines.append(f"{i}. 文本附件：{name}；提取文本如下。")
+            lines.append(f"{i}. 文本附件：{name}{location}；提取文本如下。提取内容可能截断；需要全文时可读取本机路径。")
             lines.append(f"[附件文本提取 {i} · 开始]\n{m.text_excerpt}\n[附件文本提取 {i} · 结束]")
         elif m.error:
             lines.append(f"{i}. 附件：{name}；状态：{m.error}")
         else:
-            lines.append(f"{i}. 附件：{name}；类型: {_label(m)}；MIME: {m.mime_type or 'unknown'}；大小: {human_size(m.size)}。")
+            lines.append(f"{i}. 附件：{name}；类型: {_label(m)}；MIME: {m.mime_type or 'unknown'}；大小: {human_size(m.size)}{location}。" + ("内容未内联；如需分析请读取本机路径，不要猜测文件内容。" if location else "未提供可读取的本机文件。"))
     lines.append("[/用户附件说明]")
     return "\n".join(lines)
 

@@ -82,19 +82,20 @@ test('desktop hides the duplicate usage trigger while phones retain their existi
   const css = postcss.parse(source);
   const hidden = [];
   css.walkRules(rule => {
-    if (!rule.selector.includes('.context-usage-trigger')) return;
+    if (rule.selector !== '.composer-usage-summary') return;
     rule.walkDecls('display', decl => {
       if (decl.value === 'none') hidden.push({selector: rule.selector, media: rule.parent.params});
     });
   });
-  assert.deepEqual(hidden, [{selector: '.composer-status :deep(.context-usage-trigger)', media: '(min-width: 761px)'}]);
+  assert.deepEqual(hidden, [{selector: '.composer-usage-summary', media: undefined}]);
   assert.equal(rules('./ContextUsageMeter.vue', '.context-usage-trigger').display, 'inline-flex');
   assert.notEqual(rules('./ConsoleComposer.vue', '.run-config-chip-meta').display, 'none');
   let phonePlacement;
   css.walkRules(rule => {
-    if (rule.selector === '.composer-toolbar :deep(.context-usage-trigger)' && rule.parent.params === '(max-width: 760px)') phonePlacement = rule.toString();
+    if (rule.selector === '.composer-usage-summary' && rule.parent.params === '(max-width: 760px)') phonePlacement = rule.toString();
   });
-  assert.match(phonePlacement, /position: absolute; left: 50%; bottom: -34px/);
+  assert.match(phonePlacement, /display: flex; flex-wrap: wrap/);
+  assert.doesNotMatch(phonePlacement, /position: absolute/);
 });
 
 test('compact title retains path and numeric statistics, with one live context owner in composer', () => {

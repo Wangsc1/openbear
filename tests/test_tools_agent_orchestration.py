@@ -13,11 +13,11 @@ from app.db.dao import MessageDAO
 from app.db.engine import DB
 from app.llm.base import AgentResult
 from app.llm.events import ToolCall, Usage
-from app.rath.builtin_workflows import ensure_builtin_workflows
-from app.rath.dao import RathDAO
-from app.rath.manager import RathTaskManager
-from app.rath.schemas import RathAgentDef
-from app.rath.single_agent import SingleAgentWorkflowRunner, agent_to_snapshot
+from app.agents.profiles import ensure_builtin_workflows
+from app.agents.dao import AgentDAO
+from app.agents.control import AgentControlService
+from app.agents.schemas import AgentDefinition
+from app.agents.execution import AgentExecutor, agent_to_snapshot
 from app.tools.agents import (
     AgentTools,
     _agent_progress_signature,
@@ -70,7 +70,7 @@ async def test_tool_registry_injects_runtime_context():
 async def agent_tool_env(tmp_path):
     db = DB(str(tmp_path / "agents.db"))
     await db.connect()
-    dao = RathDAO(db)
+    dao = AgentDAO(db)
     await ensure_builtin_workflows(dao)
     try:
         yield dao
@@ -173,7 +173,7 @@ class _FakeConfig:
 
     models = _Models()
     tools = _Tools()
-    rath = _Rath()
+    agents = _Rath()
     memory = _Memory()
 
 
@@ -279,7 +279,7 @@ async def test_agent_accounting_snapshots_are_absolute_monotonic_and_keep_only_d
     tools = AgentTools(
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(),
         model_selection=_FakeSelection(),
         registry=ToolRegistry(),
@@ -353,7 +353,7 @@ async def test_detached_agent_progress_immediately_carries_post_accounting_ledge
 
     backend = BlockingUsageBackend()
     registry = ToolRegistry()
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
     register_agent_tools(
         registry,
         config=_FakeConfig(),
@@ -422,7 +422,7 @@ async def test_agent_long_result_is_returned_verbatim_without_summary_model(agen
     tools = AgentTools(
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(backend),
         model_selection=_FakeSelection(),
         registry=ToolRegistry(),
@@ -449,7 +449,7 @@ async def test_agent_registry_exposes_only_controller_agent_tools(agent_tool_env
         reg,
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(),
         model_selection=_FakeSelection(),
     )
@@ -561,8 +561,8 @@ def _agent_message_plan(step_id: str = "s1") -> dict:
     }
 
 
-def _message_tools(dao: RathDAO):
-    manager = RathTaskManager(dao)
+def _message_tools(dao: AgentDAO):
+    manager = AgentControlService(dao)
     registry = ToolRegistry()
     tools = AgentTools(
         config=_FakeConfig(),
@@ -581,7 +581,7 @@ def _message_tools(dao: RathDAO):
     return tools, manager, registry
 
 
-async def _approved_message_task(dao: RathDAO, tools: AgentTools, *, title: str) -> str:
+async def _approved_message_task(dao: AgentDAO, tools: AgentTools, *, title: str) -> str:
     workflow = await dao.workflow_by_slug("single-agent")
     assert workflow is not None
     task_uuid = await dao.create_task(
@@ -623,7 +623,7 @@ async def _dispatch_agent_message(registry: ToolRegistry, task_uuid: str, expect
     return json.loads(raw)
 
 
-async def _control_count(dao: RathDAO, task_uuid: str) -> int:
+async def _control_count(dao: AgentDAO, task_uuid: str) -> int:
     cur = await dao.db.conn.execute(
         "SELECT COUNT(*) AS n FROM rath_task_controls WHERE task_uuid=?",
         (task_uuid,),
@@ -645,7 +645,7 @@ class _PlanEnabledConfig(_FakeConfig):
         agent_plan_enabled = True
         plan_control_call_limit = 100
 
-    rath = _Rath()
+    agents = _Rath()
 
 
 async def test_agent_plan_mode_defaults_direct_and_managed_requires_controller_runtime(agent_tool_env):
@@ -661,7 +661,7 @@ async def test_agent_plan_mode_defaults_direct_and_managed_requires_controller_r
         reg,
         config=_PlanEnabledConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(backend),
         model_selection=_FakeSelection(),
     )
@@ -1039,7 +1039,7 @@ async def test_agent_message_queue_and_replan_approval_are_linearized(agent_tool
 
 async def test_agent_message_rejects_blocked_plan_until_controller_requests_replan(agent_tool_env):
     dao = agent_tool_env
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
     registry = ToolRegistry()
     tools = AgentTools(
         config=_FakeConfig(),
@@ -1173,7 +1173,7 @@ async def test_blocked_plan_recovers_through_real_agent_message_ack_replan_and_f
     workflow = await dao.workflow_by_slug("single-agent")
     assert workflow is not None
     backend = _BlockedRecoveryBackend()
-    manager = RathTaskManager(dao, max_concurrent_tasks=1)
+    manager = AgentControlService(dao, max_concurrent_tasks=1)
     registry = ToolRegistry()
     register_agent_tools(
         registry,
@@ -1185,7 +1185,7 @@ async def test_blocked_plan_recovers_through_real_agent_message_ack_replan_and_f
     )
     coordinator = manager.plan_coordinator
     assert coordinator is not None
-    agent = RathAgentDef(
+    agent = AgentDefinition(
         agent_key="blocked-recovery-worker",
         name="Blocked recovery worker",
         description="Exercise the complete blocked recovery protocol",
@@ -1206,7 +1206,7 @@ async def test_blocked_plan_recovers_through_real_agent_message_ack_replan_and_f
         parent_session_uuid="blocked-full-session",
         status="queued",
     )
-    runner = SingleAgentWorkflowRunner(
+    runner = AgentExecutor(
         dao,
         task_uuid,
         agent=agent,
@@ -1310,7 +1310,7 @@ async def test_blocked_plan_recovers_through_real_agent_message_ack_replan_and_f
         if message_task is not None and not message_task.done():
             message_task.cancel()
             await asyncio.gather(message_task, return_exceptions=True)
-        running = list(manager._runs.values())
+        running = manager.scheduler.tasks(kind="agent")
         for task in running:
             task.cancel()
         if running:
@@ -1324,7 +1324,7 @@ async def test_agent_wait_delegates_to_main_controller_runtime(agent_tool_env):
         reg,
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(),
         model_selection=_FakeSelection(),
     )
@@ -1362,7 +1362,7 @@ async def test_agent_wait_event_only_has_no_timer_and_is_main_only(agent_tool_en
         reg,
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(),
         model_selection=_FakeSelection(),
     )
@@ -1396,7 +1396,7 @@ async def test_agent_launches_general_worker_with_dynamic_prompt(agent_tool_env)
         reg,
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(backend),
         model_selection=_FakeSelection(),
     )
@@ -1443,7 +1443,7 @@ async def test_agent_attachments_materialize_full_bodies_and_grant_read(agent_to
         reg,
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(backend),
         model_selection=_FakeSelection(),
         workspace_dir=workspace_dir,
@@ -1500,7 +1500,7 @@ async def test_agent_attachments_reject_secrets_and_missing_material(agent_tool_
         reg,
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(),
         model_selection=_FakeSelection(),
         workspace_dir=str(tmp_path / "ws"),
@@ -1551,7 +1551,7 @@ async def test_agent_launch_prepends_active_agent_prompt_template(agent_tool_env
         reg,
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(backend),
         model_selection=_FakeSelection(),
         workspace_dir=workspace_dir,
@@ -1590,7 +1590,7 @@ async def test_agent_child_inherits_parent_task_root_turn_lineage(agent_tool_env
         reg,
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(),
         model_selection=_FakeSelection(),
     )
@@ -1626,7 +1626,7 @@ async def test_agent_requires_explicit_tools_argument(agent_tool_env):
         reg,
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(),
         model_selection=_FakeSelection(),
     )
@@ -1650,7 +1650,7 @@ async def test_agent_rejects_unavailable_requested_tool(agent_tool_env):
         reg,
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(),
         model_selection=_FakeSelection(),
     )
@@ -1681,7 +1681,7 @@ async def test_agent_rejects_memory_and_mcp_even_when_registered_agent_scoped(ag
         reg,
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(),
         model_selection=_FakeSelection(),
     )
@@ -1725,7 +1725,7 @@ async def test_agent_uses_web_preset_and_agent_scoped_tools(agent_tool_env):
         reg,
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(backend),
         model_selection=_FakeSelection(),
     )
@@ -1769,7 +1769,7 @@ async def test_agent_requested_tools_cannot_exceed_preset_allowlist(agent_tool_e
         reg,
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(),
         model_selection=_FakeSelection(),
     )
@@ -1833,7 +1833,7 @@ async def test_agent_message_does_not_resurrect_terminal_task(agent_tool_env):
         reg,
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(backend),
         model_selection=_FakeSelection(),
     )
@@ -1916,7 +1916,7 @@ async def test_concurrent_agent_messages_only_one_claims_continuation(agent_tool
 
     backend = BlockingBackend()
     reg = ToolRegistry()
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
     register_agent_tools(
         reg,
         config=_FakeConfig(),
@@ -1977,7 +1977,7 @@ async def test_agent_message_steers_running_task(agent_tool_env):
         status="running",
     )
     reg = ToolRegistry()
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
     register_agent_tools(
         reg,
         config=_FakeConfig(),
@@ -2017,7 +2017,7 @@ async def test_rath_manager_rejects_steer_for_waiting_openbear_control(agent_too
         parent_session_uuid="openbear-session-1",
         status="needs_openbear_control",
     )
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
 
     with pytest.raises(RuntimeError, match="AgentMessage"):
         await manager.steer(task_uuid, "继续")
@@ -2036,7 +2036,7 @@ async def test_agent_message_steers_paused_task(agent_tool_env):
         status="paused",
     )
     reg = ToolRegistry()
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
     register_agent_tools(
         reg,
         config=_FakeConfig(),
@@ -2077,7 +2077,7 @@ async def test_agent_stop_stops_running_task(agent_tool_env):
         status="running",
     )
     reg = ToolRegistry()
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
     register_agent_tools(
         reg,
         config=_FakeConfig(),
@@ -2112,7 +2112,7 @@ async def test_agent_uses_conversation_agent_run_config_and_freezes_snapshot(age
         reg,
         config=_FakeConfig(),
         dao=dao,
-        manager=RathTaskManager(dao),
+        manager=AgentControlService(dao),
         llm_factory=_FakeFactory(backend),
         model_selection=_FakeSelection(),
     )
@@ -2159,7 +2159,7 @@ async def test_agent_continue_keeps_frozen_runtime_after_conversation_change(age
     dao = agent_tool_env
     backend = _RecordingBackend()
     reg = ToolRegistry()
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
     register_agent_tools(
         reg,
         config=_FakeConfig(),
@@ -2224,7 +2224,7 @@ async def test_agent_continue_keeps_frozen_runtime_after_conversation_change(age
 
 async def test_agent_inheritance_uses_durable_plan_facts_and_enforces_scope(agent_tool_env):
     dao = agent_tool_env
-    manager = RathTaskManager(dao)
+    manager = AgentControlService(dao)
     tools = AgentTools(
         config=_FakeConfig(),
         dao=dao,

@@ -15,7 +15,7 @@ async function rowHtml(row) {
   const icon = {render() { return Vue.h('i', this.$slots.default?.()); }};
   const animated = {props: ['text'], render() {return Vue.h('span', this.text);}};
   return renderToString(Vue.createSSRApp({render, components: {ElIcon: icon, InfoFilled: icon, StarFilled: icon, AnimatedConversationTitle: animated},
-    setup: () => ({row, activeConversationUuid: 'active', selectedFolderId: 'project',
+    setup: () => ({row, activeConversationRow: row.conversationUuid === 'active' ? row : null, selectedFolderId: 'project',
       running: row => Boolean(row.running || row.status === 'running'), rowLoading: () => false, isTitleGenerating: () => false, isExpanded: () => true,
       liveConversationTitle: row => row.title || '新会话',
       activityLabel, activateRow() {}, openMenu() {}, locateAndOpen() {},

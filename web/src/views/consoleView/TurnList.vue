@@ -1,5 +1,6 @@
 <script setup>
-import {Check, CopyDocument, RefreshLeft, Link} from "@element-plus/icons-vue";
+import {Check, CopyDocument, Link, Hide, Clock, Timer, Top, Bottom, Coin} from "@element-plus/icons-vue";
+import {Undo2} from "@lucide/vue";
 import {ElMessage} from "element-plus";
 import {ref} from "vue";
 import {copyTextToClipboard} from "../../utils/clipboard.js";
@@ -10,17 +11,18 @@ import {
 	eventUpdatedAtMs as projectedEventUpdatedAtMs,
 } from "../../timelineProjection.js";
 import ConsoleMarkdown from "./ConsoleMarkdown.vue";
+import ReplyMarkdownShare from "./ReplyMarkdownShare.vue";
+import {replyMarkdownText} from "./replyMarkdownShare.js";
 import TurnEvent from "./TurnEvent.vue";
 import ConversationWorkBlock from './ConversationWorkBlock.vue';
 import ConversationProcessEvent from './ConversationProcessEvent.vue';
 import ConversationRetryEvent from './ConversationRetryEvent.vue';
 import {isInlineProcess} from './conversationWork.js';
 import MessageVisibilityAction from './MessageVisibilityAction.vue';
-import {vMessageLongPress} from './messageLongPress.js';
 import {useMessageVisibility, visibilitySelectionClasses, selectVisibilityRow} from './messageVisibility.js';
 const visibility = useMessageVisibility();
 import {conversationTimelineEntries, shouldRenderAssistantDivider} from "./conversationTimeline.js";
-import {eventPrimaryToolName, isAgentEvent, tokenLine, tokenPartsFromStats} from "./display.js";
+import {eventPrimaryToolName, isAgentEvent, tokenLine, tokenPartsFromStats, fmtTokens, cachePct} from "./display.js";
 
 const props = defineProps({
 	turns: {type: Array, default: () => []},
@@ -260,6 +262,15 @@ function assistantTurnRawContent(turn) {
 		.join("\n\n");
 }
 
+function assistantTurnShareContent(turn) {
+	return replyMarkdownText(conversationEvents(turn));
+}
+
+function assistantVisibilityTarget(turn) {
+	const targets = visibility.assistantTargets?.(turn) || [];
+	return targets.findLast(event => event.kind === 'answer' && event.message?.content) || targets.at(-1) || null;
+}
+
 function assistantMetaVisible(turn, turnIndex) {
 	if (!hasAssistantContent(turn) && displayEvents(turn).some(visibility.isHidden)) return false;
 	if (props.running && turnIndex === props.turns.length - 1) return false;
@@ -297,7 +308,7 @@ async function copyMessage(content, key) {
 <template>
 	<template v-for="(turn, turnIndex) in props.turns" :key="turn.id">
 	<section v-if="(turn.user && !turn.user.syntheticPlaceholder && !visibility.isHidden(turn.user)) || hasAssistantContent(turn) || assistantMetaVisible(turn, turnIndex)" class="turn-block" :data-turn-index="turnIndex">
-		<div v-if="turn.user && !turn.user.syntheticPlaceholder && !visibility.isHidden(turn.user)" class="timed-row timed-row-user visibility-hover-surface" v-message-long-press="{target: turn.user, turn, visibility}" :class="[visibilitySelectionClasses(turn.user, visibility), {'visibility-target': visibility.canTarget(turn.user)}]" @click.capture="selectVisibilityRow($event, turn.user, visibility)">
+		<div v-if="turn.user && !turn.user.syntheticPlaceholder && !visibility.isHidden(turn.user)" class="timed-row timed-row-user visibility-hover-surface" :data-search-op-id="turn.user.opId || turn.user.id" :class="visibilitySelectionClasses(turn.user, visibility)" @click.capture="selectVisibilityRow($event, turn.user, visibility)">
 			<div class="user-row">
 				<div class="user-message-group">
 					<article class="message-user">
@@ -321,13 +332,16 @@ async function copyMessage(content, key) {
 					</div>
 				</article>
 				<div class="user-message-meta">
-					<MessageVisibilityAction :target="turn.user" desktop-placement="footer" :turn="turn" mobile-long-press/>
+					<MessageVisibilityAction :target="turn.user" desktop-placement="footer" :turn="turn" mobile-selection-only/>
 					<el-tooltip v-if="turn.user.content" content="复制消息" placement="bottom" :show-after="350">
 						<button type="button" class="message-icon-action" aria-label="复制消息"
 						        @click="copyMessage(turn.user.content, `user-${turn.user.turnUuid || turn.id}`)">
 							<el-icon><Check v-if="copiedMessageKey === `user-${turn.user.turnUuid || turn.id}`"/><CopyDocument v-else/></el-icon>
 						</button>
 					</el-tooltip>
+					<button v-if="!visibility.selecting.value && visibility.canTarget(turn.user)" type="button"
+					        class="message-icon-action message-hide-action message-visibility-action" aria-label="隐藏消息" aria-haspopup="dialog"
+					        :disabled="visibility.busy.value" @click.stop="visibility.openMobileMenu(turn.user, turn)"><el-icon><Hide/></el-icon></button>
 					<el-tooltip v-if="canDeleteTurn(turn)" content="引用本轮问答" placement="bottom" :show-after="350">
 						<button type="button" class="message-icon-action" aria-label="引用本轮问答" @click="insertTurnReference(turn)"><el-icon><Link/></el-icon></button>
 					</el-tooltip>
@@ -336,7 +350,7 @@ async function copyMessage(content, key) {
 						        :disabled="props.running || Boolean(props.deletingTurnUuid)"
 						        aria-label="从此处重来"
 						        @click="deleteTurnSuffix(turn)">
-							<el-icon><RefreshLeft/></el-icon>
+							<el-icon><Undo2 size="1em" :stroke-width="1.8" aria-hidden="true"/></el-icon>
 						</button>
 					</el-tooltip>
 					<time v-if="userTimeMs(turn)" class="user-message-time" :title="formatFullTime(userTimeMs(turn))">{{ timeBadge(userTimeMs(turn)) }}</time>
@@ -350,7 +364,7 @@ async function copyMessage(content, key) {
 			<article class="assistant-card">
 				<ConversationWorkBlock :turn="turn" :entries="conversationEvents(turn)" :running="turnWorking(turn, turnIndex)" :duration-ms="assistantDurationMs(turn)">
 				<template #default="{entry, conversationIndex}">
-					<div class="timed-row timed-row-assistant visibility-hover-surface" v-message-long-press="{target: entry.event, turn, visibility}" :class="[visibilitySelectionClasses(entry.event, visibility), {'visibility-target': visibility.canTarget(entry.event)}]" @click.capture="selectVisibilityRow($event, entry.event, visibility)">
+					<div class="timed-row timed-row-assistant visibility-hover-surface" :data-search-op-id="(entry.part !== 'reasoning' && entry.event.kind === 'answer') || entry.event.kind === 'live_status' ? entry.event.id : undefined" :class="[visibilitySelectionClasses(entry.event, visibility), {'has-inline-retry': entry.event.kind === 'model_retry'}]" @click.capture="selectVisibilityRow($event, entry.event, visibility)">
 						<span v-if="eventTimeMs(entry.event) && showEventTimeBadge(turn, turnIndex, conversationIndex)" class="time-float time-float-left" :title="formatFullTime(eventTimeMs(entry.event))">{{ timeBadge(eventTimeMs(entry.event), durationMsForEvent(entry.event)) }}</span>
 						<ConversationRetryEvent v-if="entry.event.kind === 'model_retry'" :event="entry.event" :retry-action-pending="props.retryActionPending" @cancel-retry="emit('cancel-retry', $event)" @retry-now="emit('retry-now', $event)"/>
 						<ConversationProcessEvent v-else-if="useProcessRow(entry)" :event="entry.event" :part="entry.part || ''" :conversation-uuid="props.conversationUuid" :active-index="props.activeToolResultIndex(entry.event)" @select-tab="emitSelectToolResult(entry.event, $event)"/>
@@ -374,19 +388,27 @@ async function copyMessage(content, key) {
 						@cancel-retry="emit('cancel-retry', $event)"
 						@retry-now="emit('retry-now', $event)"
 					/>
-					<MessageVisibilityAction :target="entry.event" desktop-placement="gutter" :turn="turn" mobile-long-press/>
+					<MessageVisibilityAction :target="entry.event" desktop-placement="gutter" :turn="turn" mobile-selection-only/>
 					</div>
 				</template>
 				</ConversationWorkBlock>
 				<div v-if="assistantMetaVisible(turn, turnIndex)" class="assistant-message-meta">
-					<time v-if="assistantTimeMs(turn) || assistantDurationMs(turn)" class="assistant-message-time" :title="formatFullTime(assistantTimeMs(turn))">{{ timeBadge(assistantTimeMs(turn), assistantDurationMs(turn)) }}</time>
-					<span v-if="hasTurnTokens(turn)" class="turn-token-usage" :title="`本轮 Tokens：${turnTokenLine(turn)}`">{{ assistantTimeMs(turn) || assistantDurationMs(turn) ? '· ' : '' }}{{ turnTokenLine(turn) }}</span>
+					<span class="assistant-meta-details">
+						<time v-if="assistantTimeMs(turn) || assistantDurationMs(turn)" class="assistant-message-time" :title="formatFullTime(assistantTimeMs(turn))"><span v-if="assistantTimeMs(turn)" class="footer-metric" title="回复时间"><Clock class="footer-meta-icon" aria-hidden="true"/>{{ formatHoverTime(assistantTimeMs(turn)) }}</span><span v-if="assistantTimeMs(turn) && assistantDurationMs(turn)"> · </span><span v-if="assistantDurationMs(turn)" class="footer-metric" title="耗时"><Timer class="footer-meta-icon" aria-hidden="true"/>{{ formatDuration(assistantDurationMs(turn)) }}</span></time>
+						<span v-if="hasTurnTokens(turn)" class="turn-token-usage" :title="`本轮 Tokens：${turnTokenLine(turn)}`"><span v-if="assistantTimeMs(turn) || assistantDurationMs(turn)" class="assistant-meta-separator">· </span><span class="footer-metric" :aria-label="`输入 Tokens：${fmtTokens(turnTokenParts(turn).input)}`"><Top class="footer-meta-icon" aria-hidden="true"/><span class="footer-token-arrow">↑</span>{{ fmtTokens(turnTokenParts(turn).input) }}</span><span class="footer-metric-separator"> · </span><span class="footer-metric" :aria-label="`输出 Tokens：${fmtTokens(turnTokenParts(turn).output)}`"><Bottom class="footer-meta-icon" aria-hidden="true"/><span class="footer-token-arrow">↓</span>{{ fmtTokens(turnTokenParts(turn).output) }}</span><span class="footer-metric-separator"> · </span><span class="footer-metric" :aria-label="`缓存 Tokens：${fmtTokens(turnTokenParts(turn).cache)}，命中率 ${cachePct(turnTokenParts(turn).cache, turnTokenParts(turn).input)}`"><Coin class="footer-meta-icon" aria-hidden="true"/>缓存 {{ fmtTokens(turnTokenParts(turn).cache) }}（{{ cachePct(turnTokenParts(turn).cache, turnTokenParts(turn).input) }}）</span></span>
+					</span>
+					<span class="message-footer-actions">
 					<el-tooltip v-if="assistantTurnRawContent(turn)" content="复制本轮回复" placement="bottom" :show-after="350">
 						<button type="button" class="message-icon-action" aria-label="复制消息"
 						        @click="copyMessage(assistantTurnRawContent(turn), `assistant-turn-${turn.turnUuid || turn.user?.turnUuid || turn.id}`)">
 							<el-icon><Check v-if="copiedMessageKey === `assistant-turn-${turn.turnUuid || turn.user?.turnUuid || turn.id}`"/><CopyDocument v-else/></el-icon>
 						</button>
 					</el-tooltip>
+					<ReplyMarkdownShare v-if="!visibility.selecting.value && assistantTurnShareContent(turn)" :content="assistantTurnShareContent(turn)"/>
+					<button v-if="!visibility.selecting.value && assistantVisibilityTarget(turn)" type="button"
+					        class="message-icon-action message-hide-action message-visibility-action" aria-label="隐藏回复" aria-haspopup="dialog"
+					        :disabled="visibility.busy.value" @click.stop="visibility.openMobileMenu(assistantVisibilityTarget(turn), turn)"><el-icon><Hide/></el-icon></button>
+					</span>
 				</div>
 			</article>
 		</div>
@@ -494,6 +516,9 @@ async function copyMessage(content, key) {
 	transition: color .14s ease, background .14s ease;
 }
 
+.message-hide-action { display: none; }
+.message-footer-actions { display: inline-flex; align-items: center; gap: .34rem; flex: none; }
+
 .message-icon-action .el-icon {
 	font-size: 12px;
 }
@@ -596,6 +621,9 @@ async function copyMessage(content, key) {
 	white-space: nowrap;
 }
 
+.assistant-meta-details { display: contents; }
+.footer-meta-icon { display: none; }
+
 .assistant-message-time,
 .turn-token-usage {
 	color: var(--ob-text-muted);
@@ -659,16 +687,24 @@ async function copyMessage(content, key) {
 }
 
 @media (max-width: 760px) {
-	/* Identify the long-pressed row without changing its width or flow. */
+	.message-hide-action { display: inline-grid; width: 32px; height: 32px; flex-basis: 32px; }
+	.assistant-message-meta { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; white-space: normal; }
+	.assistant-meta-details { display: flex; min-width: 0; flex-direction: column; gap: 3px; line-height: 1.45; }
+	.assistant-message-time { white-space: nowrap; }
+	.assistant-meta-separator, .footer-token-arrow, .footer-metric-separator { display: none; }
+	.footer-metric { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; vertical-align: middle; }
+	.footer-meta-icon { display: block; width: 11px; height: 11px; flex: 0 0 11px; opacity: .8; }
+	.turn-token-usage { display: flex; flex-wrap: wrap; gap: 3px 8px; }
+	.message-footer-actions { flex-wrap: nowrap; align-self: center; gap: 4px; }
+	.message-footer-actions .message-icon-action { width: 32px; height: 32px; flex-basis: 32px; }
+	/* Identify the menu's target without changing its width or flow. */
 	.visibility-menu-target { border-radius: 10px; background: rgb(var(--ob-surface-soft-rgb) / 0.08); box-shadow: 0 0 0 1px rgb(var(--ob-shadow-rgb) / 0.14); }
 	/* Normal reading uses the full width; the check rail exists only in multi-select. */
 	.timed-row.visibility-selectable { box-sizing: border-box; padding-left: 32px; }
-	.visibility-target { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
-	.visibility-target :deep(a), .visibility-target :deep(input), .visibility-target :deep(textarea) { -webkit-touch-callout: default; -webkit-user-select: text; user-select: text; }
 	/* Compact retry summaries have their own line height: align both controls in
 	   the same centered row instead of reusing the prose baseline offset. */
-	.timed-row-assistant.visibility-selectable:has(> .retry-inline-event) { display: flex; align-items: center; min-height: 44px; }
-	.timed-row-assistant.visibility-selectable:has(> .retry-inline-event) > :deep(.message-visibility-action) { top: 50%; transform: translateY(-50%); }
+	.timed-row-assistant.visibility-selectable.has-inline-retry { display: flex; align-items: center; min-height: 44px; }
+	.timed-row-assistant.visibility-selectable.has-inline-retry > :deep(.message-visibility-action) { top: 50%; transform: translateY(-50%); }
 	.timed-row-assistant.visibility-selectable > :deep(.retry-inline-event) { width: 100%; min-width: 0; }
 	.visibility-selected::after { content: ''; position: absolute; left: 9px; top: 34px; bottom: 4px; width: 2px; border-radius: 2px; background: var(--el-border-color); pointer-events: none; }
 	.visibility-selectable { cursor: pointer; -webkit-tap-highlight-color: transparent; }

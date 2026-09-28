@@ -45,6 +45,21 @@ CREATE INDEX IF NOT EXISTS idx_context_execution_owner_seq ON context_execution_
 CREATE INDEX IF NOT EXISTS idx_context_execution_task ON context_execution_events(task_uuid,seq);
 CREATE INDEX IF NOT EXISTS idx_context_execution_message ON context_execution_events(message_id);
 
+-- Complete private editor drafts; original conversations are never overwritten.
+CREATE TABLE IF NOT EXISTS context_editor_drafts (
+  conversation_uuid TEXT PRIMARY KEY REFERENCES web_conversations(conversation_uuid) ON DELETE CASCADE,
+  revision INTEGER NOT NULL DEFAULT 1,
+  document_json TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS context_editor_branches (
+  conversation_uuid TEXT PRIMARY KEY REFERENCES web_conversations(conversation_uuid) ON DELETE CASCADE,
+  source_conversation_uuid TEXT NOT NULL,
+  settings_json TEXT NOT NULL,
+  document_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
 -- Local maintenance telemetry: no model/tool call or billing entry is created.
 CREATE TABLE IF NOT EXISTS context_window_rotations (
   rotation_id TEXT PRIMARY KEY,

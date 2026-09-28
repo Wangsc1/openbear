@@ -223,6 +223,7 @@ class OpenAIResponsesBackend(LLMBackend):
         url = f"{self._base}/responses"
 
         calls: list[ToolCall] = []
+        encrypted_reasoning: dict[str, str] = {}
         final_usage: Usage | None = None
         provider_billing: dict[str, Any] = {}
         stop = "stop"
@@ -284,9 +285,22 @@ class OpenAIResponsesBackend(LLMBackend):
                 yield StreamEvent(kind="content", text=data.get("delta", ""))
             elif t == "response.reasoning_summary_text.delta":
                 yield StreamEvent(kind="reasoning", text=data.get("delta", ""))
-            elif t == "response.output_item.done":
+            elif t in {"response.output_item.added", "response.output_item.done"}:
                 item = data.get("item") or {}
                 if isinstance(item, dict) and item:
+                    encrypted = item.get("encrypted_content")
+                    if item.get("type") == "reasoning" and isinstance(encrypted, str) and encrypted:
+                        # Added/done carry complete opaque values, not deltas.
+                        # Keep each item's latest value; this display-only event
+                        # must not enter readable reasoning or model history.
+                        key = str(item.get("id") or data.get("output_index", 0))
+                        encrypted_reasoning[key] = encrypted
+                        yield StreamEvent(
+                            kind="encrypted_reasoning",
+                            text="\n\n".join(encrypted_reasoning.values()),
+                        )
+                    if t != "response.output_item.done":
+                        continue
                     if opts.get("native_continuation"):
                         yield StreamEvent(kind="native_output_item", native_output_items=[item])
                     if item.get("type") == "function_call":

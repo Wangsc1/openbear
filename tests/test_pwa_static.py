@@ -20,6 +20,7 @@ async def pwa_web(tmp_path):
     dist = tmp_path / "dist"
     dist.mkdir()
     shutil.copy2(ROOT / "web/public/manifest.webmanifest", dist)
+    shutil.copy2(ROOT / "web/public/openbear-push-sw.js", dist)
     shutil.copytree(ROOT / "web/public/icons", dist / "icons")
     (dist / "index.html").write_text("<html>test console</html>")
     (dist / "build-info.json").write_text('{"private-root-file":true}')
