@@ -5,6 +5,13 @@ import fs from 'node:fs';
 const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const css = fs.readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 
+test('both chat samplers follow the chat background without changing geometry', () => {
+  const rule = css.match(/body:has\(\.app-shell\.is-console\)\s*>\s*\.safari-tint\s*\{([^}]+)\}/)?.[1];
+  assert.ok(rule);
+  assert.match(rule, /background:\s*var\(--ob-chat-bg\)/);
+  assert.doesNotMatch(rule, /height:|top:|bottom:|z-index:|filter:/);
+});
+
 test('initial browser chrome contract matches verified calculator pattern', () => {
   assert.match(html, /meta name="theme-color" content="#f8f8f8"/);
   assert.match(html, /meta name="color-scheme" content="light"/);

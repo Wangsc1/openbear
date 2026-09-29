@@ -34,6 +34,10 @@ html, body { transition: none !important; }
   height: max(12px, env(safe-area-inset-top, 0px));
 }
 .safari-tint-bottom { bottom: -8px; }
+/* Match both browser edges to the active chat surface, not the darker root. */
+body:has(.app-shell.is-console) > .safari-tint {
+  background: var(--ob-chat-bg);
+}
 
 /* macOS 风格滚动条 */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
