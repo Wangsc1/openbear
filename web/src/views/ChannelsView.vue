@@ -54,6 +54,27 @@ function modelSectionId(row, section) {
   return `channel-model-${section}-${encodeURIComponent(row.fullname || `${selectedName.value}/${row.id}`)}`;
 }
 const modelSearchQuery = ref("");
+const modelSearchInput = ref(null);
+const channelDetailStack = ref(null);
+let searchViewportTimer = 0;
+function keepModelSearchVisible() {
+  searchViewportTimer = 0;
+  const input = modelSearchInput.value, stack = channelDetailStack.value;
+  if (!input || !stack || document.activeElement !== input ||
+      !window.matchMedia('(max-width: 760px)').matches) return;
+  const viewport = window.visualViewport;
+  if (viewport && Math.abs(viewport.scale - 1) > .01) return;
+  const bounds = stack.getBoundingClientRect(), rect = input.getBoundingClientRect();
+  const bottom = Math.min(bounds.bottom, (viewport?.offsetTop || 0) + (viewport?.height || window.innerHeight)) - 8;
+  // iOS emits alternating visualViewport resize/scroll events throughout the
+  // keyboard animation. Correct once after they settle and only toward the
+  // search field; opposing corrections make the whole settings page bounce.
+  if (rect.bottom > bottom) stack.scrollTop += rect.bottom - bottom;
+}
+function scheduleModelSearchVisibility() {
+  if (searchViewportTimer) window.clearTimeout(searchViewportTimer);
+  searchViewportTimer = window.setTimeout(keepModelSearchVisible, 120);
+}
 const modelScrollList = ref(null);
 let stopModelScroll = () => {};
 function startModelScroll() {
@@ -63,6 +84,11 @@ function startModelScroll() {
 function finishModelScroll() {
   stopModelScroll();
   stopModelScroll = () => {};
+}
+function scrollModelsWithinStack(_x, _y, _event, _touch, container) {
+  // Reach the short-screen stack, never the settings page/window behind it.
+  // Sortable supplies the actual scroll layer as its fifth argument.
+  if (container && (container === modelScrollList.value?.$el || container === channelDetailStack.value)) return 'continue';
 }
 const filteredModels = computed(() => {
   const list = selectedProvider.value?.models || [];
@@ -1201,8 +1227,17 @@ async function persistModelOrder() {
   try { okOrThrow(await Api.reorderChannelModels(selectedName.value, models.map((m) => m.id))); await loadList(selectedName.value); }
   catch (error) { ElMessage.error(apiError(error)); await loadList(selectedName.value); }
 }
-onMounted(() => { void loadModelsDevProviders(); void loadList(); });
+onMounted(() => {
+  void loadModelsDevProviders(); void loadList();
+  window.addEventListener('resize', scheduleModelSearchVisibility);
+  window.visualViewport?.addEventListener('resize', scheduleModelSearchVisibility);
+  window.visualViewport?.addEventListener('scroll', scheduleModelSearchVisibility);
+});
 onBeforeUnmount(() => {
+  window.removeEventListener('resize', scheduleModelSearchVisibility);
+  window.visualViewport?.removeEventListener('resize', scheduleModelSearchVisibility);
+  window.visualViewport?.removeEventListener('scroll', scheduleModelSearchVisibility);
+  if (searchViewportTimer) window.clearTimeout(searchViewportTimer);
   finishModelScroll();
   for (const key of channelTestPollers.keys()) clearChannelTestPoller(key);
 });
@@ -1343,7 +1378,7 @@ onBeforeUnmount(() => {
             <button class="mac-small-button mac-primary-button" @click="openCreateProvider">＋ 添加渠道</button>
           </div>
         </div>
-        <div v-else class="channel-detail-stack h-full min-h-0 flex flex-col gap-3 sm:gap-4">
+        <div v-else ref="channelDetailStack" class="channel-detail-stack h-full min-h-0 flex flex-col gap-3 sm:gap-4">
           <!-- 渠道基本信息卡片：URL与Key并排，4项统计严格等高 -->
           <div class="channel-overview-card mac-panel mac-shadow p-4 sm:p-5 shrink-0" :class="{ 'is-open': providerDetailsOpen }">
             <div class="channel-overview-layout flex flex-col sm:flex-row sm:items-start justify-between gap-4">
@@ -1416,7 +1451,9 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="channel-model-search relative min-w-[140px] sm:min-w-[190px]">
                   <input
+                    ref="modelSearchInput"
                     v-model="modelSearchQuery"
+                    @focus="scheduleModelSearchVisibility"
                     class="mac-input h-7 text-xs pl-7 pr-6"
                     placeholder="搜索模型 ID / 名称…"
                     aria-label="搜索模型 ID / 名称"
@@ -1442,18 +1479,19 @@ onBeforeUnmount(() => {
             <draggable
               v-else
               ref="modelScrollList"
-              :list="selectedProvider.models"
+              :list="modelSearchQuery ? filteredModels : selectedProvider.models"
               item-key="id"
               handle=".model-drag"
               ghost-class="drag-ghost"
               chosen-class="model-sort-chosen"
               class="model-list-scroll model-grid-responsive p-3 sm:p-4"
               :disabled="Boolean(modelSearchQuery)"
-              :scroll="modelScrollList?.$el || true"
+              :scroll="true"
               :force-auto-scroll-fallback="true"
               :scroll-sensitivity="80"
               :scroll-speed="18"
-              :bubble-scroll="false"
+              :bubble-scroll="true"
+              :scroll-fn="scrollModelsWithinStack"
               @start="startModelScroll"
               @end="endModelScroll"
             >
@@ -2474,11 +2512,14 @@ button:disabled { cursor: not-allowed; opacity: .48; }
     overflow: hidden;
   }
   .channels-workspace { padding: 0 12px 8px; }
-  .channel-detail-stack { height: 100%; gap: 8px; }
+  /* The keyboard reduces the visual viewport, not the intrinsic height of
+     the channel identity card. Let this stack scroll on short screens. */
+  .channel-detail-stack { height: 100%; gap: 8px; overflow-y: auto; overscroll-behavior: contain; }
+  .channel-models-panel { flex: 1 0 auto; min-height: 240px; }
   .channels-heading { display: none; }
   .channel-models-header { flex: none; }
   .channels-overview { flex: none; max-height: 120px; overflow-y: auto; }
-  .channels-view .channel-overview-card { flex: none; max-height: 40%; overflow-y: auto; }
+  .channels-view .channel-overview-card { flex: none; max-height: none; overflow: visible; }
   .channels-mobile-header-actions { grid-column: 1 / -1; justify-self: end; }
   .model-list-scroll {
     flex: 1 1 0%; min-height: 0; min-width: 0; overflow-y: auto; scrollbar-width: none;
