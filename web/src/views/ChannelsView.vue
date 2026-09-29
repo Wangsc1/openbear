@@ -85,6 +85,11 @@ function finishModelScroll() {
   stopModelScroll();
   stopModelScroll = () => {};
 }
+function scrollModelsWithinStack(_x, _y, _event, _touch, container) {
+  // Reach the short-screen stack, never the settings page/window behind it.
+  // Sortable supplies the actual scroll layer as its fifth argument.
+  if (container && (container === modelScrollList.value?.$el || container === channelDetailStack.value)) return 'continue';
+}
 const filteredModels = computed(() => {
   const list = selectedProvider.value?.models || [];
   const q = String(modelSearchQuery.value || "").trim().toLowerCase();
@@ -1481,11 +1486,12 @@ onBeforeUnmount(() => {
               chosen-class="model-sort-chosen"
               class="model-list-scroll model-grid-responsive p-3 sm:p-4"
               :disabled="Boolean(modelSearchQuery)"
-              :scroll="modelScrollList?.$el || true"
+              :scroll="true"
               :force-auto-scroll-fallback="true"
               :scroll-sensitivity="80"
               :scroll-speed="18"
-              :bubble-scroll="false"
+              :bubble-scroll="true"
+              :scroll-fn="scrollModelsWithinStack"
               @start="startModelScroll"
               @end="endModelScroll"
             >

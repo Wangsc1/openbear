@@ -432,7 +432,8 @@ test('actual Vue + vuedraggable SSR renders every model/card/action in original 
   assert.equal(typeof list.props.onStart, 'function'); assert.equal(typeof list.props.onEnd, 'function');
   assert.equal(list.props.scroll, true, 'use ancestor discovery until the DOM scroller mounts');
   assert.equal(list.props['force-auto-scroll-fallback'], true, 'desktop native DnD must use Sortable auto-scroll');
-  assert.equal(list.props['bubble-scroll'], false, 'do not scroll the page behind the model grid');
+  assert.equal(list.props['bubble-scroll'], true, 'short screens may scroll the model stack');
+  assert.equal(list.props['scroll-fn'], r.run('scrollModelsWithinStack'), 'each scroll layer is guarded against page scrolling');
   assert.ok(list.props['scroll-sensitivity'] >= 60);
   assert.ok(list.props['scroll-speed'] > 10);
   assert.equal(list.props.list, r.run('selectedProvider.value.models'));
@@ -440,8 +441,8 @@ test('actual Vue + vuedraggable SSR renders every model/card/action in original 
   r.ctx.scrollTarget = scrollTarget;
   r.run('modelScrollList.value = scrollTarget');
   const withScroller = await render(channels, r);
-  assert.deepEqual({...withScroller.nodes.find(n => n.type === draggable && classHas(n, 'model-list-scroll')).props.scroll}, scrollTarget.$el,
-    'the draggable grid itself, not the header/window, is the scroll target');
+  assert.equal(withScroller.nodes.find(n => n.type === draggable && classHas(n, 'model-list-scroll')).props.scroll, true,
+    'discover the nearest overflow layer even when the mounted list does not overflow');
   assert.equal(css(channels, '.model-list-scroll', 1440)['overflow-y'], 'auto');
   const cards = nodes.filter(n => n.type === 'article' && classHas(n, 'model-card'));
   assert.equal(cards.length, 40);
@@ -485,6 +486,99 @@ test('real Sortable touch/pointer startup ignores ordinary card content; only co
   sortable.options.disabled = true; prepared = 0;
   Sortable.prototype._onTapStart.call(sortable, {type:'pointerdown',target:handle,pointerType:'touch',button:0,cancelable:true});
   assert.equal(prepared, 0);
+});
+
+// Load the unmodified installed Sortable library in an isolated DOM/timer realm.
+// Rectangles are deterministic inputs, not browser layout or iOS keyboard claims.
+function sortableScrollRealm({listTop = 398, listBottom = 540, listScrollHeight = 3000} = {}) {
+  const intervals = new Map(), timeouts = new Map(); let nextTimer = 0;
+  function element(name, top, bottom, scrollHeight = bottom - top) {
+    return {
+      nodeType: 1, nodeName: name, tagName: name, parentNode: null, style: {}, children: [],
+      scrollTop: 0, scrollLeft: 0, scrollHeight, scrollWidth: 320, clientHeight: bottom - top, clientWidth: 320,
+      currentStyle: {overflowY: 'auto', overflowX: 'hidden', position: 'static', transform: 'none'},
+      getBoundingClientRect: () => ({top, bottom, left: 0, right: 320, width: 320, height: bottom - top}),
+      addEventListener() {}, removeEventListener() {}, getElementsByTagName: () => [], querySelectorAll: () => [],
+    };
+  }
+  const page = element('HTML', 0, 874, 2000), settingsContent = element('DIV', 80, 874, 1900);
+  const stack = element('DIV', 100, 430, 900), list = element('DIV', listTop, listBottom, listScrollHeight);
+  const row = element('ARTICLE', listTop, listTop + 44);
+  const document = {
+    documentElement: page, scrollingElement: page,
+    addEventListener() {}, removeEventListener() {}, elementFromPoint: () => row,
+    createElement: name => element(name.toUpperCase(), 0, 0),
+  };
+  const navigator = {userAgent: 'Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 Safari/604.1'};
+  const window = {document, navigator, innerHeight: 874, innerWidth: 320, devicePixelRatio: 1,
+    addEventListener() {}, removeEventListener() {}, getComputedStyle: el => el.currentStyle};
+  document.defaultView = window;
+  document.body = element('BODY', 0, 874); document.body.parentNode = page;
+  settingsContent.parentNode = document.body; stack.parentNode = settingsContent; list.parentNode = stack; row.parentNode = list;
+  const module = {exports: {}};
+  const context = vm.createContext({window, document, navigator, module, exports: module.exports,
+    setInterval(callback, delay) { const id = ++nextTimer; intervals.set(id, {callback, delay}); return id; },
+    clearInterval(id) { intervals.delete(id); },
+    setTimeout(callback, delay) { const id = ++nextTimer; timeouts.set(id, {callback, delay}); return id; },
+    clearTimeout(id) { timeouts.delete(id); },
+  });
+  const require = createRequire(import.meta.url);
+  const library = createRequire(require.resolve('vuedraggable')).resolve('sortablejs');
+  vm.runInContext(fs.readFileSync(library, 'utf8'), context, {filename: library});
+  return {Sortable: module.exports, list, row, stack, settingsContent, page,
+    tickScroll() { for (const timer of [...intervals.values()]) if (timer.delay === 24) timer.callback(); },
+    assertClean() { assert.equal(intervals.size, 0); assert.equal(timeouts.size, 0); },
+  };
+}
+
+test('controlled drag scrolling accepts only the actual fifth-argument list or stack layer', () => {
+  const r = channelRuntime(2), list = {}, stack = {}, page = {};
+  r.ctx.target = {$el: list}; r.ctx.stack = stack;
+  r.run('modelScrollList.value=markRaw(target);channelDetailStack.value=markRaw(stack)');
+  const scroll = r.run('scrollModelsWithinStack');
+  for (const container of [list, stack]) assert.equal(scroll(0, 18, {}, {}, container), 'continue');
+  for (const container of [page, {}, null, undefined]) assert.equal(scroll(list, stack, {}, {}, container), undefined);
+});
+
+test('real Sortable autoScroll reaches the short-screen stack, retains list scrolling and never moves page ancestors', async () => {
+  const scenarios = [
+    {name: 'short stack with clipped inner bottom', y: 418, expectedList: 0, expectedStack: 18},
+    {name: 'content-expanded list with no inner overflow', listTop: 220, listBottom: 1500, listScrollHeight: 1280, y: 418, expectedList: 0, expectedStack: 18},
+    {name: 'ordinary inner-list edge', listTop: 200, listBottom: 430, y: 418, expectedList: 18, expectedStack: 18},
+    {name: 'other scrollable ancestors remain blocked', y: 868, expectedList: 0, expectedStack: 0, forbiddenLayers: true},
+  ];
+  for (const scenario of scenarios) for (const bubble of [false, true]) {
+    const realm = sortableScrollRealm(scenario), r = channelRuntime(2), calls = [];
+    r.ctx.target = {$el: realm.list}; r.ctx.stack = realm.stack;
+    r.run('modelScrollList.value=markRaw(target);channelDetailStack.value=markRaw(stack)');
+    const view = await render(channels, r);
+    const props = view.nodes.find(n => n.type === draggable && classHas(n, 'model-list-scroll')).props;
+    const sortable = new realm.Sortable(realm.list, {
+      scroll: bubble ? props.scroll : realm.list, bubbleScroll: bubble && props['bubble-scroll'], forceAutoScrollFallback: props['force-auto-scroll-fallback'],
+      scrollSensitivity: props['scroll-sensitivity'], scrollSpeed: props['scroll-speed'],
+      scrollFn(...args) { calls.push(args[4]); return props['scroll-fn'](...args); },
+      forceFallback: true,
+    });
+    // Ghost motion is outside this scroll regression; execute the real plugin.
+    sortable._onTouchMove = () => {};
+    realm.Sortable.active = sortable; realm.Sortable.dragged = realm.row;
+    const event = {type: 'touchmove', touches: [{clientX: 160, clientY: scenario.y}]};
+    try {
+      sortable.scroll._handleAutoScroll(event, true);
+      realm.tickScroll();
+      assert.equal(realm.list.scrollTop, scenario.expectedList, `${scenario.name}: list`);
+      assert.equal(realm.stack.scrollTop, bubble ? scenario.expectedStack : 0, `${scenario.name}: stack`);
+      assert.equal(realm.settingsContent.scrollTop, 0, `${scenario.name}: settings wrapper`);
+      assert.equal(realm.page.scrollTop, 0, `${scenario.name}: page`);
+      if (bubble && scenario.forbiddenLayers) {
+        assert.ok(calls.includes(realm.settingsContent), 'the real library attempts the settings ancestor');
+        assert.ok(calls.includes(realm.page), 'the real library attempts the page layer, and the component rejects it');
+      }
+    } finally {
+      sortable.scroll.drop(); sortable.scroll.nulling();
+      realm.assertClean();
+    }
+  }
 });
 
 test('vuedraggable reordering persists the same selected channel and full ID order through the original end handler (mock API only)', async () => {
