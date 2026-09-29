@@ -449,10 +449,18 @@ test('actual Vue + vuedraggable SSR renders every model/card/action in original 
   assert.ok(html.includes('模型 0')); assert.ok(html.includes('模型 39'));
   assert.ok(html.includes('https://fixture.invalid/api')); assert.ok(html.includes('fixture-masked'));
   assert.equal(r.mounted.length, 1, 'business mounted hook is collected, never executed');
-  r.run('modelSearchQuery.value = "model"');
+  r.run('modelSearchQuery.value = "model-39"');
   const searched = await render(channels, r);
-  assert.equal(searched.nodes.find(n => n.type === draggable && classHas(n, 'model-list-scroll')).props.disabled, true);
+  const searchedList = searched.nodes.find(n => n.type === draggable && classHas(n, 'model-list-scroll'));
+  assert.equal(searchedList.props.disabled, true);
+  assert.deepEqual(Array.from(searchedList.props.list, model => model.id), ['model-39']);
+  const searchedCards = searched.nodes.filter(n => n.type === 'article' && classHas(n, 'model-card'));
+  assert.deepEqual(searchedCards.map(n => n.key), ['model-39'], 'search renders only matching models');
   assert.ok(searched.nodes.filter(n => n.type === 'button' && classHas(n, 'model-drag')).every(n => n.props.disabled));
+  r.run('modelSearchQuery.value = ""');
+  const cleared = await render(channels, r);
+  assert.deepEqual(cleared.nodes.filter(n => n.type === 'article' && classHas(n, 'model-card')).map(n => n.key),
+    Array.from({length: 40}, (_, i) => `model-${i}`), 'clearing search restores original order');
 });
 
 test('real Sortable touch/pointer startup ignores ordinary card content; only configured handle prepares a drag', () => {

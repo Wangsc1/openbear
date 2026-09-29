@@ -1474,7 +1474,7 @@ onBeforeUnmount(() => {
             <draggable
               v-else
               ref="modelScrollList"
-              :list="selectedProvider.models"
+              :list="modelSearchQuery ? filteredModels : selectedProvider.models"
               item-key="id"
               handle=".model-drag"
               ghost-class="drag-ghost"
