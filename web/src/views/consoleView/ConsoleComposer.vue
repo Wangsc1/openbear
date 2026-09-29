@@ -2340,8 +2340,11 @@ button.status-chip:hover, .status-chip-active {
 		padding-inline: .375rem;
 	}
 	.run-config-chip-model { font-weight: 500; }
-	.composer-toolbar button.run-config-chip { height: auto; min-height: 44px; padding-block: 3px; }
-	.run-config-chip-status { display: inline-flex; margin-top: 2px; }
+	/* Bottom-anchor the model entry: its status row shares the send button's baseline. */
+	.composer-status { align-items: flex-end; }
+	.composer-toolbar button.run-config-chip { height: auto; min-height: 44px; padding-block: 6px 0; align-items: flex-end; }
+	.composer-toolbar button.run-config-chip .chip-caret { margin-bottom: 1px; }
+	.run-config-chip-status { display: inline-flex; margin-top: 3px; }
 	.composer-clear:disabled { display: none; }
 	.composer-toolbar button.run-config-chip:focus-visible { outline: 2px solid var(--bear-accent); outline-offset: -2px; }
 	.run-config-chip-meta { display: none; }
