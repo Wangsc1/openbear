@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import fs from "node:fs";
+import vm from "node:vm";
 import {
   THEME_STORAGE_KEY,
   createThemeController,
@@ -38,23 +40,21 @@ function harness({ systemDark = false, stored = null, throwRead = false, throwWr
     CustomEvent: FakeCustomEvent,
     dispatchEvent(event) { events.push(event); },
   };
-  const metas = {
-    theme: {attrs: {}, setAttribute(name, value) { this.attrs[name] = value; }},
-    scheme: {attrs: {}, setAttribute(name, value) { this.attrs[name] = value; }},
-  };
+  const metas = Object.fromEntries(['theme-color', 'color-scheme'].map(name => [name, {
+    content: '', setAttribute(key, value) { this[key] = value; },
+  }]));
   const documentObject = {
     documentElement: root,
-    querySelector(selector) {
-      if (selector === 'meta[name="theme-color"]') return metas.theme;
-      if (selector === 'meta[name="color-scheme"]') return metas.scheme;
-      return null;
-    },
+    querySelector(selector) { return metas[selector.match(/name="([^"]+)"/)?.[1]]; },
   };
   const controller = createThemeController({ windowObject, documentObject, storageObject: storage });
   return {
     controller,
     root,
     metas,
+    documentObject,
+    windowObject,
+    storage,
     values,
     events,
     setSystemDark(dark) {
@@ -87,8 +87,8 @@ test("missing preference defaults to auto and follows system changes", () => {
   assert.equal(env.root.classList.contains("dark"), true);
   assert.equal(env.root.style.colorScheme, "dark");
   assert.equal(env.root.style.backgroundColor, "#161616");
-  assert.equal(env.metas.theme.attrs.content, "#161616");
-  assert.equal(env.metas.scheme.attrs.content, "dark");
+  assert.equal(env.metas['theme-color'].content, "#161616");
+  assert.equal(env.metas['color-scheme'].content, "dark");
 });
 
 test("manual light and dark persist, ignore system changes, and auto resolves immediately", () => {
@@ -104,13 +104,15 @@ test("manual light and dark persist, ignore system changes, and auto resolves im
   env.controller.setMode("light");
   env.setSystemDark(true);
   assert.deepEqual(env.controller.getState(), { mode: "light", resolvedTheme: "light", dark: false });
-  assert.equal(env.root.style.backgroundColor, "#f8f8f8");
-  assert.equal(env.metas.theme.attrs.content, "#f8f8f8");
-  assert.equal(env.metas.scheme.attrs.content, "light");
   assert.equal(changes, 2, "fixed light must not react to system changes");
+  assert.equal(env.root.style.backgroundColor, "#f8f8f8");
+  assert.equal(env.metas['theme-color'].content, "#f8f8f8");
+  assert.equal(env.metas['color-scheme'].content, "light");
   env.controller.setMode("auto");
   assert.deepEqual(env.controller.getState(), { mode: "auto", resolvedTheme: "dark", dark: true });
   assert.equal(env.values.get(THEME_STORAGE_KEY), "auto");
+  assert.equal(env.metas['theme-color'].content, "#161616");
+  assert.equal(env.metas['color-scheme'].content, "dark");
 });
 
 test("stored manual mode restores in a new controller", () => {
@@ -136,4 +138,30 @@ test("blocked storage writes do not prevent the current page choice", () => {
   assert.deepEqual(env.controller.getState(), { mode: "light", resolvedTheme: "light", dark: false });
   assert.equal(env.root.classList.contains("light"), true);
   assert.equal(env.root.classList.contains("dark"), false);
+});
+
+test('actual first-paint script matches runtime chrome for stored/system theme and blocked storage', () => {
+  const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const script = html.match(/<script>\s*([\s\S]*?)<\/script>/)[1];
+  const snapshot = env => ({
+    classes: ['light', 'dark'].filter(name => env.root.classList.contains(name)),
+    style: {...env.root.style}, dataset: {...env.root.dataset},
+    theme: env.metas['theme-color'].content, scheme: env.metas['color-scheme'].content,
+  });
+  for (const systemDark of [false, true]) {
+    for (const stored of [null, 'light', 'dark', 'auto', 'invalid', 'blocked-read', 'blocked-getter']) {
+      const blocked = stored?.startsWith('blocked');
+      const env = harness({systemDark, stored, throwRead: blocked});
+      const expected = snapshot(env);
+      env.root.style = {}; env.root.dataset = {};
+      for (const name of ['light', 'dark']) env.root.classList.toggle(name, false);
+      for (const meta of Object.values(env.metas)) meta.content = '';
+      const windowObject = {...env.windowObject};
+      if (stored === 'blocked-getter') Object.defineProperty(windowObject, 'localStorage', {get() {throw new Error('denied');}});
+      else windowObject.localStorage = env.storage;
+      vm.runInNewContext(script, {window: windowObject, document: env.documentObject});
+      assert.deepEqual(snapshot(env), expected, `${stored}/${systemDark}`);
+      env.controller.destroy();
+    }
+  }
 });

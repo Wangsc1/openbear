@@ -14,30 +14,6 @@ body {
   color: var(--ob-text);
   -webkit-font-smoothing: antialiased;
 }
-/* Same Safari 26 tinting contract as the verified VPS calculator: the edge
-   samplers expose the page background, while page roots switch instantly. */
-html { background: var(--ob-bg); min-height: 100%; }
-html, body { transition: none !important; }
-.safari-tint {
-  position: fixed;
-  left: 0;
-  right: 0;
-  /* Keep edge samplers above opaque app surfaces without intercepting input.
-     Native Safari tint behavior must still be verified on the device. */
-  z-index: 4000;
-  height: 12px;
-  background: var(--ob-bg);
-  pointer-events: none;
-}
-.safari-tint-top {
-  top: 0;
-  height: max(12px, env(safe-area-inset-top, 0px));
-}
-.safari-tint-bottom { bottom: -8px; }
-/* Match both browser edges to the active chat surface, not the darker root. */
-body:has(.app-shell.is-console) > .safari-tint {
-  background: var(--ob-chat-bg);
-}
 
 /* macOS 风格滚动条 */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
