@@ -86,7 +86,14 @@ export function fmtNum(n) {
 }
 
 export function fmtCost(n) {
-	return Number(n || 0) > 0 ? `$${Number(n).toFixed(5)}` : "—";
+	const value = Number(n || 0);
+	if (!(value > 0) || !Number.isFinite(value)) return "—";
+	// Shift the decimal exponent rather than adding an epsilon at magnitude 1.
+	// This keeps half-cent values such as 1.005 and 10.075 rounding upward.
+	const [coefficient, exponent = "0"] = String(value).split("e");
+	const cents = Math.round(Number(`${coefficient}e${Number(exponent) + 2}`));
+	const rounded = Number.isFinite(cents) ? cents / 100 : value;
+	return rounded > 0 ? `$${rounded.toFixed(2)}` : "<$0.01";
 }
 
 export function fmtTps(value) {
