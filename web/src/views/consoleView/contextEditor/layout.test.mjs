@@ -102,6 +102,27 @@ test('difference panes share the available height rather than fixed-height cards
   }
 });
 
+test('short mobile editor removes the fixed tree from the document pane and keeps save/return outside scrolling controls', () => {
+  assert.equal(css('.context-editor .ce-content').display, 'contents');
+  const content = css(['.context-editor .ce-content', '.context-editor.is-compact .ce-content'],390,260);
+  assert.equal(content.flex,'1');assert.equal(content['min-height'],'0');assert.equal(content.overflow,'hidden');
+  const workspace = css(['.context-editor .ce-workspace','.context-editor.is-compact .ce-workspace'],390,260);
+  assert.equal(workspace.display,'flex');
+  assert.equal(css('.context-editor.is-compact[data-compact-panel="document"] .ce-outline',390,260).display,'none');
+  assert.equal(css('.context-editor.is-compact[data-compact-panel="outline"] .ce-document',390,260).display,'none');
+  assert.equal(css('.context-editor.is-compact[data-compact-panel="controls"] .ce-workspace',390,260).display,'none');
+  assert.equal(css('.context-editor.is-compact .ce-compact-toolbar',390,260).flex,'none');
+  assert.equal(css('.context-editor.is-compact[data-compact-panel="controls"] .ce-content',390,260)['overflow-y'],'auto');
+  const source=readFileSync(new URL('../ContextEditor.vue',import.meta.url),'utf8');
+  const {descriptor}=parse(source);const template=descriptor.template.content;
+  const rail=template.slice(template.indexOf('class="ce-compact-toolbar"'),template.indexOf('<div class="ce-content">'));
+  assert.match(rail,/@click="close"/);assert.match(rail,/@click="saveDraft"/);
+  for(const name of ['outline','document','controls'])assert.ok(rail.includes(`switchCompactPanel('${name}')`));
+  // The normal-height directory, original selectors/footer and drafts are not
+  // destroyed when changing compact panels; CSS changes only their visibility.
+  assert.match(template,/<aside class="ce-outline"/);assert.match(template,/<footer class="ce-footer">/);
+});
+
 test('ordered blocks have one content scroller without fixed-height nested editors', () => {
   for (const [w,h] of sizes) {
     const list=css('.context-editor .ce-sequence-scroll',w,h);

@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Api, apiError } from "../api";
+import { mobileSelectOptions } from "../mobileSelect.js";
 import MdEditor from "../components/AdaptiveMdEditor.vue";
 import draggable from "vuedraggable";
 import { assetTimeLine } from "../utils/assetTime";
@@ -15,10 +16,11 @@ const emit = defineEmits(["mobile-header-ready"]);
 
 const docs = ref([]);
 const loading = ref(false);
+const loadError = ref("");
 const editing = ref(null);
 const original = ref("");
 const saving = ref(false);
-let alive = true;
+let alive = true, loadGeneration = 0;
 onBeforeUnmount(() => { alive = false; });
 const dialogOpen = ref(false);
 const showArchived = ref(false);
@@ -33,14 +35,27 @@ function splitList(s) {
 }
 function joinList(arr) { return (arr || []).map((x) => String(x).trim()).filter(Boolean).join(", "); }
 async function load() {
+  const generation = ++loadGeneration, archived = showArchived.value;
+  const current = () => alive && generation === loadGeneration && archived === showArchived.value;
   loading.value = true;
+  loadError.value = "";
   try {
-    const data = await Api.docs(showArchived.value);
+    const data = await Api.docs(archived);
+    if (!current()) return false;
     docs.value = data.items || [];
     rebuildGroups();
-  } finally { loading.value = false; }
+    return true;
+  } catch (error) {
+    if (!current()) return false;
+    docs.value = [];
+    rebuildGroups();
+    clearSelection();
+    loadError.value = apiError(error);
+    return false;
+  }
+  finally { if (current()) loading.value = false; }
 }
-async function refresh() { await load(); clearSelection(); ElMessage.success("已刷新"); }
+async function refresh() { if (!await load()) return; clearSelection(); ElMessage.success("已刷新"); }
 onMounted(load);
 const shownDocs = computed(() => docs.value.filter((d) => showArchived.value || !d.archived));
 const selectedDocs = computed(() => shownDocs.value.filter((d) => selectedIds.value.includes(d.id)));
@@ -257,7 +272,11 @@ const mobileEnabledCount = computed(() => shownDocs.value.filter(row => row.enab
     </div>
 
     <div ref="scrollContainer" class="admin-list flex-1 min-h-0 overflow-y-auto p-6" :class="{ 'select-none': dragging }" v-loading="loading">
-      <div v-if="!shownDocs.length" class="text-center text-macsub py-16 text-sm">暂无文档</div>
+      <div v-if="loadError" role="alert" class="text-center text-macsub py-8 text-sm">
+        <p class="mb-3">加载失败：{{ loadError }}</p>
+        <el-button :disabled="loading" @click="load">重试</el-button>
+      </div>
+      <div v-else-if="!shownDocs.length" class="text-center text-macsub py-16 text-sm">暂无文档</div>
       <draggable v-model="groups" item-key="name" handle=".group-handle" :animation="180"
         v-bind="dragAutoScrollOptions" :scroll="scrollContainer" :disabled="isAdminPhone && mobileMode !== 'sort'"
         @choose="dragging = true" @unchoose="dragging = false" @end="finishDrag">
@@ -320,7 +339,7 @@ const mobileEnabledCount = computed(() => shownDocs.value.filter(row => row.enab
           <div><label class="text-xs text-macsub mb-1 block">标题</label><el-input v-model="editing.title" /></div>
           <div>
             <label class="text-xs text-macsub mb-1 block">分组（可选）</label>
-            <el-select v-model="editing.grp" filterable allow-create clearable default-first-option placeholder="不分组" class="w-full">
+            <el-select v-model="editing.grp" :popper-options="mobileSelectOptions()" filterable allow-create clearable default-first-option placeholder="不分组" class="w-full">
               <el-option v-for="g in groupNames" :key="g" :label="g" :value="g" />
             </el-select>
           </div>
@@ -329,7 +348,7 @@ const mobileEnabledCount = computed(() => shownDocs.value.filter(row => row.enab
         <div class="asset-form-grid grid grid-cols-2 gap-3">
           <div>
             <label class="text-xs text-macsub mb-1 block">关联项目（可多选）</label>
-            <el-select v-model="editing.projectList" multiple filterable allow-create default-first-option class="w-full" placeholder="选择或输入项目名">
+            <el-select v-model="editing.projectList" multiple :popper-options="mobileSelectOptions()" filterable allow-create default-first-option class="w-full" placeholder="选择或输入项目名">
               <el-option v-for="p in projectOptions" :key="p" :label="p" :value="p" />
             </el-select>
           </div>

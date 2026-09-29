@@ -17,10 +17,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+from app.llm._response_text_order import TextOutputOrder
 from app.llm.base import (
     AgentResult,
     LLMBackend,
     Message,
+    OpenBearLLMError,
     apply_fast_request_body,
     apply_provider_billing,
     fast_request_parts,
@@ -88,53 +90,6 @@ def _to_responses_input(messages: list[Message]) -> list[dict[str, Any]]:
     return out
 
 
-def _output_index(value: Any) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
-
-
-def _item_identity(item: dict[str, Any]) -> tuple[str, str] | None:
-    kind = str(item.get("type") or "")
-    ident = item.get("id") or (item.get("call_id") if kind == "function_call" else "")
-    return (kind, str(ident)) if kind and ident else None
-
-
-def _order_native_items(
-    entries: list[dict[str, Any]],
-    terminal_output: list[Any] | None = None,
-) -> list[dict[str, Any]]:
-    """Restore Responses output order from ``output_index`` without guessing.
-
-    ``response.output_item.done`` events are allowed to finish out of order. Items
-    with a known index occupy the indexed slots in ascending order; items with no
-    index keep their arrival slot instead of being moved by type. A terminal
-    ``response.output`` can supply an index only through an exact, unique
-    type+id/call_id match. It is never used to add or rewrite items.
-    """
-    if not entries:
-        return []
-    positions: dict[tuple[str, str], list[int]] = {}
-    for pos, raw in enumerate(terminal_output or []):
-        identity = _item_identity(raw) if isinstance(raw, dict) else None
-        if identity:
-            positions.setdefault(identity, []).append(pos)
-    used = {e["index"] for e in entries if e["index"] is not None}
-    indexes: list[int | None] = []
-    for entry in entries:
-        index = entry["index"]
-        if index is None:
-            identity = _item_identity(entry["item"])
-            found = positions.get(identity, []) if identity else []
-            if len(found) == 1 and found[0] not in used:
-                index = found[0]
-                used.add(index)
-        indexes.append(index)
-    slots = [i for i, index in enumerate(indexes) if index is not None]
-    ordered = [entry["item"] for entry in entries]
-    for slot, source in zip(slots, sorted(slots, key=lambda i: indexes[i]), strict=True):
-        ordered[slot] = entries[source]["item"]
-    return ordered
-
-
 def _to_responses_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
     """中性 schema → Responses flat function tools。
 
@@ -181,6 +136,70 @@ def _usage_from(u: dict[str, Any]) -> Usage:
         cache_read_tokens=cached,
         cache_write_tokens=cache_write,
     )
+
+
+def _same_output_item(left: dict, right: dict) -> bool:
+    if left.get("id") and right.get("id"):
+        return left["id"] == right["id"]
+    if left.get("type") == right.get("type") == "function_call" and left.get("call_id"):
+        return left["call_id"] == right.get("call_id")
+    return left == right
+
+
+def _merge_output_items(streamed: list[dict], terminal: list[dict] | None) -> list[dict]:
+    """Prefer final values/order without treating a relay's partial list as deletion.
+
+    Match stable item identity, never a terminal array position against a stream
+    output_index. Missing completed items retain their position between shared
+    anchors. Thus empty/partial snapshots and sparse indices do not lose/duplicate
+    tools, while a complete terminal snapshot remains authoritative.
+    """
+    result: list[dict] = []
+    for item in terminal or []:
+        match = next((i for i, old in enumerate(result) if _same_output_item(old, item)), None)
+        if match is None:
+            result.append(item)
+        else:
+            result[match] = item
+    for pos, item in enumerate(streamed):
+        if any(_same_output_item(item, old) for old in result):
+            continue
+        following = next((i for later in streamed[pos + 1:] for i, old in enumerate(result)
+                          if _same_output_item(later, old)), None)
+        if following is not None:
+            result.insert(following, item)
+        else:
+            preceding = next((i for earlier in reversed(streamed[:pos]) for i, old in enumerate(result)
+                              if _same_output_item(earlier, old)), None)
+            result.insert(preceding + 1 if preceding is not None else len(result), item)
+    return result
+
+
+def _response_stop(response: dict, event_type: str = "") -> str:
+    if response.get("status") == "incomplete" or event_type == "response.incomplete":
+        details = response.get("incomplete_details") or {}
+        reason = details.get("reason") if isinstance(details, dict) else None
+        return "length" if reason == "max_output_tokens" else str(reason or "incomplete")
+    return "stop"
+
+
+async def _ordered_text_events(events: AsyncIterator[tuple[str, dict[str, Any]]]) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+    order = TextOutputOrder()
+    terminal_seen = False
+    async for event_name, data in events:
+        # Match the backend's type resolution, including data-only SSE.
+        name = data.get("type") or event_name
+        if name in {"response.completed", "response.incomplete", "response.failed", "error"}:
+            terminal_seen = True
+        for ready in order.feed(name, data):
+            yield ready
+    if not terminal_seen and (order.open or order.deferred):
+        # Do not discard queued text and then report a successful response.
+        # Its ordering/full suffix is unknown until the predecessor completes.
+        raise OpenBearLLMError(
+            "Responses 流提前结束：未收到终态，仍有未完成的正文块或等待排序的内容",
+            retryable=True, protocol="responses",
+        )
 
 
 class OpenAIResponsesBackend(LLMBackend):
@@ -269,44 +288,48 @@ class OpenAIResponsesBackend(LLMBackend):
         )
         url = f"{self._base}/responses"
 
+        calls: list[ToolCall] = []
+        indexed_items: dict[int, dict[str, Any]] = {}
+        unindexed_items: dict[str, dict[str, Any]] = {}
+        item_indices: dict[str, int] = {}
+        index_ids: dict[int, str] = {}
+        emitted_text: dict[tuple[str, int], str] = {}
+        text_snapshots: dict[tuple[str, int], tuple[int, str]] = {}
+        terminal_output: list[dict[str, Any]] | None = None
         encrypted_reasoning: dict[str, str] = {}
         final_usage: Usage | None = None
         provider_billing: dict[str, Any] = {}
         stop = "stop"
-        # Native items are ordered by output_index once the item set is known.
-        # Text deltas, tool events and tool scheduling are still not delayed:
-        # tool calls were already emitted only after the SSE stream ended.
-        # Keep the same latest done payload for replay and tool execution,
-        # including when native continuation is disabled. Entries retain their
-        # first-completion slot so independent tool execution is not reordered.
-        output_entries: list[dict[str, Any]] = []
-        output_by_index: dict[int, dict[str, Any]] = {}
-        added_indexes: dict[tuple[str, str], int] = {}
-        terminal_output: list[Any] | None = None
+        terminal_seen = False
 
-        def flush_native() -> list[StreamEvent]:
-            items = _order_native_items(output_entries, terminal_output) if opts.get("native_continuation") else []
-            output_entries.clear()
-            output_by_index.clear()
-            return [StreamEvent(kind="native_output_item", native_output_items=[item]) for item in items]
+        def missing_suffix(key: tuple[str, int], index: int | None, full: str) -> str:
+            already = emitted_text.get(key, emitted_text.get((f"index:{index}", key[1]), ""))
+            if not already and len(text_snapshots) == 1:
+                already = emitted_text.get(("index:None", key[1]), "")
+            if full.startswith(already):
+                emitted_text[key] = full
+                return full[len(already):]
+            return ""  # Contradictory full snapshots cannot be merged safely.
 
-        async for ev_name, data in self._client.post_sse(
+        async for ev_name, data in _ordered_text_events(self._client.post_sse(
             url,
             self._headers(sid, fast_headers=fast_headers),
             payload,
             protocol="responses",
             first_byte_timeout_s=opts.get("first_byte_timeout_s"),
             total_timeout_s=opts.get("total_timeout_s"),
-        ):
+        )):
             if ev_name == "__openbear_metrics__":
                 yield StreamEvent(kind="metrics", connect_ms=int(data.get("connect_ms") or 0))
                 continue
             t = data.get("type") or ev_name
             if t in ("response.completed", "response.incomplete", "response.failed"):
+                terminal_seen = True
                 resp = data.get("response") or {}
-                if isinstance(resp.get("output"), list):
-                    terminal_output = resp["output"]
+                stop = _response_stop(resp, t)
                 u = resp.get("usage") or {}
+                if isinstance(resp.get("output"), list):
+                    terminal_output = [dict(item) for item in resp["output"] if isinstance(item, dict)]
                 terminal_billing = provider_billing_details(
                     resp.get("service_tier") or u.get("service_tier"),
                     u,
@@ -315,21 +338,9 @@ class OpenAIResponsesBackend(LLMBackend):
                     provider_billing.update(terminal_billing)
                 if u:
                     final_usage = _usage_from(u)
-                if t == "response.incomplete":
-                    # Responses 用 incomplete + incomplete_details.reason 表达「未正常收尾」，
-                    # 而 Anthropic / Chat 用 max_tokens / length。不归一化的话 finish 会永远
-                    # 停在 "stop"，Agent 层就会把「输出被截断」误判成「模型偶发没输出」。
-                    details = resp.get("incomplete_details")
-                    reason = str(details.get("reason") or "") if isinstance(details, dict) else ""
-                    if reason == "max_output_tokens":
-                        stop = "length"
-                    elif reason:
-                        stop = reason
                 if t == "response.failed" or resp.get("status") == "failed":
                     # Failed Responses may still carry billable usage. Emit it
                     # before the normalized terminal error.
-                    for native_event in flush_native():
-                        yield native_event
                     if final_usage:
                         yield StreamEvent(
                             kind="usage",
@@ -345,17 +356,42 @@ class OpenAIResponsesBackend(LLMBackend):
                     return
             err = error_event(data, event_name=ev_name)
             if err:
-                for native_event in flush_native():
-                    yield native_event
                 yield err
                 return
-            if t == "response.output_text.delta":
-                yield StreamEvent(kind="content", text=data.get("delta", ""))
+            if t in {"response.output_text.delta", "response.output_text.done", "response.refusal.delta", "response.refusal.done", "response.content_part.done"}:
+                part = data.get("part") if t == "response.content_part.done" else None
+                if t == "response.content_part.done" and (not isinstance(part, dict) or part.get("type") not in {"output_text", "refusal"}):
+                    continue
+                oi = data.get("output_index")
+                item_id = str(data.get("item_id") or (index_ids.get(oi) if type(oi) is int else "") or "")
+                key = (item_id or f"index:{oi}", int(data.get("content_index", 0)))
+                text = (data.get("delta") if t.endswith(".delta") else
+                        part.get("refusal" if part.get("type") == "refusal" else "text") if part is not None else
+                        data.get("refusal" if t == "response.refusal.done" else "text"))
+                if isinstance(text, str):
+                    if t.endswith(".delta"):
+                        emitted_text[key] = emitted_text.get(key, "") + text
+                        yield StreamEvent(kind="content", text=text)
+                    else:
+                        position = oi if type(oi) is int else item_indices.get(item_id)
+                        text_snapshots[key] = (position if position is not None else 0, text)
+                        if position is not None:
+                            tail = missing_suffix(key, position, text)
+                            if tail:
+                                yield StreamEvent(kind="content", text=tail)
             elif t == "response.reasoning_summary_text.delta":
                 yield StreamEvent(kind="reasoning", text=data.get("delta", ""))
             elif t in {"response.output_item.added", "response.output_item.done"}:
                 item = data.get("item") or {}
                 if isinstance(item, dict) and item:
+                    item_id = str(item.get("id") or "")
+                    output_index = data.get("output_index")
+                    if type(output_index) is int and output_index >= 0:
+                        if item_id:
+                            item_indices[item_id] = output_index
+                            index_ids[output_index] = item_id
+                    else:
+                        output_index = item_indices.get(item_id)
                     encrypted = item.get("encrypted_content")
                     if item.get("type") == "reasoning" and isinstance(encrypted, str) and encrypted:
                         # Added/done carry complete opaque values, not deltas.
@@ -367,36 +403,78 @@ class OpenAIResponsesBackend(LLMBackend):
                             kind="encrypted_reasoning",
                             text="\n\n".join(encrypted_reasoning.values()),
                         )
-                    identity = _item_identity(item)
-                    index = _output_index(data.get("output_index"))
                     if t != "response.output_item.done":
-                        if identity and index is not None:
-                            added_indexes[identity] = index
                         continue
-                    if index is None and identity:
-                        index = added_indexes.get(identity)
-                    entry = output_by_index.get(index) if index is not None else None
-                    if entry is not None:
-                        entry["item"] = item  # repeated done for one output slot
+                    if item.get("type") == "message":
+                        for content_index, part in enumerate(item.get("content") or []):
+                            if not isinstance(part, dict) or part.get("type") not in {"output_text", "refusal"}:
+                                continue
+                            full = part.get("refusal" if part.get("type") == "refusal" else "text")
+                            if isinstance(full, str):
+                                key = (item_id or f"index:{output_index}", content_index)
+                                text_snapshots[key] = (output_index if output_index is not None else 0, full)
+                                if output_index is not None:
+                                    tail = missing_suffix(key, output_index, full)
+                                    if tail:
+                                        yield StreamEvent(kind="content", text=tail)
+                    if output_index is not None:
+                        indexed_items[output_index] = dict(item)
+                        if item_id:
+                            unindexed_items.pop(item_id, None)
                     else:
-                        entry = {"item": item, "index": index}
-                        output_entries.append(entry)
-                        if index is not None:
-                            output_by_index[index] = entry
+                        # Legacy compatible streams may omit indices and even IDs.
+                        # Keep their arrival order only when no canonical position exists.
+                        unindexed_items[item_id or f"unindexed:{len(unindexed_items)}"] = dict(item)
 
-        # Only native replay uses output_index ordering. Tools keep completion
-        # order, but consume the same final payload rather than stale duplicates.
-        calls = [
-            ToolCall(
-                id=item.get("call_id") or item.get("id", ""),
-                name=item.get("name", ""),
-                arguments=item.get("arguments", "") or "{}",
-            )
-            for entry in output_entries
-            if (item := entry["item"]).get("type") == "function_call"
-        ]
-        for native_event in flush_native():
-            yield native_event
+        # Item completion order is not output order. Prefer the terminal snapshot;
+        # otherwise reconstruct by output_index (including indices seen on added).
+        # Emit once so downstream append-only collectors cannot retain a stale order
+        # or duplicate an item when the terminal snapshot supplies its final value.
+        # Codex-style relays emit response.completed with an empty output list while
+        # the streamed output_item.done frames carry the real items (function_call
+        # included), so an empty snapshot must fall back to the streamed collection
+        # instead of discarding it.
+        output_items = _merge_output_items([
+            *[indexed_items[index] for index in sorted(indexed_items)],
+            *unindexed_items.values(),
+        ], terminal_output)
+        # Reconcile only missing suffixes. Detailed deltas are already visible;
+        # done/terminal snapshots may be the sole full-text carrier on proxies.
+        total_text_parts = sum(
+            1 for item in output_items if item.get("type") == "message"
+            for part in (item.get("content") or [])
+            if isinstance(part, dict) and part.get("type") in {"output_text", "refusal"}
+        )
+        for index, item in enumerate(output_items):
+            if item.get("type") != "message":
+                continue
+            item_id = str(item.get("id") or index_ids.get(index) or f"index:{index}")
+            for content_index, part in enumerate(item.get("content") or []):
+                if not isinstance(part, dict) or part.get("type") not in {"output_text", "refusal"}:
+                    continue
+                full = part.get("refusal" if part.get("type") == "refusal" else "text")
+                key = (item_id, content_index)
+                if isinstance(full, str):
+                    text_snapshots[key] = (index, full)
+        for key, (_, full) in sorted(text_snapshots.items(), key=lambda entry: (entry[1][0], entry[0][1])):
+            already = emitted_text.get(key, emitted_text.get((f"index:{text_snapshots[key][0]}", key[1]), ""))
+            if not already and total_text_parts == 1:
+                # Legacy streams sometimes omit both item_id and output_index.
+                # Only a single output part makes their anonymous delta unambiguous.
+                already = emitted_text.get(("index:None", key[1]), "")
+            if full.startswith(already) and len(full) > len(already):
+                yield StreamEvent(kind="content", text=full[len(already):])
+        if opts.get("native_continuation") and output_items:
+            yield StreamEvent(kind="native_output_item", native_output_items=output_items)
+        for item in output_items:
+            if (item.get("type") == "function_call" and stop == "stop"
+                    and item.get("status") in (None, "completed")):
+                calls.append(ToolCall(
+                    id=item.get("call_id") or item.get("id", ""),
+                    name=item.get("name", ""),
+                    arguments=item.get("arguments", "") or "{}",
+                ))
+
         if final_usage:
             yield StreamEvent(
                 kind="usage",
@@ -406,6 +484,11 @@ class OpenAIResponsesBackend(LLMBackend):
         if calls:
             stop = "tool_calls"
             yield StreamEvent(kind="tool_call", tool_calls=calls)
+        if not terminal_seen:
+            # Completed tool items have already been exposed once for the existing
+            # recovery driver. Unfinished calls were never emitted. Record EOF as
+            # interruption, not a successful response, without reissuing those tools.
+            raise OpenBearLLMError("Responses 流提前结束：未收到响应终态", retryable=True, protocol="responses")
         yield StreamEvent(kind="finish", finish_reason=stop, details=dict(provider_billing))
 
     async def complete(
@@ -450,6 +533,7 @@ class OpenAIResponsesBackend(LLMBackend):
             )
             raise error
         result = AgentResult()
+        stop = _response_stop(data)
         output_items = [dict(item) for item in (data.get("output") or []) if isinstance(item, dict)]
         if opts.get("native_continuation"):
             result.native_output_items = output_items
@@ -459,11 +543,13 @@ class OpenAIResponsesBackend(LLMBackend):
                 for part in item.get("content") or []:
                     if part.get("type") in ("output_text", "text"):
                         result.text += part.get("text", "")
+                    elif part.get("type") == "refusal":
+                        result.text += part.get("refusal", "")
             elif it == "reasoning":
                 for part in item.get("summary") or []:
                     if part.get("type") in ("summary_text", "text"):
                         result.reasoning += part.get("text", "")
-            elif it == "function_call":
+            elif it == "function_call" and stop == "stop" and item.get("status") in (None, "completed"):
                 result.tool_calls.append(ToolCall(
                     id=item.get("call_id") or item.get("id", ""),
                     name=item.get("name", ""),
@@ -475,5 +561,5 @@ class OpenAIResponsesBackend(LLMBackend):
             result,
             provider_billing_details(data.get("service_tier") or u.get("service_tier"), u),
         )
-        result.finish_reason = "tool_calls" if result.tool_calls else "stop"
+        result.finish_reason = "tool_calls" if result.tool_calls else stop
         return result

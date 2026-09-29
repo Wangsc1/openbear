@@ -72,9 +72,10 @@ async def test_native_thinking_mock_transport_capture_and_replay(stream):
         question = [{"role": "user", "content": "q"}]
         if stream:
             events = [event async for event in backend.stream(question, model="claude")]
-            assert [event.native_output_items[0] for event in events if event.kind == "native_output_item"] == [
-                THINKING, REDACTED, SECOND,
-            ]
+            assert [event.native_output_items for event in events if event.kind == "native_output_item"] == [[
+                THINKING, REDACTED, SECOND, {"type": "text", "text": "answer"},
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {"path": "x"}},
+            ]]
             # Fetch again using a fresh transport so the response cycle starts at call one.
             fresh_client = make_client(lambda req: sse_response(_stream_lines()))
             try:
@@ -84,7 +85,8 @@ async def test_native_thinking_mock_transport_capture_and_replay(stream):
                 await fresh_client.close()
         else:
             result = await backend.complete(question, model="claude")
-        assert result.native_output_items == [THINKING, REDACTED, SECOND]
+        assert result.native_output_items == [THINKING, REDACTED, SECOND, {"type": "text", "text": "answer"},
+                                              {"type": "tool_use", "id": "t1", "name": "Read", "input": {"path": "x"}}]
         assert result.reasoning == "second" and result.signature == "SIG-two"
         assert result.text == "answer" and result.finish_reason == "tool_calls"
         assert [call.id for call in result.tool_calls] == ["t1"]
@@ -102,7 +104,8 @@ async def test_native_thinking_mock_transport_capture_and_replay(stream):
         assert blocks[:3] == [THINKING, REDACTED, SECOND]
         assert [b["type"] for b in blocks] == ["thinking", "redacted_thinking", "thinking", "text", "tool_use"]
         assert "thinking" not in outbound  # /think off cannot disable during a tool turn
-        assert result.native_output_items == [THINKING, REDACTED, SECOND]  # no mutation from cache injection
+        assert result.native_output_items == [THINKING, REDACTED, SECOND, {"type": "text", "text": "answer"},
+                                              {"type": "tool_use", "id": "t1", "name": "Read", "input": {"path": "x"}}]  # no mutation from cache injection
     finally:
         await client.close()
 

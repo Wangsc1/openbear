@@ -1,9 +1,10 @@
 <script setup>
-import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import draggable from "vuedraggable";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Api, apiError } from "../api";
 import { copyTextToClipboard } from "../utils/clipboard.js";
+import { mobileSelectOptions } from "../mobileSelect.js";
 import { scrollModelListAbove } from "../components/modelDragAutoScroll.js";
 
 const loading = ref(false);
@@ -56,24 +57,69 @@ function modelSectionId(row, section) {
 const modelSearchQuery = ref("");
 const modelSearchInput = ref(null);
 const channelDetailStack = ref(null);
+const modelSearchMode = ref(false);
 let searchViewportTimer = 0;
-function keepModelSearchVisible() {
-  searchViewportTimer = 0;
-  const input = modelSearchInput.value, stack = channelDetailStack.value;
-  if (!input || !stack || document.activeElement !== input ||
-      !window.matchMedia('(max-width: 760px)').matches) return;
-  const viewport = window.visualViewport;
-  if (viewport && Math.abs(viewport.scale - 1) > .01) return;
-  const bounds = stack.getBoundingClientRect(), rect = input.getBoundingClientRect();
-  const bottom = Math.min(bounds.bottom, (viewport?.offsetTop || 0) + (viewport?.height || window.innerHeight)) - 8;
-  // iOS emits alternating visualViewport resize/scroll events throughout the
-  // keyboard animation. Correct once after they settle and only toward the
-  // search field; opposing corrections make the whole settings page bounce.
-  if (rect.bottom > bottom) stack.scrollTop += rect.bottom - bottom;
+let modelSearchNormalHeight = 0;
+let modelSearchMinimumHeight = 0;
+let modelSearchViewportShrunk = false;
+let modelSearchScroll = {stack: 0, list: 0};
+function modelSearchViewportHeight() {
+  return window.visualViewport?.height || window.innerHeight;
 }
-function scheduleModelSearchVisibility() {
+function beginModelSearch(normalHeight = modelSearchViewportHeight()) {
+  if (!window.matchMedia('(max-width: 760px)').matches ||
+      Math.abs((window.visualViewport?.scale || 1) - 1) > .01 || modelSearchMode.value) return;
+  modelSearchScroll = {stack: channelDetailStack.value?.scrollTop || 0, list: modelScrollList.value?.$el?.scrollTop || 0};
+  modelSearchNormalHeight = normalHeight;
+  modelSearchMinimumHeight = modelSearchViewportHeight();
+  modelSearchViewportShrunk = modelSearchMinimumHeight < normalHeight - 80;
+  modelSearchMode.value = true;
+  // Leave the input mounted and focused. Only the surrounding presentation
+  // changes; channel details, queries and user-expanded sections stay intact.
+}
+function restoreModelSearchLayout() {
+  if (!modelSearchMode.value) return;
+  const saved = modelSearchScroll;
+  modelSearchMode.value = false;
+  modelSearchViewportShrunk = false;
+  nextTick(() => {
+    if (modelSearchMode.value) return;
+    if (channelDetailStack.value) channelDetailStack.value.scrollTop = saved.stack;
+    if (modelScrollList.value?.$el) modelScrollList.value.$el.scrollTop = saved.list;
+  });
+}
+function finishModelSearch() {
+  modelSearchInput.value?.blur?.();
+  restoreModelSearchLayout();
+}
+function syncModelSearchViewport() {
+  searchViewportTimer = 0;
+  if (!window.matchMedia('(max-width: 760px)').matches) {
+    restoreModelSearchLayout();
+    return;
+  }
+  if (Math.abs((window.visualViewport?.scale || 1) - 1) > .01) return;
+  const height = modelSearchViewportHeight();
+  if (!modelSearchMode.value) {
+    // Back can dismiss Android's keyboard without blurring the input. A later
+    // tap can summon it again without another focus event.
+    if (document.activeElement === modelSearchInput.value && modelSearchNormalHeight && height < modelSearchNormalHeight - 80) {
+      beginModelSearch(modelSearchNormalHeight);
+    } else modelSearchNormalHeight = height;
+    return;
+  }
+  modelSearchMinimumHeight = Math.min(modelSearchMinimumHeight, height);
+  if (height < modelSearchNormalHeight - 80) modelSearchViewportShrunk = true;
+  // Wait for a real height recovery, not blur (which precedes button clicks),
+  // and ignore small address-bar changes. No outer scrollTop correction.
+  if (modelSearchViewportShrunk && height > modelSearchMinimumHeight + 80) {
+    modelSearchNormalHeight = height;
+    restoreModelSearchLayout();
+  }
+}
+function scheduleModelSearchViewport() {
   if (searchViewportTimer) window.clearTimeout(searchViewportTimer);
-  searchViewportTimer = window.setTimeout(keepModelSearchVisible, 120);
+  searchViewportTimer = window.setTimeout(syncModelSearchViewport, 120);
 }
 const modelScrollList = ref(null);
 let stopModelScroll = () => {};
@@ -1229,14 +1275,14 @@ async function persistModelOrder() {
 }
 onMounted(() => {
   void loadModelsDevProviders(); void loadList();
-  window.addEventListener('resize', scheduleModelSearchVisibility);
-  window.visualViewport?.addEventListener('resize', scheduleModelSearchVisibility);
-  window.visualViewport?.addEventListener('scroll', scheduleModelSearchVisibility);
+  window.addEventListener('resize', scheduleModelSearchViewport);
+  window.visualViewport?.addEventListener('resize', scheduleModelSearchViewport);
+  window.visualViewport?.addEventListener('scroll', scheduleModelSearchViewport);
 });
 onBeforeUnmount(() => {
-  window.removeEventListener('resize', scheduleModelSearchVisibility);
-  window.visualViewport?.removeEventListener('resize', scheduleModelSearchVisibility);
-  window.visualViewport?.removeEventListener('scroll', scheduleModelSearchVisibility);
+  window.removeEventListener('resize', scheduleModelSearchViewport);
+  window.visualViewport?.removeEventListener('resize', scheduleModelSearchViewport);
+  window.visualViewport?.removeEventListener('scroll', scheduleModelSearchViewport);
   if (searchViewportTimer) window.clearTimeout(searchViewportTimer);
   finishModelScroll();
   for (const key of channelTestPollers.keys()) clearChannelTestPoller(key);
@@ -1244,7 +1290,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="channels-view h-full flex flex-col bg-macbg" v-loading="loading">
+  <div class="channels-view h-full flex flex-col bg-macbg" :class="{'is-model-search': modelSearchMode}" v-loading="loading">
     <header class="channels-header h-14 shrink-0 flex items-center justify-between px-3 sm:px-6 border-b border-macborder bg-ob-surface/75 backdrop-blur">
       <div class="channels-heading flex items-center gap-2 min-w-0">
         <h1 class="text-base font-semibold whitespace-nowrap">渠道管理</h1>
@@ -1443,6 +1489,10 @@ onBeforeUnmount(() => {
 
           <!-- 模型列表区：自适应 3~4 列网格，分组结构清晰 -->
           <div class="channel-models-panel mac-panel mac-shadow overflow-hidden flex flex-col min-h-0 flex-1">
+            <div v-if="modelSearchMode" class="channel-search-context">
+              <div><strong>{{ selectedProvider.name }}</strong><span>{{ filteredModels.length }} 个匹配模型</span></div>
+              <button type="button" class="channel-quiet-control" @click="finishModelSearch">完成</button>
+            </div>
             <div class="channel-models-header flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 border-b border-macborder px-4 sm:px-5 py-3 shrink-0">
               <div class="channel-models-heading flex items-center gap-2.5 flex-wrap">
                 <div class="channel-models-title">
@@ -1453,7 +1503,8 @@ onBeforeUnmount(() => {
                   <input
                     ref="modelSearchInput"
                     v-model="modelSearchQuery"
-                    @focus="scheduleModelSearchVisibility"
+                    @focus="beginModelSearch()"
+                    @keydown.esc="finishModelSearch"
                     class="mac-input h-7 text-xs pl-7 pr-6"
                     placeholder="搜索模型 ID / 名称…"
                     aria-label="搜索模型 ID / 名称"
@@ -1474,8 +1525,8 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <div v-if="!(selectedProvider.models || []).length" class="flex-1 min-h-0 p-8 text-center text-sm text-macsub">该渠道暂无模型，点击右上角「＋ 添加模型」添加。</div>
-            <div v-else-if="!filteredModels.length" class="flex-1 min-h-0 p-8 text-center text-sm text-macsub">未找到匹配「{{ modelSearchQuery }}」的模型</div>
+            <div v-if="!(selectedProvider.models || []).length" class="channel-model-empty flex-1 min-h-0 p-8 text-center text-sm text-macsub">该渠道暂无模型，点击右上角「＋ 添加模型」添加。</div>
+            <div v-else-if="!filteredModels.length" class="channel-model-empty flex-1 min-h-0 p-8 text-center text-sm text-macsub">未找到匹配「{{ modelSearchQuery }}」的模型</div>
             <draggable
               v-else
               ref="modelScrollList"
@@ -1783,7 +1834,7 @@ onBeforeUnmount(() => {
                     <span class="batch-source-static"><i class="batch-source-static-mark">✓</i>{{ batchCandidateLabel(item.candidates[0]) }}</span>
                   </template>
                   <template v-else-if="item.candidates.length > 1">
-                    <el-select v-model="item.selectedProviderId" class="batch-source-select" filterable placeholder="选择提供者" @change="onBatchSourceProviderChanged">
+                    <el-select v-model="item.selectedProviderId" class="batch-source-select" :popper-options="mobileSelectOptions()" filterable placeholder="选择提供者" @change="onBatchSourceProviderChanged">
                       <el-option v-for="candidate in item.candidates" :key="candidate.providerId" :label="batchCandidateLabel(candidate)" :value="candidate.providerId" />
                     </el-select>
                   </template>
@@ -2483,6 +2534,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 /* These wrappers are layout-neutral on desktop; only phone disclosures collapse. */
 .channels-view .mobile-channel-only { display: none; }
 .channel-provider-details, .model-section-body, .channel-models-title, .channel-identity-badges { display: contents; }
+.channel-search-context { display: none; }
 
 /* Phone: a quiet macOS inspector above a model-first list, with a single page
    scroller. Secondary data expands in flow, never in a clipped floating layer. */
@@ -2641,9 +2693,26 @@ button:disabled { cursor: not-allowed; opacity: .48; }
   .channel-models-title .mini-chip { background: transparent; box-shadow: none; padding: 0; color: var(--channel-muted); }
   .channel-models-actions .mac-primary-button { grid-area: 1 / 2; }
   .channel-model-search { grid-area: 2 / 1; min-width: 0; }
-  .channel-model-search input { min-height: 44px; border-radius: 10px; background: var(--channel-surface); padding-left: 30px; padding-right: 36px; }
+  .channel-model-search input { min-height: 44px; border-radius: 10px; background: var(--channel-surface); padding-left: 30px; padding-right: 36px; font-size: 16px; }
   .channel-model-search button { min-width: 44px; min-height: 44px; right: 0; }
   .channel-batch-sync { grid-area: 2 / 2; }
+  /* Search is a local workspace, not another scrollable page around the list.
+     The original detail DOM and expansion flags are preserved for restoration. */
+  .channels-view.is-model-search .channels-header,
+  .channels-view.is-model-search .channels-overview,
+  .channels-view.is-model-search .channel-overview-card,
+  .channels-view.is-model-search .channel-models-title,
+  .channels-view.is-model-search .channel-models-actions { display: none; }
+  .channels-view.is-model-search .channel-detail-stack { overflow: hidden; overflow-y: hidden; gap: 0; }
+  .channels-view.is-model-search .channel-models-panel { flex: 1 1 0%; min-height: 0; }
+  .channels-view.is-model-search .channel-models-header { display: block; }
+  .channels-view.is-model-search .channel-search-context { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding-bottom: 6px; }
+  .channel-search-context > div { display: flex; flex: 1 1 0; align-items: baseline; min-width: 0; gap: 8px; }
+  .channel-search-context strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--channel-ink); font-size: 13px; font-weight: 500; }
+  .channel-search-context span { flex: 0 0 auto; color: var(--channel-muted); font-size: 12px; }
+  .channel-search-context > button { flex: 0 0 auto; color: var(--channel-accent); }
+  .channels-view.is-model-search .channel-model-empty { overflow-y: auto; padding: 16px; }
+  .channels-view.is-model-search .model-list-scroll { overscroll-behavior: contain; }
   .channel-batch-desktop-label, .channel-desktop-search-icon { display: none; }
   .channels-view .model-card {
     min-width: 0; padding: 14px 14px 6px; border: 1px solid var(--channel-line); border-radius: 16px;

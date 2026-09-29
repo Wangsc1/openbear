@@ -206,13 +206,20 @@ async def test_actual_protocol_preview_and_private_branch_fields(web_env, protoc
     elif protocol == 'anthropic':
         original['reasoning'] = ''
         original['signature'] = 'signature'
-        original['native_output_items'] = [{'type': 'thinking', 'thinking': '', 'signature': 'signature', 'vendor': {'retained': True}}, {'type': 'redacted_thinking', 'data': 'opaque'}]
+        original['native_output_items'] = [{'type': 'thinking', 'thinking': '', 'signature': 'signature', 'vendor': {'retained': True}}, {'type': 'text', 'text': 'long '}, {'type': 'redacted_thinking', 'data': 'opaque'}, {'type': 'text', 'text': 'response'}]
     body['working'] = copy.deepcopy(body['baseline'])
     result = await env.client.post(url + '/preview', json=body)
     assert result.status == 200, await result.text()
     preview = await result.json()
     assert preview['payload']['model'] == 'gpt'
-    assert 'long response' in str(preview['payload'])
+    if protocol == 'anthropic':
+        content = preview['payload']['messages'][1]['content']
+        assert [block['type'] for block in content] == [block['type'] for block in original['native_output_items']]
+        assert ''.join(block['text'] for block in content if block['type'] == 'text') == 'long response'
+        # Preview may add a cache breakpoint to a copy of the final block.
+        assert [{k: v for k, v in block.items() if k != 'cache_control'} for block in content] == original['native_output_items']
+    else:
+        assert 'long response' in str(preview['payload'])
     assert not any(i['severity'] == 'error' for i in preview['issues'])
     created = await env.client.post(url + '/branch', json=body)
     assert created.status == 200, await created.text()
@@ -221,6 +228,14 @@ async def test_actual_protocol_preview_and_private_branch_fields(web_env, protoc
     # Reopen from saved window + anchored private sidecar, not the creation DTO.
     edited = branch_view['baseline']['entries'][1]['message']
     assert edited.get('native_output_items') == original.get('native_output_items')
+    if protocol == 'anthropic':
+        branch_row = await env.server._conversation_row(123, bid)
+        restored = await MessageDAO(env.db).load_controller_model_context(
+            branch_row['internal_chat_id'], conversation_uuid=bid,
+            session_id=await MessageDAO(env.db).current_session_uuid(branch_row['internal_chat_id']),
+            protocol='anthropic', model='gpt', model_label='openai/gpt')
+        from app.llm.anthropic import _to_anthropic
+        assert _to_anthropic(restored['messages'])[1]['content'] == original['native_output_items']
 
 
 def test_readable_responses_projection_requires_explicit_thinking_removal():

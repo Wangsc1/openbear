@@ -4,6 +4,7 @@ import {ElMessage, ElMessageBox} from "element-plus";
 import {ArrowLeft, ArrowRight, Close, CollectionTag, Delete, EditPen, Plus, Refresh, RefreshLeft, Search} from "@element-plus/icons-vue";
 import InteractionMarkdown from "./InteractionMarkdown.vue";
 import {Api, apiError} from "../../api.js";
+import {mobileSelectOptions} from "../../mobileSelect.js";
 import {createTaskMemoryRequestGate} from "./taskMemoryRequestGate.js";
 import {taskMemoryInjectionPreview, taskMemoryInjectionUsage} from "./taskMemoryInjection.js";
 import {
@@ -679,6 +680,7 @@ defineExpose({open: openDrawer});
 				:loading="tasksLoading"
 				placeholder="暂无 Agent 任务"
 				filterable
+				:popper-options="mobileSelectOptions()"
 				popper-class="task-memory-task-select-popper"
 				class="memory-task-select"
 			>

@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Api, apiError } from "../api";
+import { mobileSelectOptions } from "../mobileSelect.js";
 import MdEditor from "../components/AdaptiveMdEditor.vue";
 import MobileAdminSummary from "../components/MobileAdminSummary.vue";
 import AdminPageHeader from "../components/AdminPageHeader.vue";
@@ -46,12 +47,13 @@ function normalizeCategory(value) {
 const activeCat = ref(normalizeCategory(props.activeType));
 const entries = ref([]);
 const loading = ref(false);
+const loadError = ref("");
 const scrollContainer = ref(null);
 const dragging = ref(false);
 const editing = ref(null);
 const original = ref("");
 const saving = ref(false);
-let alive = true;
+let alive = true, loadGeneration = 0;
 onBeforeUnmount(() => { alive = false; });
 const dialogOpen = ref(false);
 const showArchived = ref(false);
@@ -65,16 +67,27 @@ async function loadCategories() {
 }
 async function loadEntries() {
   if (!activeCat.value) return;
+  const generation = ++loadGeneration, selectedCategory = activeCat.value, archived = showArchived.value;
+  const current = () => alive && generation === loadGeneration && selectedCategory === activeCat.value && archived === showArchived.value;
   loading.value = true;
+  loadError.value = "";
   try {
-    const category = activeCat.value === "tools" ? "tools" : "";
-    const scope = activeCat.value === "memory" ? "memory" : "";
-    const data = await Api.entries(category, showArchived.value, scope);
+    const category = selectedCategory === "tools" ? "tools" : "";
+    const scope = selectedCategory === "memory" ? "memory" : "";
+    const data = await Api.entries(category, archived, scope);
+    if (!current()) return false;
     entries.value = data.items || [];
     rebuildGroups();
-  } finally {
-    loading.value = false;
+    return true;
+  } catch (error) {
+    if (!current()) return false;
+    entries.value = [];
+    rebuildGroups();
+    clearSelection();
+    loadError.value = apiError(error);
+    return false;
   }
+  finally { if (current()) loading.value = false; }
 }
 async function loadRefData() {
   try {
@@ -94,7 +107,7 @@ async function loadRefData() {
 }
 async function refresh() {
   await Promise.all([loadCategories(), loadRefData()]);
-  await loadEntries();
+  if (!await loadEntries()) return;
   clearSelection();
   ElMessage.success("已刷新");
 }
@@ -415,7 +428,11 @@ watch(activeCat, () => setMobileMode("browse"));
     </div>
 
     <div ref="scrollContainer" class="admin-list flex-1 min-h-0 overflow-y-auto px-6 pb-6" :class="{ 'select-none': dragging }" v-loading="loading">
-      <div v-if="!entries.length" class="text-center text-macsub py-16 text-sm">
+      <div v-if="loadError" role="alert" class="text-center text-macsub py-8 text-sm">
+        <p class="mb-3">加载失败：{{ loadError }}</p>
+        <el-button :disabled="loading" @click="loadEntries">重试</el-button>
+      </div>
+      <div v-else-if="!entries.length" class="text-center text-macsub py-16 text-sm">
         {{ showArchived ? '该分类暂无条目' : '该分类暂无未归档条目' }}
       </div>
 
@@ -489,7 +506,7 @@ watch(activeCat, () => setMobileMode("browse"));
           </div>
           <div class="w-44">
             <label class="text-xs text-macsub mb-1 block">分组（可选）</label>
-            <el-select v-model="editing.grp" filterable allow-create clearable default-first-option placeholder="不分组" class="w-full">
+            <el-select v-model="editing.grp" :popper-options="mobileSelectOptions()" filterable allow-create clearable default-first-option placeholder="不分组" class="w-full">
               <el-option v-for="g in groupNames" :key="g" :label="g" :value="g" />
             </el-select>
           </div>

@@ -121,6 +121,38 @@ async def test_responses_stream_function_call():
     assert result.native_output_items == []
 
 
+async def test_responses_empty_terminal_output_keeps_streamed_function_call():
+    # Codex-style relays emit response.completed with "output": [] while the
+    # streamed output_item.done frames carry the real items. The empty snapshot
+    # must not discard the streamed function_call.
+    lines = []
+    lines += _ev("response.output_item.added", {"type": "response.output_item.added", "output_index": 0, "item": {
+        "type": "message", "id": "msg_1", "content": []}})
+    lines += _ev("response.content_part.added", {"type": "response.content_part.added", "output_index": 0,
+        "item_id": "msg_1", "content_index": 0, "part": {"type": "output_text", "text": ""}})
+    lines += _ev("response.output_text.delta", {"type": "response.output_text.delta", "output_index": 0,
+        "item_id": "msg_1", "content_index": 0, "delta": "我先查看。"})
+    lines += _ev("response.output_text.done", {"type": "response.output_text.done", "output_index": 0,
+        "item_id": "msg_1", "content_index": 0, "text": "我先查看。"})
+    lines += _ev("response.output_item.done", {"type": "response.output_item.done", "output_index": 0, "item": {
+        "type": "message", "id": "msg_1", "content": [{"type": "output_text", "text": "我先查看。"}]}})
+    lines += _ev("response.output_item.added", {"type": "response.output_item.added", "output_index": 1, "item": {
+        "type": "function_call", "id": "fc_9", "call_id": "call_9", "name": "Bash"}})
+    lines += _ev("response.function_call_arguments.delta", {"type": "response.function_call_arguments.delta",
+        "output_index": 1, "item_id": "fc_9", "delta": '{"command":"ls"}'})
+    lines += _ev("response.output_item.done", {"type": "response.output_item.done", "output_index": 1, "item": {
+        "type": "function_call", "id": "fc_9", "call_id": "call_9", "name": "Bash", "arguments": '{"command":"ls"}'}})
+    lines += _ev("response.completed", {"type": "response.completed", "response": {
+        "status": "completed", "usage": {}, "output": []}})
+    backend = OpenAIResponsesBackend(make_client(lambda r: sse_response(lines)), "https://x/v1", "k")
+    result = await aggregate(backend.stream([{"role": "user", "content": "hi"}], model="m"))
+    assert result.finish_reason == "tool_calls"
+    assert len(result.tool_calls) == 1
+    tc = result.tool_calls[0]
+    assert tc.id == "call_9" and tc.name == "Bash"
+    assert json.loads(tc.arguments) == {"command": "ls"}
+
+
 async def test_responses_stream_edit_array_arguments():
     payload = {"path": "app/x.py", "edits": [{"old_string": "a", "new_string": "b"}]}
     lines = []
@@ -186,6 +218,74 @@ async def test_responses_native_continuation_captures_and_replays_output_items()
     assert sum(1 for item in replayed if item.get("type") == "function_call") == 1
     assert "这段可读文本不能重复序列化" not in json.dumps(replayed, ensure_ascii=False)
     assert replayed[-1] == {"type": "function_call_output", "call_id": "fc_1", "output": "a.txt"}
+
+
+@pytest.mark.parametrize("native_continuation", [False, True])
+@pytest.mark.parametrize("ordering_source", ["done_index", "added_index", "terminal_output"])
+async def test_responses_output_order_is_not_completion_order(native_continuation, ordering_source):
+    items = [
+        {"type": "reasoning", "id": "rs_order", "summary": [], "encrypted_content": "opaque"},
+        {"type": "message", "id": "msg_before", "role": "assistant",
+         "content": [{"type": "output_text", "text": "before"}]},
+        {"type": "function_call", "id": "fc_first", "call_id": "call_first",
+         "name": "First", "arguments": "{}"},
+        {"type": "message", "id": "msg_between", "role": "assistant",
+         "content": [{"type": "output_text", "text": "between"}]},
+        {"type": "function_call", "id": "fc_second", "call_id": "call_second",
+         "name": "Second", "arguments": "{}"},
+    ]
+    lines = []
+    if ordering_source == "added_index":
+        for index, item in enumerate(items):
+            lines += _ev("response.output_item.added", {
+                "type": "response.output_item.added", "output_index": index, "item": item,
+            })
+    for index in [0, 4, 2, 3, 1]:
+        event = {"type": "response.output_item.done", "item": items[index]}
+        if ordering_source == "done_index":
+            event["output_index"] = index
+        lines += _ev("response.output_item.done", event)
+    response = {"status": "completed"}
+    if ordering_source == "terminal_output":
+        response["output"] = items
+    lines += _ev("response.completed", {"type": "response.completed", "response": response})
+    backend = OpenAIResponsesBackend(make_client(lambda _r: sse_response(lines)), "https://x/v1", "k")
+    result = await aggregate(backend.stream(
+        [{"role": "user", "content": "hi"}], model="m", native_continuation=native_continuation,
+    ))
+    assert [call.id for call in result.tool_calls] == ["call_first", "call_second"]
+    assert result.native_output_items == (items if native_continuation else [])
+    if native_continuation:
+        replay = _to_responses_input([
+            {"role": "assistant", "native_output_items": result.native_output_items},
+            {"role": "tool", "tool_call_id": "call_first", "content": "first result"},
+            {"role": "tool", "tool_call_id": "call_second", "content": "second result"},
+        ])
+        assert replay[:len(items)] == items
+        assert [item["type"] for item in replay[-2:]] == ["function_call_output"] * 2
+
+
+@pytest.mark.parametrize("terminal", ["completed", "incomplete"])
+async def test_responses_terminal_output_completes_native_items_once(terminal):
+    item = {"type": "reasoning", "id": "rs_final", "summary": [], "encrypted_content": "final"}
+    call = {"type": "function_call", "id": "fc_final", "call_id": "call_final",
+            "name": "Bash", "arguments": "{}"}
+    lines = _ev("response.output_item.done", {
+        "type": "response.output_item.done", "output_index": 0,
+        "item": {**item, "encrypted_content": "earlier"},
+    })
+    # The terminal array is authoritative and includes a call whose done event was omitted.
+    lines += _ev(f"response.{terminal}", {
+        "type": f"response.{terminal}",
+        "response": {"status": terminal, "output": [item, call]},
+    })
+    backend = OpenAIResponsesBackend(make_client(lambda _r: sse_response(lines)), "https://x/v1", "k")
+    result = await aggregate(backend.stream(
+        [{"role": "user", "content": "hi"}], model="m", native_continuation=True,
+    ))
+    assert result.native_output_items == [item, call]
+    assert [value.id for value in result.tool_calls] == (["call_final"] if terminal == "completed" else [])
+    assert result.finish_reason == ("tool_calls" if terminal == "completed" else "incomplete")
 
 
 async def test_controller_agent_enables_native_responses_request_fields():
@@ -594,120 +694,3 @@ async def test_responses_completed_still_stop():
     backend = OpenAIResponsesBackend(make_client(lambda _r: sse_response(lines)), "https://x/v1", "k")
     result = await aggregate(backend.stream([{"role": "user", "content": "hi"}], model="m"))
     assert result.finish_reason == "stop"
-
-
-def _done(item: dict, index: int | None = None, phase: str = "done") -> list[str]:
-    data = {"type": f"response.output_item.{phase}", "item": item}
-    if index is not None:
-        data["output_index"] = index
-    return _ev(f"response.output_item.{phase}", data)
-
-
-_THINK = {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "opaque-order"}
-_TEXT = {"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
-         "content": [{"type": "output_text", "text": "先说明", "annotations": []}]}
-_CALL_A = {"type": "function_call", "id": "fc_a", "call_id": "call_a", "name": "Read",
-           "arguments": "{}", "status": "completed"}
-_CALL_B = {"type": "function_call", "id": "fc_b", "call_id": "call_b", "name": "Read",
-           "arguments": "{}", "status": "completed"}
-_COMPLETED = _ev("response.completed", {"type": "response.completed",
-                                        "response": {"status": "completed", "usage": {}}})
-
-
-async def _native_events(lines, *, native_continuation=True):
-    backend = OpenAIResponsesBackend(make_client(lambda _r: sse_response(lines)), "https://x/v1", "k")
-    return [e async for e in backend.stream(
-        [{"role": "user", "content": "hi"}], model="gpt-test", native_continuation=native_continuation,
-    )]
-
-
-def _native(events):
-    return [i for e in events if e.kind == "native_output_item" for i in e.native_output_items]
-
-
-async def test_native_items_follow_output_index_when_tool_done_before_text():
-    lines = []
-    lines += _done(_THINK, 0)
-    lines += _done(_CALL_A, 2)
-    lines += _ev("response.output_text.delta", {"type": "response.output_text.delta", "delta": "先说明"})
-    lines += _done(_TEXT, 1)
-    lines += _COMPLETED
-    events = await _native_events(lines)
-
-    assert _native(events) == [_THINK, _TEXT, _CALL_A]
-    assert _native(events)[0]["encrypted_content"] == "opaque-order"
-    # Live text is not held back, and tool scheduling still happens after the stream.
-    kinds = [e.kind for e in events]
-    assert kinds.index("content") < kinds.index("native_output_item")
-    assert kinds.index("native_output_item") < kinds.index("tool_call") < kinds.index("finish")
-    result = await aggregate(_replay(events))
-    assert [c.id for c in result.tool_calls] == ["call_a"] and result.finish_reason == "tool_calls"
-    replay = _to_responses_input([
-        {"role": "user", "content": "hi"},
-        {"role": "assistant", "content": "先说明", "tool_calls": result.tool_calls,
-         "native_output_items": result.native_output_items},
-        {"role": "tool", "tool_call_id": "call_a", "content": "ok"},
-    ])
-    assert [i.get("type") or i.get("role") for i in replay] == [
-        "user", "reasoning", "message", "function_call", "function_call_output"]
-
-
-async def _replay(events):
-    for event in events:
-        yield event
-
-
-async def test_multiple_tool_items_keep_provider_order_even_if_done_reversed():
-    lines = _done(_CALL_B, 3) + _done(_CALL_A, 2) + _done(_TEXT, 1) + _done(_THINK, 0) + _COMPLETED
-    events = await _native_events(lines)
-    assert _native(events) == [_THINK, _TEXT, _CALL_A, _CALL_B]
-    assert [c.id for e in events if e.kind == "tool_call" for c in e.tool_calls] == ["call_b", "call_a"]
-
-
-async def test_native_items_without_output_index_keep_arrival_order():
-    events = await _native_events(_done(_CALL_A) + _done(_TEXT) + _done(_THINK) + _COMPLETED)
-    assert _native(events) == [_CALL_A, _TEXT, _THINK]
-
-
-async def test_partially_indexed_native_items_do_not_move_unindexed_slots():
-    unknown = {"type": "web_search_call", "status": "completed"}
-    events = await _native_events(_done(_CALL_A, 2) + _done(unknown) + _done(_TEXT, 1) + _COMPLETED)
-    assert _native(events) == [_TEXT, unknown, _CALL_A]
-
-
-async def test_output_index_from_added_event_orders_done_without_index():
-    lines = _done(_THINK, 0, "added") + _done(_TEXT, 1, "added") + _done(_CALL_A, 2, "added")
-    lines += _done(_CALL_A) + _done(_TEXT) + _done(_THINK) + _COMPLETED
-    events = await _native_events(lines)
-    assert _native(events) == [_THINK, _TEXT, _CALL_A]
-
-
-async def test_terminal_response_output_orders_unindexed_done_by_exact_identity():
-    lines = _done(_CALL_A) + _done(_TEXT) + _done(_THINK)
-    lines += _ev("response.completed", {"type": "response.completed", "response": {
-        "status": "completed", "output": [_THINK, _TEXT, _CALL_A], "usage": {}}})
-    events = await _native_events(lines)
-    assert _native(events) == [_THINK, _TEXT, _CALL_A]
-
-
-async def test_terminal_output_does_not_add_or_guess_ambiguous_items():
-    lines = _done(_CALL_A) + _done(_TEXT)
-    lines += _ev("response.completed", {"type": "response.completed", "response": {
-        "status": "completed", "output": [_TEXT, _TEXT, _THINK, _CALL_A], "usage": {}}})
-    events = await _native_events(lines)
-    assert _native(events) == [_CALL_A, _TEXT]  # duplicate id is ambiguous; no synthesized reasoning
-
-
-async def test_repeated_done_for_same_output_index_is_not_duplicated():
-    newer = {**_CALL_A, "arguments": '{"a":1}'}
-    events = await _native_events(_done(_CALL_A, 1) + _done(newer, 1) + _done(_THINK, 0) + _COMPLETED)
-    assert _native(events) == [_THINK, newer]
-
-
-async def test_native_order_flushes_before_stream_error_and_stays_off_without_native_mode():
-    lines = _done(_CALL_A, 1) + _done(_THINK, 0) + _ev("error", {
-        "type": "error", "message": "busy", "error_type": "server_error"})
-    events = await _native_events(lines)
-    assert _native(events) == [_THINK, _CALL_A]
-    assert events[-1].kind == "error"
-    assert _native(await _native_events(_done(_CALL_A, 1) + _COMPLETED, native_continuation=False)) == []

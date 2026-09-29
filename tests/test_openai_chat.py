@@ -367,8 +367,7 @@ async def test_chat_stream_forwards_first_byte_and_total_without_connect_or_idle
 
     async def fake_post_sse(_url, _headers, _payload, **kwargs):
         captured.update(kwargs)
-        if False:
-            yield None
+        yield "", {"choices": [{"delta": {}, "finish_reason": "stop"}]}
 
     monkeypatch.setattr(client, "post_sse", fake_post_sse)
     backend = OpenAIChatBackend(client, "https://x/v1", "k")
@@ -382,6 +381,7 @@ async def test_chat_stream_forwards_first_byte_and_total_without_connect_or_idle
     assert events[-1].kind == "finish"
     assert captured == {
         "protocol": "chat",
+        "emit_done": True,
         "first_byte_timeout_s": 1800,
         "total_timeout_s": 1800,
     }

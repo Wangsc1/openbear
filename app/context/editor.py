@@ -70,6 +70,30 @@ def readable_pair(message):
     return message.get("content") or "", message.get("tool_calls") or []
 
 
+def visible_claude(items):
+    text, calls = [], []
+    for item in items:
+        if item.get('type') == 'text':
+            text.append(item.get('text', ''))
+        elif item.get('type') == 'tool_use':
+            calls.append({'id': item.get('id', ''), 'name': item.get('name', ''),
+                          'arguments': json.dumps(item.get('input') or {}, ensure_ascii=False)})
+    return ''.join(text), calls
+
+
+def claude_matches_neutral(native, message):
+    text, calls = visible_claude(native)
+    neutral_text, neutral_calls = readable_pair(message)
+    if text != neutral_text or len(calls) != len(neutral_calls):
+        return False
+    try:
+        return all(a['id'] == b['id'] and a['name'] == b['name']
+                   and json.loads(a['arguments']) == json.loads(b['arguments'])
+                   for a, b in zip(calls, neutral_calls))
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def sync_native(message):
     """Materialize edited neutral text/calls into readable native blocks.
 
@@ -185,7 +209,24 @@ def compile_document(baseline, working, *, protocol, model_label='', available_t
             continue
         if (calls or native) and role != 'assistant':
             issue('assistant_fields', '调用和原生输出块只能属于 assistant。', eid)
-        anthro = bool(native) and all(n.get('type') in {'thinking', 'redacted_thinking'} for n in native)
+        anthro = bool(native) and all(n.get('type') in {'thinking', 'redacted_thinking', 'text', 'tool_use'} for n in native)
+        if anthro and any(
+            (n['type'] == 'text' and not isinstance(n.get('text'), str))
+            or (n['type'] == 'thinking' and (not isinstance(n.get('thinking'), str)
+                or not isinstance(n.get('signature', ''), str)))
+            or (n['type'] == 'redacted_thinking' and not isinstance(n.get('data'), str))
+            or (n['type'] == 'tool_use' and (not isinstance(n.get('id'), str) or not n['id']
+                or not isinstance(n.get('name'), str) or not n['name']
+                or not isinstance(n.get('input'), dict))) for n in native
+        ):
+            issue('native_shape', 'Claude 原生正文、签名与工具块字段类型无效。', eid)
+            continue
+        complete_claude = anthro and any(n.get('type') in {'text', 'tool_use'} for n in native)
+        if complete_claude and (native != (old.get('native_output_items') or []) or readable_pair(m) != readable_pair(old)):
+            if native != (old.get('native_output_items') or []) and readable_pair(m) == readable_pair(old):
+                m['content'], m['tool_calls'] = visible_claude(native)
+            elif not claude_matches_neutral(native, m):
+                issue('native_conflict', 'Claude 原生块与正文/工具调用不一致；请保持原样或同时明确编辑两种表示。', eid)
         if native and not anthro:
             try:
                 readable_changed = readable_pair(m) != readable_pair(old)
@@ -264,7 +305,8 @@ def compile_document(baseline, working, *, protocol, model_label='', available_t
         if not native and m.get('reasoning') is not None and m.get('signature') is None:
             issue('unsigned_reasoning', '无签名 reasoning 仅保留在文档；当前目标协议不保证采用。', eid, 'warning')
         if native and ((anthro and protocol != 'anthropic') or (not anthro and protocol != 'responses')):
-            portable = all(n.get('type') in {'message', 'function_call'} and (n.get('type') != 'message' or all(b.get('type') in {'text', 'output_text'} for b in n.get('content', []))) for n in native)
+            portable = (all(n.get('type') in {'text', 'tool_use'} for n in native) if anthro else
+                        all(n.get('type') in {'message', 'function_call'} and (n.get('type') != 'message' or all(b.get('type') in {'text', 'output_text'} for b in n.get('content', []))) for n in native))
             if portable:
                 m.pop('native_output_items', None)
                 issue('readable_native_projection', '目标协议使用已同步的通用正文/调用；原生可读块仍保存在原始编辑包，不放入本协议执行视图。', eid, 'warning')

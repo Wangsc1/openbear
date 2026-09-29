@@ -6,6 +6,7 @@ import MarkdownIt from "markdown-it";
 import hljs from "highlight.js";
 import "highlight.js/styles/github.css";
 import {Api, apiError} from "../api";
+import {mobileSelectOptions} from "../mobileSelect.js";
 import MdEditor from "../components/AdaptiveMdEditor.vue";
 import MobileAdminSummary from "../components/MobileAdminSummary.vue";
 
@@ -379,7 +380,7 @@ const SAMPLE = `You are OpenBear, a capable AI assistant operating inside a priv
 		<div v-if="editing" class="template-meta h-14 shrink-0 px-4 border-b border-macborder bg-ob-surface/55 flex items-center gap-3">
 			<div class="flex items-center gap-2 min-w-0">
 				<span class="text-xs text-macsub shrink-0">模板</span>
-				<el-select v-model="activeId" :disabled="changingTemplate" @change="selectById" filterable class="!w-72" aria-label="选择模板" placeholder="选择模板">
+				<el-select v-model="activeId" :disabled="changingTemplate" @change="selectById" :popper-options="mobileSelectOptions()" filterable class="!w-72" aria-label="选择模板" placeholder="选择模板">
 					<el-option v-for="t in templates" :key="t.id"
 					           :label="t.name + (t.is_active ? ' · 激活' : '') + (t.is_agent_active ? ' · Agent提示词' : '')"
 					           :value="t.id"/>

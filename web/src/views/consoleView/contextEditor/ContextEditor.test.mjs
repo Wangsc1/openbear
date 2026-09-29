@@ -23,6 +23,46 @@ function reply(key, draft=null){return {ok:true,baseline:sample(key),snapshotTok
 function setup(key='one'){const scope=effectScope(), props=reactive({conversationUuid:key,busy:false}), events=[];let exposed;
  const vm=scope.run(()=>Component.setup(props,{expose: value=>{exposed=value;},emit:(...args)=>events.push(args)}));return {scope,props,vm,exposed,events};}
 const settle=async()=>{await Promise.resolve();await nextTick();};
+test('keyboard-sized editor uses actual available bounds, restores normal layout, and releases observers', async()=>{
+ const priorWindow=globalThis.window, priorObserver=globalThis.ResizeObserver;let observer,disconnected=false;
+ let bounds={width:390,height:796},coarse=true;
+ const win=Object.assign(new EventTarget(),{visualViewport:new EventTarget(),matchMedia:()=>({matches:coarse})});
+ globalThis.window=win;globalThis.ResizeObserver=class {constructor(fn){observer=fn;}observe(){}disconnect(){disconnected=true;}};
+ const {scope,vm}=setup();
+ try {
+  vm.editorShell.value={getBoundingClientRect:()=>bounds};await settle();assert.equal(vm.compactViewport.value,false);
+  for(const width of [320,360,375,390,412,430,844]){bounds={width,height:212};observer();assert.equal(vm.compactViewport.value,true);}
+  vm.compactPanel.value='outline';bounds={width:390,height:796};observer();assert.equal(vm.compactViewport.value,false);assert.equal(vm.compactPanel.value,'document');
+  coarse=false;bounds={width:1280,height:390};observer();assert.equal(vm.compactViewport.value,false);
+  scope.stop();assert.equal(disconnected,true);
+ }finally{scope.stop();if(priorWindow===undefined)delete globalThis.window;else globalThis.window=priorWindow;if(priorObserver===undefined)delete globalThis.ResizeObserver;else globalThis.ResizeObserver=priorObserver;}
+});
+test('compact panel navigation preserves draft and invalid raw edits; choosing a message returns to its editor',async()=>{
+ Api.contextEditor=async key=>reply(key);const {scope,vm,exposed}=setup();
+ try{
+  exposed.open();await settle();vm.setField('system','retained draft');vm.compactViewport.value=true;
+  vm.switchCompactPanel('controls');assert.equal(vm.compactPanel.value,'controls');assert.equal(vm.doc.value.system,'retained draft');
+  vm.switchCompactPanel('outline');vm.choose('one');assert.equal(vm.selected.value,'one');assert.equal(vm.compactPanel.value,'document');
+  vm.switchTab('raw');vm.raw.value='invalid';vm.switchCompactPanel('controls');assert.equal(vm.compactPanel.value,'document');assert.ok(vm.rawError.value);
+  vm.raw.value='{"role":"user","content":"edited"}';vm.switchCompactPanel('controls');assert.equal(vm.doc.value.entries[0].message.content,'edited');assert.equal(vm.compactPanel.value,'controls');
+ }finally{scope.stop();}
+});
+test('complete Claude native blocks use existing text/call editors without mixing Responses items',async()=>{
+ const data=reply('one');data.baseline.origin.protocol='claude';data.models[0].protocol='claude';
+ data.baseline.entries=[{entryId:'a',message:{role:'assistant',content:'AB',tool_calls:[{id:'c1',name:'Read',arguments:'{ "path": "old" }'}],native_output_items:[{type:'thinking',thinking:'keep',signature:'sig'},{type:'text',text:'A',citations:[{keep:1}]},{type:'tool_use',id:'c1',name:'Read',input:{path:'old'},vendor:'keep'},{type:'text',text:'B'}]}}];
+ Api.contextEditor=async()=>data;const {scope,vm,exposed}=setup();
+ try{
+  exposed.open();await settle();vm.choose('a');assert.equal(vm.sequence.value.ordered,true);assert.match(vm.orderNote.value,/调整会写入实际请求/);
+  vm.openBlock(vm.sequence.value.rows[1]);assert.equal(vm.entityEditor.value.json,false);assert.equal(vm.entityEditor.value.text,'A');vm.entityEditor.value.text='C';vm.saveEntity();assert.equal(vm.entry.value.message.content,'CB');
+  assert.deepEqual(vm.entry.value.message.native_output_items[1].citations,[{keep:1}]);
+  vm.openBlock(vm.sequence.value.rows[2]);assert.equal(vm.entityEditor.value.kind,'call');vm.entityEditor.value.text='{"path":"new"}';vm.saveEntity();
+  assert.deepEqual(vm.entry.value.message.native_output_items[2].input,{path:'new'});assert.equal(vm.entry.value.message.native_output_items[2].vendor,'keep');
+  vm.revealBody();assert.equal(vm.entityEditor.value.data.type,'text');vm.entityEditor.value.text='D';vm.saveEntity();assert.equal(vm.entry.value.message.content,'CBD');
+  vm.addCall();vm.entityEditor.value.data.name='Read';vm.entityEditor.value.text='{}';vm.saveEntity();assert.equal(vm.entry.value.message.native_output_items.at(-1).type,'tool_use');
+  assert.deepEqual(vm.entry.value.message.native_output_items[0],{type:'thinking',thinking:'keep',signature:'sig'});assert.equal(vm.entityError.value,'');
+ }finally{scope.stop();}
+});
+
 test('older Safari can add a message and tool call using getRandomValues without randomUUID', async()=>{
  const descriptor=Object.getOwnPropertyDescriptor(globalThis,'crypto'), native=globalThis.crypto;
  Object.defineProperty(globalThis,'crypto',{configurable:true,value:{getRandomValues:bytes=>native.getRandomValues(bytes)}});

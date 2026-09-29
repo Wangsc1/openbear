@@ -12,6 +12,7 @@ from app.llm.base import (
     AgentResult,
     LLMBackend,
     Message,
+    OpenBearLLMError,
     apply_fast_request_body,
     apply_provider_billing,
     fast_request_parts,
@@ -194,11 +195,17 @@ class OpenAIChatBackend(LLMBackend):
             self._headers(sid, fast_headers=fast_headers),
             payload,
             protocol="chat",
+            emit_done=True,
             first_byte_timeout_s=opts.get("first_byte_timeout_s"),
             total_timeout_s=opts.get("total_timeout_s"),
         ):
             if ev_name == "__openbear_metrics__":
                 yield StreamEvent(kind="metrics", connect_ms=int(chunk.get("connect_ms") or 0))
+                continue
+            if ev_name == "__openbear_done__":
+                # DONE is also explicit completion evidence on compatible Chat
+                # relays. Never let it overwrite length/content_filter.
+                finish_reason = finish_reason or "stop"
                 continue
             err = error_event(chunk, event_name=ev_name)
             if err:
@@ -221,6 +228,8 @@ class OpenAIChatBackend(LLMBackend):
                 c = delta.get("content")
                 if c:
                     yield StreamEvent(kind="content", text=c)
+                if delta.get("refusal"):
+                    yield StreamEvent(kind="content", text=delta["refusal"])
                 for tc in delta.get("tool_calls") or []:
                     idx = tc.get("index", 0)
                     slot = pending.setdefault(idx, ToolCall())
@@ -235,12 +244,14 @@ class OpenAIChatBackend(LLMBackend):
                 if fr:
                     finish_reason = fr
 
-        if pending:
-            # Parrot may translate an OpenAI Responses upstream tool-call turn into
-            # Chat SSE chunks whose deltas contain tool_calls but whose final
-            # finish_reason is still "stop".  The Agent loop relies on the
-            # normalized finish reason to decide whether to execute tools, so
-            # treat the presence of complete pending tool calls as authoritative.
+        if not finish_reason:
+            # A syntactically valid argument prefix is not completion evidence.
+            # Retain visible partial text for the existing retry driver, but do
+            # not submit pending tools until the model's semantic finish arrives.
+            raise OpenBearLLMError("Chat 流提前结束：未收到 finish_reason", retryable=True, protocol="chat")
+        if pending and finish_reason in {"stop", "tool_calls"}:
+            # Compatible relays sometimes report stop on a complete tool turn.
+            # Preserve that recovery, never override length/content_filter.
             calls = [pending[i] for i in sorted(pending)]
             yield StreamEvent(kind="tool_call", tool_calls=calls)
             finish_reason = "tool_calls"
@@ -294,10 +305,10 @@ class OpenAIChatBackend(LLMBackend):
         choices = data.get("choices") or []
         if choices:
             msg = choices[0].get("message") or {}
-            result.text = msg.get("content") or ""
+            result.text = (msg.get("content") or "") + (msg.get("refusal") or "")
             result.reasoning = msg.get("reasoning_content") or ""
             result.finish_reason = choices[0].get("finish_reason") or "stop"
-            for i, tc in enumerate(msg.get("tool_calls") or []):
+            for i, tc in enumerate((msg.get("tool_calls") or []) if result.finish_reason in {"stop", "tool_calls"} else []):
                 fn = tc.get("function") or {}
                 result.tool_calls.append(ToolCall(
                     id=tc.get("id") or f"call_{i}",

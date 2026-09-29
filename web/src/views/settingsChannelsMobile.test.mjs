@@ -251,31 +251,85 @@ test('320–760px navigation is a 44px picker and quiet restart, never a horizon
   }
 });
 
-test('keyboard viewport bursts coalesce into one downward-only model-search correction', () => {
+function searchRuntime({mobile = true, scale = 1, noViewport = false} = {}) {
   const timers = new Map(); let nextTimer = 0;
-  const inputRect = {top: 366, bottom: 410};
-  const input = {getBoundingClientRect: () => ({...inputRect})};
-  const stack = {scrollTop: 0, getBoundingClientRect: () => ({top: 48, bottom: 408})};
-  const document = {activeElement: input};
+  const stack = {scrollTop: 200}, list = {scrollTop: 450};
+  const document = {activeElement: null};
+  const input = {blur() {document.activeElement = null;}};
+  document.activeElement = input;
   const window = {
     innerHeight: 874,
-    visualViewport: {offsetTop: 80, height: 260, scale: 1},
-    matchMedia: () => ({matches: true}),
-    setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, {callback, delay}); return id; },
-    clearTimeout(id) { timers.delete(id); },
+    visualViewport: noViewport ? null : {height: 874, scale, removeEventListener() {}},
+    removeEventListener() {}, matchMedia: () => ({matches: mobile}),
+    setTimeout(callback, delay) {const id = ++nextTimer; timers.set(id, {callback, delay}); return id;},
+    clearTimeout(id) {timers.delete(id);},
   };
   const r = runtime(channels, {window, document});
-  r.ctx.input = input; r.ctx.stack = stack;
-  r.run('modelSearchInput.value=markRaw(input);channelDetailStack.value=markRaw(stack)');
-  r.run('scheduleModelSearchVisibility();scheduleModelSearchVisibility();scheduleModelSearchVisibility()');
-  assert.equal(timers.size, 1, 'resize and scroll bursts leave one settled correction');
-  const pending = [...timers.values()][0]; assert.equal(pending.delay, 120);
-  timers.clear(); pending.callback();
-  assert.equal(stack.scrollTop, 78, 'the focused search is revealed once above the keyboard');
-  Object.assign(inputRect, {top: 60, bottom: 104});
-  r.run('scheduleModelSearchVisibility()');
-  const above = [...timers.values()][0]; timers.clear(); above.callback();
-  assert.equal(stack.scrollTop, 78, 'an intermediate opposite viewport event cannot bounce the page back');
+  Object.assign(r.ctx, {input, stack, list});
+  r.run('modelSearchInput.value=markRaw(input);channelDetailStack.value=markRaw(stack);modelScrollList.value=markRaw({$el:list});modelSearchQuery.value="astra";providerDetailsOpen.value=true;channelOverviewOpen.value=true;channelToolsOpen.value=true');
+  return {...r, stack, list, document, window, timers, setHeight(height) {if (window.visualViewport) window.visualViewport.height = height; else window.innerHeight = height;}};
+}
+
+test('channel search uses a local workspace, retains query/disclosures, and restores both positions on done', async () => {
+  const r = searchRuntime();
+  const inputTemplate = node(channels, 'channel-model-search');
+  const {nodes} = await render(channels, r, inputTemplate.loc.source);
+  const input = nodes.find(n => n.type === 'input');
+  input.props.onFocus(); assert.equal(r.run('modelSearchMode.value'), true);
+  r.stack.scrollTop = 0; r.list.scrollTop = 30;
+  r.setHeight(320);
+  r.run('scheduleModelSearchViewport();scheduleModelSearchViewport();scheduleModelSearchViewport()');
+  assert.equal(r.timers.size, 1, 'keyboard animation events settle once');
+  const pending = [...r.timers.values()][0]; assert.equal(pending.delay, 120);
+  r.timers.clear(); pending.callback();
+  assert.equal(r.stack.scrollTop, 0, 'keyboard changes do not scroll the outer stack');
+  assert.equal(r.run('modelSearchMode.value'), true);
+  r.document.activeElement = null;
+  r.run('syncModelSearchViewport()');
+  assert.equal(r.run('modelSearchMode.value'), true, 'blur precedes row clicks and cannot tear down the workspace');
+  r.run('finishModelSearch()'); await Vue.nextTick();
+  assert.equal(r.run('modelSearchMode.value'), false);
+  assert.equal(r.stack.scrollTop, 200); assert.equal(r.list.scrollTop, 450);
+  assert.equal(r.run('modelSearchQuery.value'), 'astra');
+  assert.equal(r.run('providerDetailsOpen.value && channelOverviewOpen.value && channelToolsOpen.value'), true);
+  assert.deepEqual(r.events, [], 'layout changes invoke no business action');
+  r.run('scheduleModelSearchViewport()'); r.unmounted.forEach(fn => fn());
+  assert.equal(r.timers.size, 0, 'unmount cancels the pending callback');
+});
+
+test('keyboard dismissal restores channel layout even while focused, and a second keyboard opening works without refocus', async () => {
+  for (const noViewport of [false, true]) {
+    const r = searchRuntime({noViewport});
+    r.run('beginModelSearch()'); r.setHeight(300); r.run('syncModelSearchViewport()');
+    r.setHeight(340); r.run('syncModelSearchViewport()');
+    assert.equal(r.run('modelSearchMode.value'), true, 'small toolbar changes do not end search');
+    r.setHeight(874); r.run('syncModelSearchViewport()'); await Vue.nextTick();
+    assert.equal(r.run('modelSearchMode.value'), false, 'keyboard can close without an input blur');
+    r.setHeight(300); r.run('syncModelSearchViewport()');
+    assert.equal(r.run('modelSearchMode.value'), true, 'already-focused field can summon the keyboard again');
+    assert.equal(r.run('modelSearchQuery.value'), 'astra');
+  }
+  for (const scenario of [{mobile:false}, {scale:2}]) {
+    const r = searchRuntime(scenario); r.run('beginModelSearch();syncModelSearchViewport()');
+    assert.equal(r.run('modelSearchMode.value'), false, 'desktop and manual pinch zoom stay native');
+    assert.equal(r.stack.scrollTop, 200); assert.equal(r.list.scrollTop, 450);
+  }
+});
+
+test('mobile search removes the outer scroll and minimum panel height, with a fixed channel/search header and 16px input', () => {
+  for (const width of [320, 390, 640, 760]) {
+    assert.equal(css(channels, '.channels-view.is-model-search .channel-detail-stack', width)['overflow-y'], 'hidden');
+    const panel = css(channels, '.channels-view.is-model-search .channel-models-panel', width);
+    assert.equal(panel.flex, '1 1 0%'); assert.equal(panel['min-height'], '0');
+    for (const name of ['channels-header','channels-overview','channel-overview-card','channel-models-title','channel-models-actions']) {
+      assert.equal(css(channels, `.channels-view.is-model-search .${name}`, width).display, 'none');
+    }
+    assert.equal(css(channels, '.channels-view.is-model-search .channel-search-context', width).flex, '0 0 auto');
+    assert.equal(css(channels, '.channel-model-search input', width)['font-size'], '16px');
+    assert.equal(css(channels, '.channels-view.is-model-search .model-list-scroll', width)['overscroll-behavior'], 'contain');
+  }
+  assert.equal(css(channels, '.channels-view.is-model-search .channel-detail-stack', 1280)['overflow-y'], undefined);
+  assert.equal(css(channels, '.channel-model-search input', 1280)['font-size'], undefined, 'desktop input size is unchanged');
 });
 
 test('mobile model list scrolls normally and short viewports scroll the stack without squeezing the channel card', () => {
@@ -295,7 +349,7 @@ test('mobile model list scrolls normally and short viewports scroll the stack wi
     for (const c of chain.slice(1, -1)) {
       const style = css(channels, `.${c}`, width);
       assert.equal(style['min-height'], c === 'channel-models-panel' ? '240px' : '0', c);
-      assert.equal(style.flex, c === 'channel-models-panel' ? '1 0 240px' : '1 1 0%', c);
+      assert.equal(style.flex, c === 'channel-models-panel' ? '1 0 240px' : '1 1 0%', `${c}: model content must not set the outer flex basis`);
       assert.equal(style.overflow, 'hidden', c);
       if (c === 'channel-detail-stack') assert.equal(style['overflow-y'], 'auto');
     }
@@ -339,7 +393,12 @@ test('mobile overview/metrics wrap rather than crop, header/actions have explici
   }
   for (const f of files) styles[f].walkAtRules('media', media => {
     if (media.params !== '(max-width: 760px)') return;
-    media.walkDecls(d => assert.ok(!['font-size', 'font-family', 'zoom'].includes(d.prop), `no mobile typography/zoom change: ${d.toString()}`));
+    const searchSizes = {'.channel-model-search input': '16px', '.channel-search-context strong': '13px', '.channel-search-context span': '12px'};
+    media.walkDecls(d => {
+      if (f === channels && d.prop === 'font-size' && d.parent.selector in searchSizes) {
+        assert.equal(d.value, searchSizes[d.parent.selector]);
+      } else assert.ok(!['font-size', 'font-family', 'zoom'].includes(d.prop), `unrelated mobile typography/zoom is unchanged: ${d.toString()}`);
+    });
   });
 });
 

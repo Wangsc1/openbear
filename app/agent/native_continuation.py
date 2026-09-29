@@ -86,15 +86,28 @@ def native_items_for_tool_calls(
     if not items:
         return []
     types = {str(item.get("type") or "") for item in items}
-    # Claude stores *only* its thinking/redacted blocks here: visible text and
-    # tool_use live in neutral fields. Do not mistake mixed/unknown native items
-    # for a complete Claude turn, or keep a subset of the emitted tool calls.
+    # Legacy Claude checkpoints store only thinking/redacted blocks; newer
+    # checkpoints retain the full ordered provider content. Never keep native
+    # state when only a subset of emitted calls was accepted.
     if types <= {"thinking", "redacted_thinking"}:
         emitted = [_tool_call_id(call, index) for index, call in enumerate(emitted_tool_calls or [])]
         accepted = [_tool_call_id(call, index) for index, call in enumerate(accepted_tool_calls or [])]
         return items if (len(emitted) == len(set(emitted))
                          and len(accepted) == len(set(accepted))
                          and set(accepted) == set(emitted)) else []
+    if types <= {"thinking", "redacted_thinking", "text", "tool_use"}:
+        # Complete Claude turn: retain every block at its original position,
+        # but only when the entire emitted tool batch was accepted.
+        emitted = [_tool_call_id(call, index) for index, call in enumerate(emitted_tool_calls or [])]
+        accepted = [_tool_call_id(call, index) for index, call in enumerate(accepted_tool_calls or [])]
+        native_ids = [str(item.get("id") or "") for item in items if item.get("type") == "tool_use"]
+        if has_content and "text" not in types:
+            return []
+        if has_reasoning and "thinking" not in types:
+            return []
+        if any(len(ids) != len(set(ids)) for ids in (emitted, accepted, native_ids)):
+            return []
+        return items if set(native_ids) == set(emitted) == set(accepted) else []
     if types & {"thinking", "redacted_thinking"}:
         return []  # No partial replay of an unknown/mixed native turn.
     if has_content and "message" not in types:
@@ -161,7 +174,7 @@ def sanitize_paired_messages(messages: list[Message]) -> tuple[list[Message], in
             native_call_ids = {
                 str(native.get("call_id") or native.get("id") or "")
                 for native in native_items
-                if isinstance(native, dict) and native.get("type") == "function_call"
+                if isinstance(native, dict) and native.get("type") in {"function_call", "tool_use"}
             }
             if native_items and (
                 original_call_ids != local_kept_ids

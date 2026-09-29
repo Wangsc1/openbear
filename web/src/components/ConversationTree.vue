@@ -95,6 +95,7 @@ const searchRows = ref([]);
 const searchLoading = ref(false);
 const searchHasMore = ref(false);
 const searchCursor = ref("");
+let searchResultKey = "";
 const searchArchived = ref(false);
 const archiveUnlocked = ref(false);
 const menu = ref({ open: false, x: 0, y: 0, row: null, recent: false });
@@ -869,30 +870,50 @@ async function locateAndOpen(row) {
   document.querySelector(`[data-tree-id="${CSS.escape(row.conversationUuid)}"]`)?.scrollIntoView({ block: "center" });
 }
 
+function searchRequestKey() {
+  return JSON.stringify([query.value.trim(), Boolean(searchArchived.value && archiveUnlocked.value)]);
+}
+function invalidateSearch() {
+  searchGeneration += 1;
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = 0;
+  searchLoading.value = false;
+  searchRows.value = [];
+  searchCursor.value = "";
+  searchHasMore.value = false;
+  searchResultKey = "";
+}
 async function runSearch({ append = false } = {}) {
-  const text = query.value.trim();
-  if (!text) { searchRows.value = []; searchHasMore.value = false; return; }
+  const text = query.value.trim(), key = searchRequestKey();
+  if (!text) { invalidateSearch(); return; }
+  if (append && (searchLoading.value || !searchHasMore.value || !searchCursor.value || searchResultKey !== key)) return;
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = 0;
   const generation = ++searchGeneration;
+  const current = () => generation === searchGeneration && searchRequestKey() === key;
   searchLoading.value = true;
   try {
-    const data = await Api.conversationTreeSearch({ q: text, limit: 50, ...(append && searchCursor.value ? { cursor: searchCursor.value } : {}), ...(searchArchived.value && archiveUnlocked.value ? { archiveUnlocked: 1 } : {}) });
-    if (generation !== searchGeneration || query.value.trim() !== text) return;
+    const data = await Api.conversationTreeSearch({ q: text, limit: 50, ...(append ? { cursor: searchCursor.value } : {}), ...(searchArchived.value && archiveUnlocked.value ? { archiveUnlocked: 1 } : {}) });
+    if (!current()) return;
     const incoming = (data.items || []).map(statusAdjustedRow);
     searchRows.value = append ? [...searchRows.value, ...incoming] : incoming;
     searchCursor.value = String(data.nextCursor || "");
     searchHasMore.value = Boolean(data.hasMore);
+    searchResultKey = key;
   } catch (error) {
-    if (generation === searchGeneration) ElMessage.error(apiError(error));
+    if (current()) ElMessage.error(apiError(error));
   } finally {
-    if (generation === searchGeneration) searchLoading.value = false;
+    if (current()) searchLoading.value = false;
   }
 }
 watch(query, () => {
-  searchGeneration += 1;
-  if (searchTimer) clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => runSearch(), 260);
-});
-watch(searchArchived, () => { if (query.value.trim()) void runSearch(); });
+  invalidateSearch();
+  if (query.value.trim()) searchTimer = setTimeout(() => runSearch(), 260);
+}, {flush: "sync"});
+watch([searchArchived, archiveUnlocked], () => {
+  invalidateSearch();
+  if (query.value.trim()) void runSearch();
+}, {flush: "sync"});
 watch(() => props.draftConversation, () => emitRows(), { deep: true });
 
 async function openMenu(event, row) {
@@ -1605,7 +1626,7 @@ onBeforeUnmount(() => {
   closeOverview();
   window.removeEventListener("blur", closeOverview);
   window.removeEventListener("keydown", globalKeydown);
-  if (searchTimer) clearTimeout(searchTimer);
+  invalidateSearch();
   if (statusTimer) clearTimeout(statusTimer);
   if (dragExpandTimer) clearTimeout(dragExpandTimer);
   if (impactState.resolve) finishImpact(null);

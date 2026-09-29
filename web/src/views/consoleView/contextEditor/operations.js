@@ -2,6 +2,19 @@
 export const clone = (value) => structuredClone(value);
 export const THINKING_TYPES = new Set(['reasoning', 'thinking', 'redacted_thinking']);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+export const isClaudeNative = items => Array.isArray(items) && items.length > 0
+  && items.every(item => ['thinking', 'redacted_thinking', 'text', 'tool_use'].includes(item.type));
+function parsedCallInput(call) {
+  const input = JSON.parse(call.arguments || '{}');
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw Error('Claude 工具参数需要 JSON 对象');
+  return input;
+}
+export function nativeCall(call, claude = false) {
+  return claude ? {type: 'tool_use', id: call.id, name: call.name, input: parsedCallInput(call)}
+    : {type: 'function_call', call_id: call.id, name: call.name, arguments: call.arguments};
+}
+const canonicalJson = value => Array.isArray(value) ? value.map(canonicalJson)
+  : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalJson(value[key])])) : value;
 
 export function assertDocument(doc) {
   if (!doc || typeof doc !== 'object' || typeof doc.system !== 'string' || !Array.isArray(doc.tools) || !Array.isArray(doc.entries)) throw Error('文档需要 system、tools 和 entries');
@@ -33,12 +46,14 @@ export function nativeVisible(items = []) {
   const calls = [], parts = [];
   for (const n of items) {
     if (n.type === 'message') for (const b of n.content || []) if (['text', 'output_text'].includes(b.type)) parts.push(b.text || '');
+    if (n.type === 'text') parts.push(n.text || '');
     if (n.type === 'function_call') calls.push({id: n.call_id || n.id, name: n.name, arguments: n.arguments || '{}'});
+    if (n.type === 'tool_use') calls.push({id: n.id, name: n.name, arguments: JSON.stringify(n.input || {})});
   }
   return {content: parts.join(''), tool_calls: calls};
 }
 export function hasNativeVisible(items) {
-  return Array.isArray(items) && items.some(item => item.type === 'message' || item.type === 'function_call');
+  return Array.isArray(items) && items.some(item => ['message', 'function_call', 'text', 'tool_use'].includes(item.type));
 }
 export function nativeConflicts(message) {
   if (!hasNativeVisible(message.native_output_items)) return [];
@@ -46,7 +61,14 @@ export function nativeConflicts(message) {
   const errors = [];
   if ((message.content != null && typeof message.content !== 'string') || (message.content ?? '') !== projected.content) errors.push('content 与原生 message 文本不一致');
   const neutralCalls = (message.tool_calls || []).map(c => ({id: c.id, name: c.name, arguments: c.arguments}));
-  if (!same(neutralCalls, projected.tool_calls)) errors.push('tool_calls 与原生 function_call 不一致');
+  let callsMatch = same(neutralCalls, projected.tool_calls);
+  if (isClaudeNative(message.native_output_items)) {
+    try {
+      const comparable = calls => calls.map(call => ({id: call.id, name: call.name, input: canonicalJson(parsedCallInput(call))}));
+      callsMatch = same(comparable(neutralCalls), comparable(projected.tool_calls));
+    } catch { callsMatch = false; }
+  }
+  if (!callsMatch) errors.push(`tool_calls 与原生 ${isClaudeNative(message.native_output_items) ? 'tool_use' : 'function_call'} 不一致`);
   return errors;
 }
 // Do not drop any unknown item/block properties, even for a text block replaced with an empty string.
@@ -55,6 +77,7 @@ export function syncNative(message, {textChanged = true} = {}) {
   if (message.content != null && typeof message.content !== 'string') throw Error('非文本正文请在完整 JSON 中编辑；不能自动同步原生块');
   const visibleText = message.content ?? '';
   const calls = message.tool_calls || [], used = new Set();
+  const claude = isClaudeNative(message.native_output_items);
   let wroteText = false;
   message.native_output_items = message.native_output_items.flatMap(n => {
     if (n.type === 'message') return [{...n, content: (n.content || []).map(b => {
@@ -63,22 +86,28 @@ export function syncNative(message, {textChanged = true} = {}) {
       wroteText = true;
       return {...b, text};
     })}];
-    if (n.type !== 'function_call') return [n];
+    if (n.type === 'text') {
+      if (!textChanged) return [n];
+      const text = wroteText ? '' : visibleText;
+      wroteText = true;
+      return [{...n, text}];
+    }
+    if (!['function_call', 'tool_use'].includes(n.type)) return [n];
     const call = calls.find(c => c.id === (n.call_id || n.id) && !used.has(c));
     if (!call) return [];
     used.add(call);
-    return [{...n, call_id: call.id, name: call.name, arguments: call.arguments}];
+    return [{...n, ...nativeCall(call, n.type === 'tool_use')}];
   });
-  if (textChanged && !wroteText && visibleText) message.native_output_items.push({type: 'message', role: 'assistant', content: [{type: 'output_text', text: visibleText}]});
-  for (const call of calls) if (!used.has(call)) message.native_output_items.push({type: 'function_call', call_id: call.id, name: call.name, arguments: call.arguments});
+  if (textChanged && !wroteText && visibleText) message.native_output_items.push(claude ? {type: 'text', text: visibleText} : {type: 'message', role: 'assistant', content: [{type: 'output_text', text: visibleText}]});
+  for (const call of calls) if (!used.has(call)) message.native_output_items.push(nativeCall(call, claude));
   return message;
 }
 export function reconcileMessage(previous, edited) {
   const neutralChanged = !same(previous.content, edited.content) || !same(previous.tool_calls, edited.tool_calls);
   const nativeChanged = !same(previous.native_output_items, edited.native_output_items);
   const next = clone(edited);
-  // Anthropic stores only opaque thinking/redacted_thinking blocks here. These do not project
-  // content/calls and must never cause an empty projection to erase neutral fields.
+  // Legacy Anthropic records stored only thinking/redacted blocks. They must
+  // not erase neutral fields; complete newer Claude records project text/calls.
   if (!hasNativeVisible(next.native_output_items) && !hasNativeVisible(previous.native_output_items)) return next;
   if (neutralChanged && nativeChanged) {
     const mismatch = nativeConflicts(next);
@@ -123,7 +152,7 @@ export function callImpact(doc, entryId, callId) {
   if (!pair) throw Error('当前批次找不到调用');
   if (doc.entries.find(e => e.entryId === entryId).message.tool_calls.filter(c => c.id === callId).length !== 1) throw Error('本批次调用 ID 重复，无法安全联动删除；请先在 JSON 中处理重复 ID');
   const message = doc.entries.find(e => e.entryId === entryId).message;
-  const native = (message.native_output_items || []).map((item, index) => ({item, index})).filter(({item}) => item.type === 'function_call' && (item.call_id || item.id) === callId).map(({index}) => `${entryId}.native_output_items[${index}]`);
+  const native = (message.native_output_items || []).map((item, index) => ({item, index})).filter(({item}) => ['function_call', 'tool_use'].includes(item.type) && (item.call_id || item.id) === callId).map(({index}) => `${entryId}.native_output_items[${index}]`);
   return {pair, remove: [`${entryId}.tool_calls[${callId}]`, ...native, ...pair.results.map(id => `${id}.message`)], retain: (message.tool_calls || []).filter(c => c.id !== callId).map(c => c.id)};
 }
 export function deleteCall(doc, entryId, callId, keepResults = false) {

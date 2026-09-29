@@ -7,6 +7,7 @@ import {referenceDisplayText, referenceErrorText, referenceToken, referenceKey, 
 import {createOperationFrameBuffer} from './operationFrameBuffer.js';
 import {createAttachmentDraftStorage, planAttachmentDraftRecord} from './attachmentDraftStorage.js';
 import {initialConversationTitle} from '../../conversationTitle.js';
+import {applyOperationFrame, deriveOperationRunState, projectOperationMessages, shouldApplyOperationFrame, isRootRunTerminalFrame, isTerminalOperationFrame} from '../../timelineProjection.js';
 import {createMemoryAttachmentDraftDriver} from './attachmentDraftMemoryDriver.mjs';
 
 // Run the actual ConsoleView submission/recovery functions, not a second model
@@ -136,6 +137,83 @@ function harness({local = false, halfOpenFirst = false, createConversation} = {}
     },
   };
 }
+
+for (const ackFirst of [true, false]) test(`first local send receives live output without reload or navigation (ACK first: ${ackFirst})`, async () => {
+  const h = harness({local: true}), c = h.context;
+  let switching = Promise.resolve();
+  Object.assign(c, {
+    applyOperationFrame, projectOperationMessages, shouldApplyOperationFrame, isRootRunTerminalFrame, isTerminalOperationFrame,
+    operationsById: {value: new Map()}, orderedOpIds: {value: []}, revisionByOpId: {value: new Map()},
+    hasMoreBefore: {value: false}, nextBeforeDisplaySeq: {value: null}, searchWindowActive: {value: false},
+    operationDebugRow: value => value, operationScrollImpact: () => 'none', mergeScrollImpact: () => 'none',
+    mergeLedgerUsageIntoState() {}, mergeStatsUsageIntoState() {},
+    orderedOperationsList: () => Array.from(c.orderedOpIds.value, id => c.operationsById.value.get(id)),
+    scheduleProjectedMessagesFlush: () => {
+      const operations = c.orderedOperationsList();
+      const projected = projectOperationMessages(operations);
+      if (projected.length) c.messages.value = projected;
+      c.running.value = deriveOperationRunState(operations).running;
+    },
+    emit: (event, uuid) => {
+      if (event !== 'conversation-created') return;
+      const prev = c.props.conversationUuid;
+      c.props.conversationUuid = uuid;
+      switching = h.run(`switchConversation(${JSON.stringify(uuid)}, ${JSON.stringify(prev)})`);
+    },
+    nextTick: async () => {await switching;},
+  });
+  // Local drafts have no persisted frames. Exercise the actual id-transition
+  // watcher, timeline connection, message handler and frame reducer together.
+  h.run(`
+    lastFrameSeq.value = 0;
+    let agentAutoOpenBoundaryConversation = '';
+    let operationResyncInFlight = null, pendingProjectionOps = null, pendingScrollImpact = 'none', pendingTerminalFrame = null;
+    function resetTimelinePagination(uuid) {timelinePageConversationUuid = uuid; timelinePageInitialized = false;}
+    ${between('function hasOptimisticLocalTurn()', 'function shouldPreserveOptimisticMessages(')}
+    ${between('function applyTimelinePageMetadata(', 'function frameDebugEnabled(')}
+    ${between('function applyOperationFrameMessage(', 'function textSignal(')}
+  `);
+  await h.run('send()');
+  await switching;
+  assert.equal(h.sends().length, 1);
+  const timeline = h.run('ws');
+  assert.ok(timeline, 'new server conversation must have a visible timeline subscription');
+  assert.equal(h.run('wsConversationUuid'), 'conv-created');
+  assert.equal(h.run('timelinePageConversationUuid'), 'conv-created');
+  assert.equal(h.run('timelinePageInitialized'), true);
+  assert.equal(c.localToServerTransitionUuid.value, '', 'a successful id migration consumes its marker before ACK');
+  const sender = h.sockets.find(socket => socket.sent.some(item => item.type === 'send'));
+  assert.notEqual(sender, timeline, 'ACK ownership stays separate from live output');
+  const ack = () => sender.emit('message', JSON.stringify({type: 'ack', requestId: h.sends()[0].requestId}));
+  if (ackFirst) ack();
+  let seq = 0;
+  const frame = (opId, opType, action, revision, displaySeq, payload) => timeline.emit('message', JSON.stringify({
+    type: 'frame', frame: {opId, opType, action, revision, displaySeq, payload, frameSeq: ++seq,
+      conversationUuid: 'conv-created', targetType: 'run', turnUuid: 'first', runRootTurnId: 'first'},
+  }));
+  frame('run:first', 'run', 'start', 1, 1, {status: 'running'});
+  frame('user:first', 'user_message', 'end', 1, 2, {text: 'original message'});
+  frame('answer:first', 'assistant_message', 'start', 1, 3, {text: '首段', complete: false});
+  const answer = () => c.messages.value.find(message => message.role === 'assistant')?.localTimeline.find(event => event.message)?.message.content;
+  assert.equal(answer(), '首段', 'streaming text is visible before the run ends');
+  assert.equal(c.running.value, true);
+  if (!ackFirst) ack();
+  assert.equal(sender.readyState, 3);
+  assert.equal(timeline.readyState, 1, 'ACK cleanup must not close the output connection');
+  frame('answer:first', 'assistant_message', 'append', 2, 3, {delta: '回复', complete: false});
+  assert.equal(answer(), '首段回复');
+  frame('answer:first', 'assistant_message', 'end', 3, 3, {text: '首段回复', complete: true});
+  frame('stats:first', 'stats', 'end', 1, 4, {durationMs: 1200, modelCalls: 1});
+  frame('run:first', 'run', 'end', 2, 1, {status: 'completed'});
+  assert.equal(c.running.value, false);
+  assert.equal(c.messages.value.find(message => message.role === 'assistant').localStats.durationMs, 1200);
+  assert.equal(c.messages.value.filter(message => message.role === 'user').length, 1);
+  assert.equal(c.lastFrameSeq.value, seq);
+  assert.equal(c.sendPending.value, false);
+  assert.equal(h.refreshes.length, 0, 'output must not depend on a recovery HTTP reload');
+  assert.equal(h.sends().length, 1, 'subscribing to output must not resend the question');
+  h.run('closeWs()');
+});
 
 test('an in-flight model source save blocks the next send until the saved source is authoritative',async()=>{
   const h=harness();

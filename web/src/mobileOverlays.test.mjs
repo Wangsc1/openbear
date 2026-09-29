@@ -31,7 +31,7 @@ test('overlay rules are opt-in and mobile-only, without changing desktop shell o
     assert.equal(node.parent.type, 'atrule');
     assert.equal(node.parent.name, 'media');
     assert.equal(node.parent.params, '(max-width: 760px), (hover: none) and (pointer: coarse)');
-    assert.match(node.selector, /mobile-viewport-(dialog|drawer|sheet)/);
+    assert.match(node.selector, /mobile-viewport-(dialog|drawer|sheet)|mobile-select-popper/);
   });
   assert.match(read('./main.js'), /import "\.\/mobile-overlays\.css"/);
   assert.doesNotMatch(read('./mobile-overlays.css'), /touch-action|user-scalable|maximum-scale/);

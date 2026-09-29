@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
@@ -20,6 +21,35 @@ from app.llm.error_payloads import normalize_error_payload
 from app.logging import get_logger
 
 log = get_logger("llm.client")
+
+
+async def _iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
+    """SSE has only CR/LF endings; Unicode separators are JSON string data.
+
+    HTTPX's generic aiter_lines also splits U+0085/U+2028/U+2029. Decode complete
+    byte lines instead so both these characters and split UTF-8 survive.
+    """
+    pending = b""
+    skip_lf = False
+    first_line = True
+    async for chunk in response.aiter_bytes():
+        if not chunk:
+            continue
+        if skip_lf:
+            chunk = chunk.removeprefix(b"\n")
+            skip_lf = False
+        pending += chunk
+        while match := re.search(rb"\r\n|\r|\n", pending):
+            raw = pending[:match.start()]
+            skip_lf = match.group() == b"\r" and match.end() == len(pending)
+            pending = pending[match.end():]
+            line = raw.decode("utf-8", errors="replace")
+            if first_line:
+                line = line.removeprefix("\ufeff")
+                first_line = False
+            yield line
+    if pending:
+        yield pending.decode("utf-8", errors="replace")
 
 
 def _retry_after_seconds(headers: httpx.Headers) -> float:
@@ -93,7 +123,8 @@ class HTTPClient:
 
     async def post_sse(self, url: str, headers: dict[str, str], payload: dict,
                        *, protocol: str = "", first_byte_timeout_s: float | None = None,
-                       total_timeout_s: float | None = None) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+                       total_timeout_s: float | None = None,
+                       emit_done: bool = False) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         """流式 POST，逐条 yield (event_name, data_json)，带四段独立超时。
 
         - OpenAI Chat: 无 event 行，event_name="" ；data 为 JSON 或 "[DONE]"
@@ -152,11 +183,13 @@ class HTTPClient:
                         retry_after_s=_retry_after_seconds(resp.headers),
                     )
                 yield "__openbear_metrics__", {"connect_ms": int((time.monotonic() - req_start) * 1000)}
-                line_iter = resp.aiter_lines()
+                line_iter = _iter_sse_lines(resp)
                 fb_deadline = time.monotonic() + first_byte_to
                 data_deadline = fb_deadline
                 event_name = ""
-                while True:
+                data_lines: list[str] = []
+                ended = False
+                while not ended:
                     now = time.monotonic()
                     # 选段:未出首数据用 first_byte(固定截止),已出数据用 idle(真实 data 块刷新)。
                     # 注意:SSE 心跳/注释/空行只能证明 TCP 连接还活着,不能证明模型仍在产出;
@@ -186,7 +219,11 @@ class HTTPClient:
                         async with asyncio.timeout(wait_s):
                             line = await line_iter.__anext__()
                     except StopAsyncIteration:
-                        break
+                        # Tolerate relays omitting the last blank separator. Only a
+                        # complete JSON event is recovered; the backend still owns
+                        # protocol-level completion/EOF validation.
+                        ended = True
+                        line = ""
                     except TimeoutError:
                         now2 = time.monotonic()
                         if total_deadline is not None and now2 >= total_deadline - 1e-3:
@@ -201,24 +238,34 @@ class HTTPClient:
                             f"上游流式空闲超时（{int(self._idle_timeout_s)}s 无数据）",
                             retryable=True, protocol=protocol) from None
                     if not line:
-                        event_name = ""  # 空行 = 事件分隔
-                        continue
-                    if line.startswith(":"):
-                        continue  # SSE 注释/心跳(不刷新 first_byte 截止点)
-                    if line.startswith("event:"):
-                        event_name = line[6:].strip()
-                        continue
-                    if line.startswith("data:"):
-                        data_str = line[5:].strip()
-                        if data_str == "[DONE]":
+                        name, event_name = event_name, ""
+                        data_str = "\n".join(data_lines)
+                        data_lines.clear()
+                        if data_str.strip() == "[DONE]":
+                            if emit_done:
+                                yield "__openbear_done__", {}
                             return
+                        if not data_str:
+                            continue
                         try:
                             data = json.loads(data_str)
                         except json.JSONDecodeError:
                             continue
+                        if not isinstance(data, dict):
+                            continue
                         first_data = True
-                        yield event_name, data
+                        yield name, data
                         data_deadline = time.monotonic() + self._idle_timeout_s
+                        continue
+                    if line.startswith(":"):
+                        continue  # Heartbeats do not refresh data deadlines.
+                    field, _, value = line.partition(":")
+                    if value.startswith(" "):
+                        value = value[1:]
+                    if field == "event":
+                        event_name = value
+                    elif field == "data":
+                        data_lines.append(value)
         except httpx.TimeoutException as e:
             raise OpenBearLLMError(f"流式连接超时: {e}", retryable=True, protocol=protocol) from e
         except httpx.HTTPError as e:

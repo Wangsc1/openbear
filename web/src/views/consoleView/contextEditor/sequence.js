@@ -1,11 +1,13 @@
 import {clone, reconcileMessage, THINKING_TYPES} from './operations.js';
 
 const anthropicThinking = new Set(['thinking', 'redacted_thinking']);
-const names = {message: '正文', function_call: '工具调用', reasoning: '思考', thinking: '思考', redacted_thinking: '加密思考'};
+const names = {message: '正文', text: '正文', function_call: '工具调用', tool_use: '工具调用', reasoning: '思考', thinking: '思考', redacted_thinking: '加密思考'};
 const textOf = value => typeof value === 'string' ? value : JSON.stringify(value ?? '', null, 2);
 function nativeRow(value, index) {
-  const callId = value.type === 'function_call' ? value.call_id || value.id : '';
+  const callId = ['function_call', 'tool_use'].includes(value.type) ? value.call_id || value.id : '';
   const preview = value.type === 'message' ? (value.content || []).map(b => b.text ?? b.refusal ?? `[${b.type}]`).join('\n')
+    : value.type === 'text' ? value.text
+    : value.type === 'tool_use' ? JSON.stringify(value.input || {}, null, 2)
     : value.type === 'function_call' ? value.arguments
     : value.type === 'reasoning' ? (value.summary || []).map(b => b.text || '').join('\n') || '原生思考数据（可能包含不可读密文）'
     : value.type === 'thinking' ? value.thinking : value.type === 'redacted_thinking' ? '加密思考，原值保留' : textOf(value);
@@ -14,8 +16,8 @@ function nativeRow(value, index) {
     thinking: THINKING_TYPES.has(value.type), preview: textOf(preview), value};
 }
 
-// Only Responses stores the whole interleaved output. Older/Chat/Anthropic messages
-// have independent neutral fields: never imply their display order was recorded.
+// Responses and complete Claude records store interleaved output. Older Claude
+// thinking-only records and Chat fields must never imply an unrecorded timeline.
 export function messageSequence(message) {
   const native = message.native_output_items || [];
   const ordered = native.length > 0 && !native.every(n => anthropicThinking.has(n.type));

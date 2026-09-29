@@ -4034,7 +4034,11 @@ async function switchConversation(next, prev) {
 	const isLocalToServerSend = String(prev || "").startsWith("local:")
 		&& next
 		&& next === localToServerTransitionUuid.value
+		&& outboundSends.current?.conversationUuid === next
 		&& hasOptimisticLocalTurn();
+	// This marker belongs only to the id change just emitted by the pending
+	// send. Consume it on navigation, never reuse it for a later local draft.
+	localToServerTransitionUuid.value = "";
 	if (isLocalToServerSend) {
 		// Same conversation under a new id: the draft attachments already moved with
 		// it in ensureServerConversationForSend and stay in the composer.
@@ -4042,6 +4046,11 @@ async function switchConversation(next, prev) {
 		runConfigOverride.value = null;
 		chatState.value = {...(chatState.value || {}), conversationUuid: next};
 		agentAutoOpenBoundaryConversation = String(next || "");
+		// The new conversation has an empty timeline baseline. The send owns a
+		// separate ACK-only socket, so this id migration must also subscribe the
+		// visible timeline without clearing the optimistic turn or its attachments.
+		applyTimelinePageMetadata({}, next);
+		await connectWs(next);
 		return;
 	}
 	// Park this conversation's files without interrupting its upload/send.

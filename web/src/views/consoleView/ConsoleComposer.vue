@@ -126,6 +126,11 @@ const composerShell = ref(null);
 const composerTextarea = ref(null);
 const runConfigPopover = ref(null);
 const runConfigPopperOptions = ref({});
+const runConfigContent = ref(null);
+const runConfigSearchInput = ref(null);
+const runConfigCompact = ref(false);
+const runConfigSettingsOpen = ref(false);
+let runConfigFullChromeHeight = 0;
 let composerResizeObserver = null;
 let runConfigPositionFrame = 0;
 const interactionDrafts = ref({});
@@ -205,6 +210,27 @@ function selectMenuModel(model) {
 
 function selectMenuThinking(level) {
 	emit(isAgentTab.value ? 'select-agent-thinking' : 'select-thinking', level);
+}
+
+const runConfigSettingsSummary = computed(() => {
+	const thinking = menuSupportsThinking.value
+		? `思考 ${isAgentTab.value && !props.agentThinkLevel ? '默认' : compactThinkingLabel(menuThinkingLevel.value)}`
+		: '思考未声明';
+	const fast = isAgentTab.value
+		? `Fast ${{follow: '跟随', on: '开', off: '关'}[agentFastTriState.value]}`
+		: `Fast ${props.fastSupported ? (props.currentFast ? '开' : '关') : '不支持'}`;
+	return `${thinking} · ${fast} · ${runConfigStrategyText.value}`;
+});
+
+function toggleRunConfigSettings() {
+	runConfigSettingsOpen.value = !runConfigSettingsOpen.value;
+	runConfigSearchInput.value?.blur?.();
+	scheduleRunConfigPosition();
+}
+
+function finishRunConfigSearch() {
+	runConfigSearchInput.value?.blur?.();
+	emit('close-menus');
 }
 
 function modelTags(model) {
@@ -591,6 +617,32 @@ function onComposerKeydownCapture(event) {
 	editor.commands.insertContent({type: "hardBreak"});
 }
 
+function syncRunConfigLayout(mobile) {
+	if (!mobile) {
+		runConfigCompact.value = false;
+		runConfigSettingsOpen.value = false;
+		return;
+	}
+	const content = runConfigContent.value;
+	if (!content?.clientHeight) return;
+	// Measure the complete, normal chrome once before collapsing it. Its cached
+	// footprint must not depend on the compact view, or resize would oscillate.
+	if (!runConfigCompact.value) {
+		const children = [...content.children].filter(child => window.getComputedStyle(child).display !== 'none');
+		const gap = parseFloat(window.getComputedStyle(content).rowGap) || 0;
+		runConfigFullChromeHeight = children
+			.filter(child => !child.classList.contains('run-config-model-section'))
+			.reduce((height, child) => height + child.getBoundingClientRect().height, 0)
+			+ Math.max(0, children.length - 1) * gap;
+	}
+	const capacity = parseFloat(window.getComputedStyle(content).maxHeight)
+		|| Math.min(600, (window.visualViewport?.height || window.innerHeight) - 48);
+	// Keep room for a readable result, rather than shrinking the list to zero.
+	const compact = capacity < runConfigFullChromeHeight + 96;
+	runConfigCompact.value = compact;
+	if (!compact) runConfigSettingsOpen.value = false;
+}
+
 function scheduleRunConfigPosition() {
 	if (!props.modelMenuOpen || runConfigPositionFrame) return;
 	runConfigPositionFrame = window.requestAnimationFrame(() => {
@@ -608,13 +660,25 @@ function scheduleRunConfigPosition() {
 				],
 			} : {strategy};
 		}
+		syncRunConfigLayout(mobile);
 		nextTick(() => {
 			if (props.modelMenuOpen) runConfigPopover.value?.popperRef?.popperInstanceRef?.update?.();
 		});
 	});
 }
 
+watch(runConfigContent, (content, _, onCleanup) => {
+	if (!content || typeof ResizeObserver === 'undefined') return;
+	const observer = new ResizeObserver(scheduleRunConfigPosition);
+	observer.observe(content);
+	onCleanup(() => observer.disconnect());
+	nextTick(scheduleRunConfigPosition);
+});
+
 watch(() => props.modelMenuOpen, (open, _, onCleanup) => {
+	runConfigCompact.value = false;
+	runConfigSettingsOpen.value = false;
+	runConfigFullChromeHeight = 0;
 	if (!open || typeof window === "undefined") return;
 	const viewport = window.visualViewport;
 	for (const target of [window, viewport]) {
@@ -927,13 +991,13 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 									<ArrowDown class="chip-caret"/>
 								</button>
 							</template>
-							<div class="popover-menu-content run-config-popover" @mouseleave="clearModelDetail" @scroll.capture="clearModelDetail" @keydown.esc="clearModelDetail">
+							<div ref="runConfigContent" class="popover-menu-content run-config-popover" :class="{'is-compact': runConfigCompact}" @mouseleave="clearModelDetail" @scroll.capture="clearModelDetail" @keydown.esc="clearModelDetail">
 								<div class="run-config-tabs" role="tablist" aria-label="运行配置切换">
 									<button type="button" role="tab" :aria-selected="runConfigTab === 'main'" :class="runConfigTab === 'main' ? 'is-active' : ''" @click="runConfigTab = 'main'">主会话</button>
 									<button type="button" role="tab" :aria-selected="runConfigTab === 'agent'" :class="runConfigTab === 'agent' ? 'is-active' : ''" @click="runConfigTab = 'agent'">Agent</button>
 								</div>
 								<el-tooltip v-if="!isAgentTab" :content="contextDetailText" placement="top" :show-after="400">
-									<div class="run-config-context" :aria-label="contextDetailText">
+									<div v-show="!runConfigCompact" class="run-config-context" :aria-label="contextDetailText">
 										<div class="context-meter-row">
 											<span class="config-label"><ModelFeatureIcon name="context"/>压缩阈值占用</span>
 											<span class="context-meter-values"><span>{{ props.contextUsedDisplay }} <span class="context-meter-limit">/ {{ props.contextThresholdDisplay }}</span></span><span class="context-percent">{{ props.contextPercentDisplay }}</span></span>
@@ -941,12 +1005,12 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 										<div class="context-meter" aria-hidden="true"><span :style="contextMeterStyle"></span></div>
 									</div>
 								</el-tooltip>
-								<p v-if="props.running" class="run-config-notice">{{ isAgentTab ? '模型与执行设置用于新 Agent' : '模型与执行设置在下一次调用生效' }}</p>
-								<label class="model-search run-config-search">
+								<p v-if="props.running" v-show="!runConfigCompact" class="run-config-notice">{{ isAgentTab ? '模型与执行设置用于新 Agent' : '模型与执行设置在下一次调用生效' }}</p>
+								<label v-show="!runConfigCompact || !runConfigSettingsOpen" class="model-search run-config-search">
 									<Search/>
-									<input :value="props.modelQuery" type="search" :placeholder="isAgentTab ? '搜索 Agent 模型' : '搜索模型'" :aria-label="isAgentTab ? '搜索 Agent 模型' : '搜索模型'" @input="emit('update:modelQuery', $event.target.value)"/>
+									<input ref="runConfigSearchInput" :value="props.modelQuery" type="search" :placeholder="isAgentTab ? '搜索 Agent 模型' : '搜索模型'" :aria-label="isAgentTab ? '搜索 Agent 模型' : '搜索模型'" @input="emit('update:modelQuery', $event.target.value)"/>
 								</label>
-								<div class="run-config-model-section">
+								<div v-show="!runConfigCompact || !runConfigSettingsOpen" class="run-config-model-section">
 								<div class="model-list run-config-model-list">
 									<div v-if="isAgentTab" class="agent-follow-group">
 										<button type="button" class="model-row follow-model-row" :class="!props.agentModel ? 'is-selected' : ''" :aria-pressed="!props.agentModel" @click="emit('select-agent-model', '')">
@@ -983,7 +1047,7 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 									<div v-if="!props.modelGroups.length" class="model-empty">没有匹配模型</div>
 								</div>
 								</div>
-								<div class="run-config-controls">
+								<div v-show="!runConfigCompact || runConfigSettingsOpen" class="run-config-controls">
 									<div class="thinking-control">
 										<div class="run-config-control-head"><span class="config-label"><ModelFeatureIcon name="brain"/>思考强度</span><span class="config-hint">{{ menuSupportsThinking ? `默认 ${menuDefaultThinking}` : '未声明支持' }}</span></div>
 										<div v-if="menuSupportsThinking || isAgentTab" class="thinking-segments" role="group" aria-label="思考强度">
@@ -1015,6 +1079,17 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 											<span class="config-hint" aria-live="polite">{{ props.contextStrategy === 'model_summary' ? '模型摘要' : '滑动窗口' }}</span>
 											<button type="button" class="fast-switch" role="switch" aria-label="使用模型摘要（关闭为滑动窗口）" :aria-checked="props.contextStrategy === 'model_summary'" :class="props.contextStrategy === 'model_summary' ? 'is-on' : ''" :disabled="props.strategySaving" @click="emit('select-context-strategy', props.contextStrategy === 'model_summary' ? 'sliding_window' : 'model_summary')"><span></span></button>
 										</div>
+									</div>
+								</div>
+								<div v-if="runConfigCompact" class="run-config-compact-footer">
+									<div class="run-config-compact-summary" aria-live="polite">
+										<span>{{ runConfigSettingsSummary }}</span>
+										<span v-if="!isAgentTab" :aria-label="contextDetailText">上下文 {{ props.contextUsedDisplay }} / {{ props.contextThresholdDisplay }} · {{ props.contextPercentDisplay }}</span>
+										<span v-if="props.running">{{ isAgentTab ? '用于新 Agent' : '下一次调用生效' }}</span>
+									</div>
+									<div class="run-config-compact-actions">
+										<button type="button" :aria-expanded="runConfigSettingsOpen" @click="toggleRunConfigSettings">{{ runConfigSettingsOpen ? '返回模型' : '设置' }}</button>
+										<button type="button" @click="finishRunConfigSearch">完成</button>
 									</div>
 								</div>
 							</div>
@@ -2269,18 +2344,27 @@ button.status-chip:hover, .status-chip-active {
 	.run-config-model-section { flex: 0 0 auto; }
 	.run-config-model-list { flex: 0 0 auto; max-height: 180px; }
 }
-/* dvh and max-height media queries do not shrink with the iOS keyboard.
-   Bound the body-teleported menu by the visual viewport, and scroll its
-   contents rather than allowing its search field to escape above the screen. */
+/* The body-teleported menu follows the visual viewport. Only its active
+   middle pane scrolls: results normally, settings when explicitly opened.
+   Compact mode is chosen from the normal chrome's measured height. */
 @media (max-width: 760px), (hover: none) and (pointer: coarse) {
 	.run-config-popover {
 		max-height: min(600px, calc(var(--mobile-viewport-height, 100dvh) - 48px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)));
-		overflow-y: auto;
+		overflow: hidden;
+		overflow-y: hidden;
 		overscroll-behavior: contain;
 	}
-	.run-config-model-section { flex: 0 0 auto; }
-	.run-config-model-list { flex: 0 0 auto; max-height: min(320px, calc(var(--mobile-viewport-height, 100dvh) * .32)); }
-	.run-config-search { position: sticky; top: 0; z-index: 1; }
+	.run-config-model-section { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+	.run-config-model-list { flex: 1 1 auto; max-height: 320px; }
+	.run-config-search { position: static; }
+	.run-config-search input { font-size: 16px; }
+	.run-config-popover.is-compact { gap: 8px; }
+	.run-config-popover.is-compact .run-config-controls { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; margin-top: 0; }
+	.run-config-compact-footer { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; padding-top: 6px; border-top: 1px solid var(--rc-line); }
+	.run-config-compact-summary { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; gap: 2px; color: var(--rc-muted); font-size: 12px; line-height: 16px; }
+	.run-config-compact-summary > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.run-config-compact-actions { display: flex; flex: 0 0 auto; gap: 3px; }
+	.run-config-compact-actions button { min-height: 36px; padding: 4px 8px; border: 0; border-radius: 8px; background: var(--rc-surface); color: var(--rc-text); font-size: 12px; }
 }
 @media (prefers-reduced-motion: reduce) {
 	.run-config-popover *, .run-config-popover *::before { transition: none; }

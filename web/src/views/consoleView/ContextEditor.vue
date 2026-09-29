@@ -3,7 +3,7 @@ import {computed, defineAsyncComponent, onBeforeUnmount, ref, shallowRef, toRaw,
 import {Api} from '../../api.js';
 import {randomUuid} from '../../utils/randomUuid.js';
 import './contextEditor/style.css';
-import {assertDocument, callImpact, clone, deleteCall, deleteEntries, deleteReasoning, diffDocument, exportPackage, importPackage, localIssues, reasoningImpact, reconcileMessage, relations} from './contextEditor/operations.js';
+import {assertDocument, callImpact, clone, deleteCall, deleteEntries, deleteReasoning, diffDocument, exportPackage, importPackage, isClaudeNative, localIssues, nativeCall, reasoningImpact, reconcileMessage, relations} from './contextEditor/operations.js';
 import {canMoveBlock, messageSequence, moveBlock, replaceBlock} from './contextEditor/sequence.js';
 const props = defineProps({conversationUuid: {type: String, default: ''}, busy: {type: Boolean, default: false}});
 const emit = defineEmits(['created', 'open-change']);
@@ -13,6 +13,24 @@ const opened = ref(false), state = shallowRef(null), loading = ref(false), pendi
 const selected = ref('system'), tab = ref('structured'), search = ref(''), checked = ref([]), raw = ref(''), rawError = ref('');
 const dialog = ref(null), deleteMode = ref('paired'), thinkingScope = ref('suffix'), branchTitle = ref(''), importInput = ref(null);
 const cache = new Map(); let generation = 0, disposed = false;
+const editorShell = ref(null), compactViewport = ref(false), compactPanel = ref('document');
+// Observe the actual space left by the mobile shell, not CSS media-query
+// height (iOS can keep that unchanged while the keyboard shrinks the viewport).
+watch(editorShell, (element, _, onCleanup) => {
+  if (!element || typeof window === 'undefined') { compactViewport.value = false; return; }
+  const sync = () => {
+    const {width, height} = element.getBoundingClientRect();
+    compactViewport.value = height > 0 && height < 500 && (width <= 760 || Boolean(window.matchMedia?.('(hover: none) and (pointer: coarse)').matches));
+    if (!compactViewport.value) compactPanel.value = 'document';
+  };
+  const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(sync);
+  observer?.observe(element);
+  window.addEventListener('resize', sync);
+  window.visualViewport?.addEventListener('resize', sync);
+  sync();
+  onCleanup(() => { observer?.disconnect(); window.removeEventListener('resize', sync); window.visualViewport?.removeEventListener('resize', sync); });
+}, {flush: 'post'});
+function switchCompactPanel(panel) { if (applyPendingRaw()) compactPanel.value = panel; }
 const uuid = computed(() => props.conversationUuid && !props.conversationUuid.startsWith('local:') ? props.conversationUuid : '');
 const doc = computed(() => state.value?.working);
 const entry = computed(() => doc.value?.entries.find(e => e.entryId === selected.value));
@@ -34,7 +52,7 @@ const extraFields = computed(() => ['reasoning', 'signature', 'native_output_ite
 const sequence = computed(() => messageSequence(entry.value?.message || {}));
 const targetProtocol = computed(() => state.value?.models.find(m => m.model === state.value.targetModel)?.protocol || '');
 const orderNote = computed(() => sequence.value.ordered
-  ? `从上到下是已保存的原生块顺序，可逐块上移或下移。${targetProtocol.value === 'responses' ? '调整会写入实际请求；' : '切换协议不保证保留此顺序；'}签名、密文是否允许续接以服务端校验为准。`
+  ? `从上到下是已保存的原生块顺序，可逐块上移或下移。${targetProtocol.value === 'responses' || (['claude', 'anthropic'].includes(targetProtocol.value) && isClaudeNative(entry.value?.message.native_output_items)) ? '调整会写入实际请求；' : '切换协议不保证保留此顺序；'}签名、密文是否允许续接以服务端校验为准。`
   : '此消息只保存了独立字段，未记录完整交错顺序；以下不是生成时间线。只能调整同一数组内的顺序，不能跨正文、思考、调用字段移动。');
 const activeDiff = computed(() => changes.value.find(item => item.id === diffId.value) || changes.value[0]);
 function snippet(message) {
@@ -47,7 +65,7 @@ const display = v => v === undefined ? '（不存在）' : typeof v === 'string'
 const failure = e => e?.response?.status === 409 ? `冲突（409）：${e?.response?.data?.message || e?.response?.data?.error || '源快照过期、会话运行中或草稿修订已变化'}。草稿仍保留；请导出并核对源会话，不会覆盖。` : String(e?.response?.data?.message || e?.response?.data?.error || e?.message || '请求失败');
 function resetSelection() { selected.value = 'system'; tab.value = 'structured'; checked.value = []; search.value = ''; diffId.value = ''; refreshRaw(); }
 function refreshRaw() { raw.value = JSON.stringify(rawObject.value ?? {}, null, 2); rawError.value = ''; }
-function choose(id) { if (!applyPendingRaw()) return; selected.value = id; refreshRaw(); }
+function choose(id) { if (!applyPendingRaw()) return; selected.value = id; refreshRaw(); compactPanel.value = 'document'; }
 function issueTarget(issue) {
   if (issue?.entryId && doc.value?.entries.some(e => e.entryId === issue.entryId)) return issue.entryId;
   if (/^system(?:\.|$)/.test(issue?.path || '')) return 'system';
@@ -215,22 +233,22 @@ async function upload(event) {
 
 function revealBody() {
   if (sequence.value.ordered) {
-    if (editMessage(m => { m.native_output_items.push({type: 'message', role: 'assistant', content: [{type: 'output_text', text: ''}]}); })) openBlock(sequence.value.rows.at(-1));
+    if (editMessage(m => { m.native_output_items.push(isClaudeNative(m.native_output_items) ? {type: 'text', text: ''} : {type: 'message', role: 'assistant', content: [{type: 'output_text', text: ''}]}); })) openBlock(sequence.value.rows.at(-1));
   } else { if (entry.value.message.content == null) setField('content', ''); openEntity('field', -1, 'content'); }
 }
 function shiftBlock(row, offset) {
   mutate(d => { const e = d.entries.find(e => e.entryId === selected.value); e.message = moveBlock(e.message, row.key, offset); });
 }
 function openBlock(row) {
-  if (row.source === 'tool_calls' || row.type === 'function_call' && entry.value.message.tool_calls?.some(c => c.id === row.callId)) {
+  if (row.source === 'tool_calls' || ['function_call', 'tool_use'].includes(row.type) && entry.value.message.tool_calls?.some(c => c.id === row.callId)) {
     openEntity('call', entry.value.message.tool_calls.findIndex(c => c.id === row.callId)); return;
   }
   if (row.source !== 'native_output_items') { openEntity('field', -1, row.source); return; }
   const data = clone(row.value);
   entityError.value = '';
   const textIndexes = data.type === 'message' ? (data.content || []).flatMap((b,i) => ['text','output_text'].includes(b.type) ? [i] : []) : [];
-  const blockTextIndex = textIndexes.length === 1 ? textIndexes[0] : -1;
-  entityEditor.value = {kind: 'field', field: `内容块 ${row.index + 1} · ${row.label}`, block: {...row, value: undefined}, blockTextIndex, entryId: selected.value, scope: uuid.value, data, view: 'fields', raw: JSON.stringify(data, null, 2), text: blockTextIndex >= 0 ? data.content[blockTextIndex].text || '' : JSON.stringify(data, null, 2), json: blockTextIndex < 0};
+  const blockTextIndex = textIndexes.length === 1 ? textIndexes[0] : -1, blockTextField = data.type === 'text';
+  entityEditor.value = {kind: 'field', field: `内容块 ${row.index + 1} · ${row.label}`, block: {...row, value: undefined}, blockTextIndex, blockTextField, entryId: selected.value, scope: uuid.value, data, view: 'fields', raw: JSON.stringify(data, null, 2), text: blockTextField ? data.text || '' : blockTextIndex >= 0 ? data.content[blockTextIndex].text || '' : JSON.stringify(data, null, 2), json: !blockTextField && blockTextIndex < 0};
 }
 function openEntity(kind, index = -1, field = '') {
   if (!applyPendingRaw()) return;
@@ -247,6 +265,7 @@ function openEntity(kind, index = -1, field = '') {
 function entityValue(draft) {
   if (draft.view === 'raw') return JSON.parse(draft.raw);
   if (draft.kind === 'field') {
+    if (draft.blockTextField) return {...clone(toRaw(draft.data)), text: draft.text};
     if (draft.blockTextIndex >= 0) { const value = clone(toRaw(draft.data)); value.content[draft.blockTextIndex].text = draft.text; return value; }
     return draft.json ? JSON.parse(draft.text) : draft.text;
   }
@@ -280,7 +299,7 @@ function saveEntity() {
       if (!value || typeof value.name !== 'string' || typeof value.id !== 'string' || typeof value.arguments !== 'string') throw Error('调用需要 name、id 和字符串 arguments');
       saved = editMessage(m => {
         if (draft.index < 0 && messageSequence(m).ordered) {
-          m.native_output_items.push({type: 'function_call', call_id: value.id, name: value.name, arguments: value.arguments});
+          m.native_output_items.push(nativeCall(value, isClaudeNative(m.native_output_items)));
           m.tool_calls ||= []; m.tool_calls.push(value);
         }
         else { m.tool_calls ||= []; if (draft.index < 0) m.tool_calls.push(value); else m.tool_calls[draft.index] = value; }
@@ -302,7 +321,15 @@ function saveEntity() {
   <el-tooltip v-if="uuid && !opened" :content="busy ? '会话运行中无法编辑上下文' : '编辑上下文'" placement="left" :show-after="260">
     <button type="button" class="context-editor-entry" aria-label="编辑上下文" :aria-disabled="busy ? 'true' : 'false'" @click="open"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M11 21H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v3M13 3v5h5M8 11h4M8 15h2M13 21l1-4 6-6a1.4 1.4 0 0 1 2 2l-6 6-3 2ZM18.5 12.5l2 2"/></svg></button>
   </el-tooltip>
-  <section v-if="opened" class="context-editor ce-surface" aria-label="上下文编辑器" :aria-busy="!!pending || loading">
+  <section v-if="opened" ref="editorShell" class="context-editor ce-surface" :class="{'is-compact': compactViewport}" :data-compact-panel="compactPanel" aria-label="上下文编辑器" :aria-busy="!!pending || loading">
+    <nav v-if="compactViewport" class="ce-compact-toolbar" aria-label="短屏幕编辑操作">
+      <button type="button" @click="close">返回</button>
+      <button type="button" :aria-pressed="compactPanel === 'outline'" @click="switchCompactPanel('outline')">目录</button>
+      <button type="button" :aria-pressed="compactPanel === 'document'" @click="switchCompactPanel('document')">正文</button>
+      <button type="button" :aria-pressed="compactPanel === 'controls'" @click="switchCompactPanel('controls')">操作</button>
+      <button type="button" class="ce-primary" :disabled="!doc || !!pending || loading" @click="saveDraft">{{ pending === 'save' ? '保存中…' : '保存草稿' }}</button>
+    </nav>
+    <div class="ce-content">
     <header class="ce-heading">
       <div><h2>上下文编辑</h2><small>只编辑新分支，不改原始对话</small></div>
       <div class="ce-actions"><button type="button" @click="close">← 返回对话</button><button type="button" @click="importInput?.click()">导入</button><button type="button" :disabled="!doc" @click="download">导出完整包</button><input ref="importInput" type="file" accept=".json,application/json" hidden @change="upload"></div>
@@ -409,6 +436,7 @@ function saveEntity() {
         <div class="ce-actions ce-submit"><button type="button" :disabled="!!pending" @click="saveDraft">{{ pending === 'save' ? '保存中…' : '保存草稿' }}</button><button type="button" :disabled="!!pending" @click="preview">校验并预览</button><input v-model="branchTitle" aria-label="新分支标题" placeholder="新分支标题"><button type="button" class="ce-primary" :disabled="!!pending || state.mode !== 'compatible' || !previewReady || state.preview?.payload == null || !!serverErrors.length || hints.some(i => i.severity === 'error') || !!state.latestSource || busy" @click="createBranch">{{ pending === 'create' ? '创建中…' : '创建独立分支' }}</button></div>
       </footer>
     </template>
+    </div>
     <div v-if="error || notice" class="ce-status" :class="{'ce-error': error}" :role="error ? 'alert' : 'status'"><span>{{ error || notice }}</span><button type="button" aria-label="关闭提示" @click="error = ''; notice = ''">×</button></div>
     <el-dialog :model-value="!!entityEditor" class="ce-dialog ce-edit-dialog ce-surface mobile-viewport-dialog" width="min(880px, calc(100vw - 32px))" top="16px" :title="entityEditor?.kind === 'tool' ? (entityEditor.index < 0 ? '添加工具定义' : `编辑工具 · ${entityEditor.data.name || '未命名'}`) : entityEditor?.kind === 'call' ? '编辑工具调用' : `编辑 ${entityEditor?.field || ''}`" append-to-body destroy-on-close :close-on-click-modal="false" @update:model-value="value => { if (!value) entityEditor = null; }">
       <template v-if="entityEditor">

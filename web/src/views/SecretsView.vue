@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Api, apiError } from "../api";
+import { mobileSelectOptions } from "../mobileSelect.js";
 import draggable from "vuedraggable";
 import { assetTimeLine, formatAssetTime } from "../utils/assetTime";
 import { dragAutoScrollOptions } from "../utils/dragScroll";
@@ -14,10 +15,11 @@ const emit = defineEmits(["mobile-header-ready"]);
 
 const secrets = ref([]);
 const loading = ref(false);
+const loadError = ref("");
 const editing = ref(null);
 const original = ref("");
 const saving = ref(false);
-let alive = true;
+let alive = true, loadGeneration = 0;
 onBeforeUnmount(() => { alive = false; });
 const dialogOpen = ref(false);
 const showSecretValues = ref(false);
@@ -28,14 +30,27 @@ const scrollContainer = ref(null);
 const dragging = ref(false);
 
 async function load() {
+  const generation = ++loadGeneration, archived = showArchived.value;
+  const current = () => alive && generation === loadGeneration && archived === showArchived.value;
   loading.value = true;
+  loadError.value = "";
   try {
-    const data = await Api.secrets(true, showArchived.value);
+    const data = await Api.secrets(true, archived);
+    if (!current()) return false;
     secrets.value = data.items || [];
     rebuildGroups();
-  } finally { loading.value = false; }
+    return true;
+  } catch (error) {
+    if (!current()) return false;
+    secrets.value = [];
+    rebuildGroups();
+    clearSelection();
+    loadError.value = apiError(error);
+    return false;
+  }
+  finally { if (current()) loading.value = false; }
 }
-async function refresh() { await load(); clearSelection(); ElMessage.success("已刷新"); }
+async function refresh() { if (!await load()) return; clearSelection(); ElMessage.success("已刷新"); }
 onMounted(load);
 const shownSecrets = computed(() => secrets.value.filter((s) => showArchived.value || !s.archived));
 const selectedSecrets = computed(() => shownSecrets.value.filter((s) => selectedIds.value.includes(s.id)));
@@ -247,7 +262,11 @@ function mobileUpdated(row) {
     </div>
 
     <div ref="scrollContainer" class="admin-list flex-1 min-h-0 overflow-y-auto p-6" :class="{ 'select-none': dragging }" v-loading="loading">
-      <div v-if="!shownSecrets.length" class="text-center text-macsub py-16 text-sm">暂无凭证</div>
+      <div v-if="loadError" role="alert" class="text-center text-macsub py-8 text-sm">
+        <p class="mb-3">加载失败：{{ loadError }}</p>
+        <el-button :disabled="loading" @click="load">重试</el-button>
+      </div>
+      <div v-else-if="!shownSecrets.length" class="text-center text-macsub py-16 text-sm">暂无凭证</div>
       <draggable v-model="groups" item-key="name" handle=".group-handle" :animation="180"
         v-bind="dragAutoScrollOptions" :scroll="scrollContainer" :disabled="isAdminPhone && mobileMode !== 'sort'"
         @choose="dragging = true" @unchoose="dragging = false" @end="finishDrag">
@@ -312,7 +331,7 @@ function mobileUpdated(row) {
           <div><label class="text-xs text-macsub mb-1 block">名称（引用用，如 github）</label><el-input v-model="editing.name" /></div>
           <div>
             <label class="text-xs text-macsub mb-1 block">分组（可选）</label>
-            <el-select v-model="editing.grp" filterable allow-create clearable default-first-option placeholder="不分组" class="w-full">
+            <el-select v-model="editing.grp" :popper-options="mobileSelectOptions()" filterable allow-create clearable default-first-option placeholder="不分组" class="w-full">
               <el-option v-for="g in groupNames" :key="g" :label="g" :value="g" />
             </el-select>
           </div>

@@ -6,6 +6,7 @@ import { compile, createSSRApp, h, nextTick, reactive, ref, watch } from 'vue';
 import { renderToString } from 'vue/server-renderer';
 import { parse } from '@vue/compiler-sfc';
 import { baseParse } from '@vue/compiler-dom';
+import postcss from 'postcss';
 const source = fs.readFileSync(new URL('./ConsoleComposer.vue', import.meta.url), 'utf8');
 const editor = fs.readFileSync(new URL('../../references/ReferenceEditor.vue', import.meta.url), 'utf8');
 const between = (source, start, end) => { const a = source.indexOf(start), b = source.indexOf(end, a + start.length); assert.ok(a >= 0 && b > a); return source.slice(a, b); };
@@ -152,6 +153,7 @@ test('mobile composer hides the bottom hints and leaves the shell owning safe-ar
 test('open run-config popover follows the composer through keyboard blur and visual viewport changes, then detaches', async () => {
   const popover = ast.find(node => node.type === 1 && node.tag === 'el-popover');
   assert.ok(popover.props.some(prop => prop.name === 'ref' && prop.value?.content === 'runConfigPopover'));
+  assert.ok(popover.props.some(prop => prop.name === 'bind' && prop.arg?.content === 'popper-options' && prop.exp?.content === 'runConfigPopperOptions'));
   const editorNode = ast.find(node => node.type === 1 && node.tag === 'ReferenceEditor');
   assert.ok(editorNode.props.some(prop => prop.name === 'on' && prop.arg?.content === 'focusout'));
   const createTarget = () => {
@@ -170,8 +172,8 @@ test('open run-config popover follows the composer through keyboard blur and vis
   const runConfigPopperOptions = ref({});
   let mobile = true;
   win.matchMedia = () => ({matches: mobile});
-  const c = vm.createContext({ props, runConfigPopover, runConfigPopperOptions, window: win, nextTick, watch: (...args) => { stopWatch = watch(...args); } });
-  vm.runInContext('let runConfigPositionFrame = 0;\n' + between(source, 'function scheduleRunConfigPosition()', 'onMounted(() => {'), c);
+  const c = vm.createContext({ props, runConfigPopover, runConfigPopperOptions, runConfigContent: ref(null), runConfigCompact: ref(false), runConfigSettingsOpen: ref(false), window: win, nextTick, watch: (...args) => { stopWatch = watch(...args); } });
+  vm.runInContext('let runConfigPositionFrame = 0; let runConfigFullChromeHeight = 0;\n' + between(source, 'function syncRunConfigLayout(', 'onMounted(() => {'), c);
   props.modelMenuOpen = true; await nextTick(); await nextTick(); flushFrame(); await nextTick();
   assert.deepEqual(positions, [80]);
   assert.equal(runConfigPopperOptions.value.strategy, 'fixed');
@@ -189,6 +191,55 @@ test('open run-config popover follows the composer through keyboard blur and vis
   assert.deepEqual(positions, [80, 320, 360, 400], 'closed popup does not update');
   assert.equal(viewport.listeners.size, 0); assert.equal(win.listeners.size, 0);
   stopWatch();
+});
+
+test('mobile model picker fixes its search and footer, with only the active middle pane scrolling', () => {
+  const styles = postcss.parse(parse(source).descriptor.styles.map(style => style.content).join('\n'));
+  const mobileRules = {};
+  styles.walkAtRules('media', media => {
+    if (media.params !== '(max-width: 760px), (hover: none) and (pointer: coarse)') return;
+    media.walkRules(rule => {
+      const declarations = mobileRules[rule.selector] ||= {};
+      rule.walkDecls(decl => { declarations[decl.prop] = decl.value; });
+    });
+  });
+  assert.match(mobileRules['.run-config-popover']['max-height'], /var\(--mobile-viewport-height, 100dvh\)/);
+  assert.match(mobileRules['.run-config-popover']['max-height'], /safe-area-inset-top.*safe-area-inset-bottom/);
+  assert.equal(mobileRules['.run-config-popover']['overflow-y'], 'hidden');
+  assert.equal(mobileRules['.run-config-model-section'].flex, '1 1 auto');
+  assert.equal(mobileRules['.run-config-model-section']['min-height'], '0');
+  assert.equal(mobileRules['.run-config-model-section'].overflow, 'hidden');
+  assert.equal(mobileRules['.run-config-model-list'].flex, '1 1 auto');
+  assert.equal(mobileRules['.run-config-model-list']['max-height'], '320px');
+  assert.equal(mobileRules['.run-config-search'].position, 'static');
+  assert.equal(mobileRules['.run-config-search input']['font-size'], '16px');
+  assert.equal(mobileRules['.run-config-compact-footer'].flex, '0 0 auto');
+  assert.equal(mobileRules['.run-config-popover.is-compact .run-config-controls']['overflow-y'], 'auto');
+});
+
+test('measured fixed chrome selects compact layout without resize oscillation and restores after keyboard dismissal', () => {
+  let capacity = 600;
+  const child = (height, model = false) => ({height, display: 'block', classList: {contains: name => model && name === 'run-config-model-section'}, getBoundingClientRect() {return {height: this.height};}});
+  const children = [child(36), child(48), child(38), child(320, true), child(180)];
+  const content = {clientHeight: 600, children};
+  const runConfigCompact = ref(false), runConfigSettingsOpen = ref(false);
+  const c = vm.createContext({runConfigContent: ref(content), runConfigCompact, runConfigSettingsOpen,
+    window: {getComputedStyle: node => node.children ? {maxHeight: `${capacity}px`, rowGap: '10px'} : {display: node.display}, visualViewport: {height: 800}, innerHeight: 800}});
+  vm.runInContext('let runConfigFullChromeHeight = 0;\n' + between(source, 'function syncRunConfigLayout(', 'function scheduleRunConfigPosition('), c);
+  c.syncRunConfigLayout(true); assert.equal(runConfigCompact.value, false);
+  assert.equal(vm.runInContext('runConfigFullChromeHeight', c), 342);
+  capacity = 320; c.syncRunConfigLayout(true); assert.equal(runConfigCompact.value, true);
+  children[1].display = children[4].display = 'none';
+  c.syncRunConfigLayout(true); assert.equal(runConfigCompact.value, true, 'collapsed chrome cannot make the next resize reopen the full controls');
+  assert.equal(vm.runInContext('runConfigFullChromeHeight', c), 342);
+  runConfigSettingsOpen.value = true;
+  capacity = 600; c.syncRunConfigLayout(true);
+  assert.equal(runConfigCompact.value, false); assert.equal(runConfigSettingsOpen.value, false);
+  children[1].display = children[4].display = 'block'; children[3].height = 24;
+  c.syncRunConfigLayout(true); assert.equal(runConfigCompact.value, false, 'few search results do not trigger compact mode');
+  capacity = 320; c.syncRunConfigLayout(true); runConfigSettingsOpen.value = true;
+  c.syncRunConfigLayout(false);
+  assert.equal(runConfigCompact.value, false); assert.equal(runConfigSettingsOpen.value, false, 'desktop retains its existing presentation');
 });
 
 test('actual ReferenceEditor IME flags, candidate selection, Enter and Shift+Enter behavior remain unchanged', () => {

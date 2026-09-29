@@ -3,6 +3,7 @@ import MobileAdminSummary from "../components/MobileAdminSummary.vue";
 import { computed, onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Api, apiError } from "../api";
+import { mobileSelectOptions } from "../mobileSelect.js";
 
 const loading = ref(false);
 const agents = ref([]);
@@ -350,7 +351,7 @@ onMounted(load);
             <div><label class="text-xs text-macsub mb-1 block">Key</label><el-input v-model="editing.agentKey" placeholder="researcher" /></div>
             <div>
               <label class="text-xs text-macsub mb-1 block">模型</label>
-              <el-select v-model="editing.model" clearable filterable allow-create default-first-option class="w-full" placeholder="留空=跟随 OpenBear 当前模型" @change="onEditingModelChanged">
+              <el-select v-model="editing.model" clearable :popper-options="mobileSelectOptions()" filterable allow-create default-first-option class="w-full" placeholder="留空=跟随 OpenBear 当前模型" @change="onEditingModelChanged">
                 <el-option label="跟随当前模型" value="" />
                 <el-option v-for="m in options.models" :key="m.key" :label="`${m.key}${m.primary ? ' · 主模型' : ''}${m.reasoning ? ' · reasoning' : ''}${m.supportsFast ? ' · Fast' : ''}`" :value="m.key" />
               </el-select>
@@ -359,7 +360,7 @@ onMounted(load);
             <div class="md:col-span-4"><label class="text-xs text-macsub mb-1 block">适用场景</label><el-input v-model="editing.description" type="textarea" :rows="3" /></div>
             <div class="md:col-span-4">
               <label class="text-xs text-macsub mb-1 block">工具上限</label>
-              <el-select v-model="editing.toolAllowlist" multiple filterable class="w-full" :loading="optionsLoading" :disabled="saving" placeholder="选择工具上限；留空不附加预设限制" @visible-change="(visible) => { if (visible) loadOptions(); }">
+              <el-select v-model="editing.toolAllowlist" multiple :popper-options="mobileSelectOptions()" filterable class="w-full" :loading="optionsLoading" :disabled="saving" placeholder="选择工具上限；留空不附加预设限制" @visible-change="(visible) => { if (visible) loadOptions(); }">
                 <el-option-group v-for="group in toolGroups" :key="group.label" :label="group.label">
                   <el-option v-for="t in group.tools" :key="t.name" :label="t.kind === 'mcp' ? `${t.serverKey} / ${t.originalToolName}` : t.name" :value="t.name" :title="`${t.name} · ${t.description || ''}`" />
                 </el-option-group>

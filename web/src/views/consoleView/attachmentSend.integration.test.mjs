@@ -191,6 +191,42 @@ test('local send creation after navigation keeps captured folder/model and never
   c.outboundSends.take('local-1');
 });
 
+test('stale migration marker cannot retarget navigation while another local draft is being created', async t=>{
+  const {context:c,props}=harness(),loads=[];
+  vm.runInContext(between('function persistComposerDraft(', 'function clearDraftForConversation('),c);
+  vm.runInContext(between('function hasOptimisticLocalTurn()', 'function shouldPreserveOptimisticMessages('),c);
+  c.load=async()=>{loads.push(props.conversationUuid);};
+  c.applyTimelinePageMetadata=noop;
+  // A has its own draft and attachment; the next unsaved conversation gets B's.
+  props.conversationUuid='local:new';
+  await vm.runInContext('switchConversation("local:new","A")',c);
+  const fileB={id:'fileB',file:{name:'b.txt',size:8,type:'text/plain'}};
+  c.pendingAttachments.value=[fileB];
+  c.draft.value='next draft for B';
+  c.messages.value=[{id:'local-B',role:'user',content:'question B'}];
+  c.foregroundRunning.value=true;
+  c.outboundSends.begin({requestId:'creating-B',conversationUuid:'local:new',draftText:'question B',attachments:[fileB]});
+  t.after(()=>c.outboundSends.take('creating-B'));
+  // Deliberately retain A's old marker: request ownership must protect the UI
+  // even if stale state survives from a previous migration.
+  c.localToServerTransitionUuid.value='A';
+  props.conversationUuid='A';
+  await vm.runInContext('switchConversation("A","local:new")',c);
+  assert.equal(loads.at(-1),'A','ordinary navigation must reload A instead of taking the migration shortcut');
+  assert.equal(c.localToServerTransitionUuid.value,'');
+  assert.equal(c.draft.value,'message A');
+  assert.equal(c.attachmentsLoadedKey,'A');
+  assert.deepEqual(Array.from(c.pendingAttachments.value,item=>item.id),['fileA']);
+  assert.equal(c.messages.value.some(message=>message.id==='local-B'),false);
+  assert.equal(c.outboundSends.current.conversationUuid,'local:new','B preparation is not cancelled or redirected');
+  assert.equal(c.draftByConversation.value['local:new'],'question B\n\nnext draft for B');
+  assert.deepEqual(Array.from(c.attachmentsByConversation.get('local:new').attachments,item=>item.id),['fileB']);
+  props.conversationUuid='local:new';
+  await vm.runInContext('switchConversation("local:new","A")',c);
+  assert.equal(c.draft.value,'next draft for B');
+  assert.deepEqual(Array.from(c.pendingAttachments.value,item=>item.id),['fileB']);
+});
+
 test('switch back during upload restores A live progress and draft editor without duplicating sent text', async()=>{
   const {context:c,props,uploads,upload,sockets}=harness();
   const sending=vm.runInContext('send()',c);

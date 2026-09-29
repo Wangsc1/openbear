@@ -15,7 +15,7 @@ from app.llm.client import HTTPClient
 
 
 class _FakeStreamResponse:
-    """模拟 httpx 流式响应:status_code + aiter_lines(按编排延迟逐行吐)。"""
+    """模拟 httpx 流式响应:status_code + aiter_bytes(按编排延迟逐行吐)。"""
 
     def __init__(self, lines_with_delay: list[tuple[float, str]], status_code: int = 200):
         self._items = lines_with_delay
@@ -24,11 +24,16 @@ class _FakeStreamResponse:
     async def aread(self) -> bytes:
         return b""
 
-    async def aiter_lines(self):
+    async def aiter_bytes(self):
         for delay, line in self._items:
             if delay > 0:
                 await asyncio.sleep(delay)
-            yield line
+            yield (line + "\n").encode()
+            # Each scheduled data row is a complete single-line SSE event.
+            # Real HTTP includes its blank separator; timing assertions below
+            # concern event arrival, not an unterminated multi-data event.
+            if line.startswith("data:"):
+                yield b"\n"
 
 
 class _FakeStreamCtx:
@@ -67,7 +72,7 @@ async def test_sse_read_preserves_external_cancel_when_line_completes_same_turn(
     class RaceLines:
         def __init__(self):
             self.first = True
-            self.pending: asyncio.Future[str] | None = None
+            self.pending: asyncio.Future[bytes] | None = None
 
         def __aiter__(self):
             return self
@@ -88,7 +93,7 @@ async def test_sse_read_preserves_external_cancel_when_line_completes_same_turn(
         async def aread(self) -> bytes:
             return b""
 
-        def aiter_lines(self):
+        def aiter_bytes(self):
             return lines
 
     client._http.stream = lambda *args, **kwargs: _FakeStreamCtx(RaceResponse())  # type: ignore[assignment,arg-type]
@@ -98,7 +103,7 @@ async def test_sse_read_preserves_external_cancel_when_line_completes_same_turn(
         assert lines.pending is not None
         # Ordering is deliberate: Python 3.11 wait_for() used to return the
         # completed inner read and swallow the cancellation in this race.
-        lines.pending.set_result('data: {"k":1}')
+        lines.pending.set_result(b'data: {"k":1}\n\n')
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task

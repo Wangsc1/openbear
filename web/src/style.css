@@ -61,14 +61,13 @@ body {
     padding-left: env(safe-area-inset-left, 0px);
     padding-right: env(safe-area-inset-right, 0px);
   }
+  /* The shell paints the chat's safe area; keep its original geometry. */
+  html[data-openbear-mobile-viewport] .app-shell.is-console {
+    background: var(--ob-chat-bg);
+  }
   html[data-openbear-mobile-viewport] .app-main {
     min-height: 0;
     overflow: hidden;
-  }
-  /* The shell's bottom safe-area padding is outside the chat surface. Paint it
-     with the chat background, not the darker page background, in dark mode. */
-  html[data-openbear-mobile-viewport] .app-shell.is-console {
-    background: var(--ob-chat-bg);
   }
 }
 /* A landscape phone/tablet can retain the existing wide sidebar; no 48px bar

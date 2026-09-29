@@ -36,7 +36,7 @@ const models = [
 ];
 function harness(overrides = {}, tab = "main") {
   const calls = [];
-  const context = vm.createContext({computed, ref, watch, useId: () => 'menu-test', fmtTokens, modelDefaultThinking, modelLabel, modelShortLabel, thinkingLabel,
+  const context = vm.createContext({computed, ref, watch, scheduleRunConfigPosition() {}, useId: () => 'menu-test', fmtTokens, modelDefaultThinking, modelLabel, modelShortLabel, thinkingLabel,
     defineProps: schema => shallowReactive({...Object.fromEntries(Object.entries(schema).map(([key, spec]) => [key, typeof spec.default === "function" ? spec.default() : spec.default])),
       modelMenuOpen: true, modelGroups: [{provider: "OpenAI", models}], currentModel: models[0].key, currentModelInfo: models[0],
       currentThinkLevels: models[0].thinkingLevels, effectiveThinking: "xhigh", supportsThinking: true,
@@ -50,7 +50,8 @@ function harness(overrides = {}, tab = "main") {
   const bindings = proxyRefs(vm.runInContext(`({props, emit, runConfigTab, isAgentTab, contextDetailText, contextMeterStyle,
     runConfigModelText, runConfigMetaText, runConfigStrategyText, runConfigThinkingBadge, runConfigStatusLabel, menuSelectedModel, menuThinkingLevels, menuSupportsThinking, menuThinkingLevel, menuDefaultThinking,
     agentFastTriState, fmtTokens, modelLabel, modelTags, modelFeatures, rolloverTriggerForModel, compactThinkingLabel, selectMenuModel, selectMenuThinking,
-    activeModelDetail, modelDetailId, showModelFeature, clearModelDetail, runConfigPopoverVisible})`, context));
+    activeModelDetail, modelDetailId, showModelFeature, clearModelDetail, runConfigPopoverVisible,
+    runConfigContent, runConfigSearchInput, runConfigCompact, runConfigSettingsOpen, runConfigSettingsSummary, toggleRunConfigSettings, finishRunConfigSearch})`, context));
   let trees = [];
   const tooltips = [];
   return {bindings, calls, tooltips, async renderChip() {
@@ -295,10 +296,42 @@ for (const theme of ['light', 'dark']) {
   });
 }
 
+for (const tab of ['main', 'agent']) {
+  test(`${tab} compact search retains query and configuration, and settings replace rather than wrap the results`, async () => {
+    const r = harness({modelQuery: 'astra'}, tab);
+    let blurred = 0;
+    r.bindings.runConfigSearchInput = {blur() {blurred++;}};
+    r.bindings.runConfigCompact = true;
+    const shown = (nodes, name) => nodes.find(node => hasClass(node, name)).dirs.find(dir => typeof dir.value === 'boolean').value;
+    let result = await r.render();
+    assert.equal(shown(result.nodes, 'run-config-model-section'), true);
+    assert.equal(shown(result.nodes, 'run-config-search'), true);
+    assert.equal(shown(result.nodes, 'run-config-controls'), false);
+    assert.match(result.html, /Fast/); assert.match(result.html, /滑动窗口/);
+    if (tab === 'main') assert.match(result.html, /上下文 216K \/ 300K · 72\.0%/);
+    const settings = result.buttons.find(button => button.props?.onClick === r.bindings.toggleRunConfigSettings);
+    settings.props.onClick(); assert.equal(blurred, 1);
+    result = await r.render();
+    assert.equal(shown(result.nodes, 'run-config-model-section'), false);
+    assert.equal(shown(result.nodes, 'run-config-search'), false);
+    assert.equal(shown(result.nodes, 'run-config-controls'), true);
+    assert.match(result.html, /返回模型/); assert.match(result.html, /思考强度/); assert.match(result.html, /上下文压缩/);
+    settings.props.onClick(); result = await r.render();
+    assert.equal(shown(result.nodes, 'run-config-model-section'), true);
+    assert.equal(r.bindings.props.modelQuery, 'astra');
+    assert.equal(r.bindings.props.currentFast, false); assert.equal(r.bindings.props.effectiveThinking, 'xhigh');
+    assert.equal(r.calls.length, 0, 'switching panes changes no configuration or business state');
+    const done = result.buttons.find(button => button.props?.onClick === r.bindings.finishRunConfigSearch);
+    done.props.onClick(); assert.deepEqual(r.calls, [['close-menus']]); assert.equal(blurred, 3);
+    assert.equal(r.bindings.props.modelQuery, 'astra');
+  });
+}
+
 test("popup typography and surfaces are unified, and short viewports keep every control reachable", () => {
   const css = source.slice(source.indexOf("/* Model picker:"), source.indexOf(".send-button {", source.indexOf("/* Model picker:")));
   const sizes = [...css.matchAll(/font-size:\s*(\d+)px/g)].map(match => Number(match[1]));
-  assert.ok(sizes.length >= 8 && sizes.every(size => size >= 12 && size <= 13));
+  assert.ok(sizes.length >= 8 && sizes.every(size => (size >= 12 && size <= 13) || size === 16));
+  assert.match(css, /\.run-config-search input\s*\{\s*font-size: 16px;\s*\}/, 'only the mobile search input gets the iOS-safe size');
   assert.match(css, /\.model-row-name[^}]*font-size: 13px/);
   assert.match(css, /\.model-group-title[^}]*font-size: 12px/);
   assert.match(css, /\.model-tag[^}]*font-size: 12px/);

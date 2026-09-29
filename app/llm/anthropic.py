@@ -17,6 +17,7 @@ from app.llm.base import (
     AgentResult,
     LLMBackend,
     Message,
+    OpenBearLLMError,
     apply_fast_request_body,
     fast_request_parts,
     merge_fast_request_headers,
@@ -75,13 +76,19 @@ def _to_anthropic(messages: list[Message], *, include_thinking: bool = True) -> 
             continue  # system 顶层传，跳过
         if role == "assistant":
             blocks: list[dict[str, Any]] = []
-            # 原生 thinking/redacted 块独占思考表示；普通文本与调用仍用中性字段。
-            # /think off 仅可省略已完成回合，工具循环中的块必须完整原样回传。
-            if include_thinking or (tool_turn_start is not None and index >= tool_turn_start):
-                native = [dict(item) for item in (m.get("native_output_items") or [])
-                          if isinstance(item, dict) and item.get("type") in {"thinking", "redacted_thinking"}]
+            # New checkpoints hold the complete native turn; legacy checkpoints
+            # contain only thinking. Preserve both without duplicating text/tools.
+            native = [dict(item) for item in (m.get("native_output_items") or [])
+                      if isinstance(item, dict)]
+            keep_thinking = include_thinking or (tool_turn_start is not None and index >= tool_turn_start)
+            if native and any(item.get("type") in {"text", "tool_use"} for item in native):
+                blocks = (native if keep_thinking else [item for item in native
+                          if item.get("type") not in {"thinking", "redacted_thinking"}])
+                out.append({"role": "assistant", "content": blocks or ""})
+                continue
+            if keep_thinking:
                 if native:
-                    blocks.extend(native)
+                    blocks.extend(item for item in native if item.get("type") in {"thinking", "redacted_thinking"})
                 elif m.get("signature"):
                     blocks.append({
                         "type": "thinking",
@@ -329,6 +336,7 @@ class AnthropicBackend(LLMBackend):
         blocks: dict[int, dict[str, Any]] = {}
         in_usage = Usage()
         stop_reason = ""
+        message_stopped = False
 
         async for ev_name, data in self._client.post_sse(
             url,
@@ -357,13 +365,21 @@ class AnthropicBackend(LLMBackend):
                 cb = data.get("content_block") or {}
                 blocks[idx] = {"type": cb.get("type"), "id": cb.get("id", ""),
                                "name": cb.get("name", ""), "args": "",
-                               "native": dict(cb) if cb.get("type") in {"thinking", "redacted_thinking"} else None}
+                               "native": dict(cb) if cb.get("type") in {"thinking", "redacted_thinking", "text", "tool_use"} else None}
             elif t == "content_block_delta":
                 idx = data.get("index", 0)
                 d = data.get("delta") or {}
                 dt = d.get("type")
                 if dt == "text_delta":
+                    native = blocks.get(idx, {}).get("native")
+                    if native is not None and native.get("type") == "text":
+                        native["text"] = native.get("text", "") + d.get("text", "")
                     yield StreamEvent(kind="content", text=d.get("text", ""))
+                elif dt == "citations_delta":
+                    native = blocks.get(idx, {}).get("native")
+                    citation = d.get("citation")
+                    if native is not None and native.get("type") == "text" and isinstance(citation, dict):
+                        native["citations"] = [*(native.get("citations") or []), dict(citation)]
                 elif dt == "thinking_delta":
                     native = blocks.get(idx, {}).get("native")
                     if native is not None and native.get("type") == "thinking":
@@ -379,9 +395,16 @@ class AnthropicBackend(LLMBackend):
             elif t == "content_block_stop":
                 idx = data.get("index", 0)
                 blk = blocks.get(idx) or {}
+                blk["closed"] = True
                 native = blk.get("native")
                 if native is not None:
-                    yield StreamEvent(kind="native_output_item", native_output_items=[native])
+                    if native.get("type") == "tool_use":
+                        try:
+                            native["input"] = json.loads(blk["args"]) if blk.get("args") else native.get("input", {})
+                            blk["valid_input"] = isinstance(native["input"], dict)
+                        except (ValueError, TypeError):
+                            # Never fabricate an empty input for malformed JSON.
+                            blk["valid_input"] = False
                     if native.get("type") == "thinking" and native.get("signature"):
                         # 中性签名继续供旧调用方使用，回放只取原生块。
                         yield StreamEvent(kind="reasoning", text="", signature=native["signature"])
@@ -402,15 +425,28 @@ class AnthropicBackend(LLMBackend):
                     if field in u and u[field] is not None:
                         setattr(in_usage, attr, u[field])
             elif t == "message_stop":
-                pass
+                message_stopped = True
 
         # 收尾：tool_use 块 → tool_call 事件
         calls: list[ToolCall] = []
         for idx in sorted(blocks):
             blk = blocks[idx]
-            if blk.get("type") == "tool_use":
+            if (blk.get("type") == "tool_use" and stop_reason in ("", "tool_use", "end_turn")
+                    and (stop_reason or (blk.get("closed") and blk.get("valid_input")))):
+                native_input = (blk.get("native") or {}).get("input", {})
                 calls.append(ToolCall(id=blk.get("id", ""), name=blk.get("name", ""),
-                                      arguments=blk.get("args") or "{}"))
+                                      arguments=blk.get("args") or json.dumps(native_input, ensure_ascii=False)))
+        native_blocks = [blocks[idx].get("native") for idx in sorted(blocks)]
+        if native_blocks and all(isinstance(block, dict) for block in native_blocks):
+            yield StreamEvent(kind="native_output_item", native_output_items=native_blocks)
+        elif native_blocks:
+            # An unknown provider block makes a full-turn snapshot incomplete.
+            # Keep the legacy opaque thinking fallback instead of misrepresenting
+            # the provider's complete block sequence.
+            thinking_blocks = [block for block in native_blocks if isinstance(block, dict)
+                               and block.get("type") in {"thinking", "redacted_thinking"}]
+            if thinking_blocks:
+                yield StreamEvent(kind="native_output_item", native_output_items=thinking_blocks)
         in_usage.total_tokens = (
             in_usage.input_tokens + in_usage.output_tokens
             + in_usage.cache_read_tokens + in_usage.cache_write_tokens
@@ -418,7 +454,9 @@ class AnthropicBackend(LLMBackend):
         yield StreamEvent(kind="usage", usage=in_usage)
         if calls:
             yield StreamEvent(kind="tool_call", tool_calls=calls)
-        yield StreamEvent(kind="finish", finish_reason=_norm_stop(stop_reason))
+        if not stop_reason and not message_stopped:
+            raise OpenBearLLMError("Anthropic 流提前结束：未收到消息终态", retryable=True, protocol="anthropic")
+        yield StreamEvent(kind="finish", finish_reason="tool_calls" if calls else _norm_stop(stop_reason))
 
     async def complete(
         self, messages: list[Message], *, model: str, system: str = "",
@@ -447,17 +485,23 @@ class AnthropicBackend(LLMBackend):
                 **parsed_error.exception_kwargs(protocol="anthropic"),
             )
         result = AgentResult()
-        for blk in data.get("content") or []:
+        content_blocks = data.get("content") or []
+        complete_native = all(isinstance(blk, dict) and blk.get("type") in
+                              {"text", "thinking", "redacted_thinking", "tool_use"}
+                              for blk in content_blocks)
+        for blk in content_blocks:
             bt = blk.get("type")
+            if bt in ({"text", "thinking", "redacted_thinking", "tool_use"} if complete_native else
+                      {"thinking", "redacted_thinking"}):
+                result.native_output_items.append(dict(blk))
             if bt == "text":
                 result.text += blk.get("text", "")
             elif bt in {"thinking", "redacted_thinking"}:
-                result.native_output_items.append(dict(blk))
                 if bt == "thinking":
                     result.reasoning += blk.get("thinking", "")
                     if blk.get("signature"):
                         result.signature = blk["signature"]
-            elif bt == "tool_use":
+            elif bt == "tool_use" and data.get("stop_reason") not in {"max_tokens", "refusal", "model_context_window_exceeded"}:
                 result.tool_calls.append(ToolCall(
                     id=blk.get("id", ""), name=blk.get("name", ""),
                     arguments=json.dumps(blk.get("input") or {}, ensure_ascii=False),

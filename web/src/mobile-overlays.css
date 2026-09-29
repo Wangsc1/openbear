@@ -1,6 +1,12 @@
 /* Opt-in geometry for body-teleported mobile overlays. The app shell cannot
    provide its keyboard bounds or safe areas to these independent surfaces. */
 @media (max-width: 760px), (hover: none) and (pointer: coarse) {
+  /* A teleported Select owns a separate list; sizing only its parent dialog
+     leaves the library's 274px list behind the keyboard. */
+  html .mobile-select-popper .el-select-dropdown__wrap {
+    max-height: max(0px, min(274px, calc(var(--mobile-select-height, var(--mobile-viewport-height, 100dvh)) - 32px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px))));
+    overscroll-behavior: contain;
+  }
   html .mobile-viewport-dialog.el-dialog {
     box-sizing: border-box;
     max-width: calc(100% - 2 * max(8px, env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px)));
