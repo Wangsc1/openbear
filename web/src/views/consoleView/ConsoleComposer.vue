@@ -2333,8 +2333,9 @@ button.status-chip:hover, .status-chip-active {
 	}
 	.run-config-chip-model { font-weight: 500; }
 	.run-config-chip-status { display: inline-flex; font-size: 10px; }
-	/* Icons sit at the input box's inner edge, mirroring the send button's inset. */
-	.composer-actions .tool-btn { place-items: center start; }
+	/* Move each complete control—not only its glyph—toward the input edge. This
+	   keeps the circular hover/press feedback and tooltip anchored to the icon. */
+	.composer-actions .tool-btn { transform: translateX(-14px); }
 	.composer-clear:disabled { display: none; }
 	.composer-toolbar button.run-config-chip:focus-visible { outline: 2px solid var(--bear-accent); outline-offset: -2px; }
 	.run-config-chip-meta { display: none; }
