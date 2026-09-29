@@ -88,10 +88,10 @@ export function fmtNum(n) {
 export function fmtCost(n) {
 	const value = Number(n || 0);
 	if (!(value > 0)) return "—";
-	// One decimal keeps the phone footer on one line. Round half up to 0.1,
-	// correcting binary floating-point cases such as 0.25 -> 0.3.
-	const rounded = Math.round((value + Number.EPSILON) * 10) / 10;
-	return rounded > 0 ? `$${rounded.toFixed(1)}` : "<$0.1";
+	// Two decimals keep the amount compact while retaining cent-level detail.
+	// Round half up to 0.01 and correct common binary floating-point ties.
+	const rounded = Math.round((value + Number.EPSILON) * 100) / 100;
+	return rounded > 0 ? `$${rounded.toFixed(2)}` : "<$0.01";
 }
 
 export function fmtTps(value) {
