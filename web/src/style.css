@@ -66,6 +66,14 @@ body {
     overflow: hidden;
   }
 }
+@media (max-width: 760px) {
+  /* Use the upper part of iPhone's bottom safe area for the chat composer while
+     retaining clearance around the home indicator. This moves the composer and
+     its usage summary together instead of offsetting either child visually. */
+  html[data-openbear-mobile-viewport] .app-shell.is-console {
+    padding-bottom: max(0px, calc(env(safe-area-inset-bottom, 0px) - 16px));
+  }
+}
 /* A landscape phone/tablet can retain the existing wide sidebar; no 48px bar
    is added in that layout. Only its safe area needs reserving. */
 @media (min-width: 761px) and (hover: none) and (pointer: coarse) {
