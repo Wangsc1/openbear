@@ -251,6 +251,33 @@ test('320–760px navigation is a 44px picker and quiet restart, never a horizon
   }
 });
 
+test('keyboard viewport bursts coalesce into one downward-only model-search correction', () => {
+  const timers = new Map(); let nextTimer = 0;
+  const inputRect = {top: 366, bottom: 410};
+  const input = {getBoundingClientRect: () => ({...inputRect})};
+  const stack = {scrollTop: 0, getBoundingClientRect: () => ({top: 48, bottom: 408})};
+  const document = {activeElement: input};
+  const window = {
+    innerHeight: 874,
+    visualViewport: {offsetTop: 80, height: 260, scale: 1},
+    matchMedia: () => ({matches: true}),
+    setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, {callback, delay}); return id; },
+    clearTimeout(id) { timers.delete(id); },
+  };
+  const r = runtime(channels, {window, document});
+  r.ctx.input = input; r.ctx.stack = stack;
+  r.run('modelSearchInput.value=markRaw(input);channelDetailStack.value=markRaw(stack)');
+  r.run('scheduleModelSearchVisibility();scheduleModelSearchVisibility();scheduleModelSearchVisibility()');
+  assert.equal(timers.size, 1, 'resize and scroll bursts leave one settled correction');
+  const pending = [...timers.values()][0]; assert.equal(pending.delay, 120);
+  timers.clear(); pending.callback();
+  assert.equal(stack.scrollTop, 78, 'the focused search is revealed once above the keyboard');
+  Object.assign(inputRect, {top: 60, bottom: 104});
+  r.run('scheduleModelSearchVisibility()');
+  const above = [...timers.values()][0]; timers.clear(); above.callback();
+  assert.equal(stack.scrollTop, 78, 'an intermediate opposite viewport event cannot bounce the page back');
+});
+
 test('mobile model list scrolls normally and short viewports scroll the stack without squeezing the channel card', () => {
   const chain = ['channels-view', 'channels-workspace', 'channel-detail', 'channel-detail-stack', 'channel-models-panel', 'model-list-scroll'];
   let parent = node(channels, chain[0]);

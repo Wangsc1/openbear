@@ -56,23 +56,24 @@ function modelSectionId(row, section) {
 const modelSearchQuery = ref("");
 const modelSearchInput = ref(null);
 const channelDetailStack = ref(null);
-let searchViewportFrame = 0;
+let searchViewportTimer = 0;
 function keepModelSearchVisible() {
-  if (searchViewportFrame) return;
-  searchViewportFrame = window.requestAnimationFrame(() => {
-    searchViewportFrame = 0;
-    const input = modelSearchInput.value, stack = channelDetailStack.value;
-    if (!input || !stack || document.activeElement !== input ||
-        !window.matchMedia('(max-width: 760px)').matches) return;
-    const viewport = window.visualViewport;
-    if (viewport && Math.abs(viewport.scale - 1) > .01) return;
-    const bounds = stack.getBoundingClientRect(), rect = input.getBoundingClientRect();
-    const top = Math.max(bounds.top, viewport?.offsetTop || 0) + 8;
-    const bottom = Math.min(bounds.bottom, (viewport?.offsetTop || 0) + (viewport?.height || window.innerHeight)) - 8;
-    // Scroll this panel only; never reset the document scroll or move focus.
-    if (rect.bottom > bottom) stack.scrollTop += rect.bottom - bottom;
-    else if (rect.top < top) stack.scrollTop -= top - rect.top;
-  });
+  searchViewportTimer = 0;
+  const input = modelSearchInput.value, stack = channelDetailStack.value;
+  if (!input || !stack || document.activeElement !== input ||
+      !window.matchMedia('(max-width: 760px)').matches) return;
+  const viewport = window.visualViewport;
+  if (viewport && Math.abs(viewport.scale - 1) > .01) return;
+  const bounds = stack.getBoundingClientRect(), rect = input.getBoundingClientRect();
+  const bottom = Math.min(bounds.bottom, (viewport?.offsetTop || 0) + (viewport?.height || window.innerHeight)) - 8;
+  // iOS emits alternating visualViewport resize/scroll events throughout the
+  // keyboard animation. Correct once after they settle and only toward the
+  // search field; opposing corrections make the whole settings page bounce.
+  if (rect.bottom > bottom) stack.scrollTop += rect.bottom - bottom;
+}
+function scheduleModelSearchVisibility() {
+  if (searchViewportTimer) window.clearTimeout(searchViewportTimer);
+  searchViewportTimer = window.setTimeout(keepModelSearchVisible, 120);
 }
 const modelScrollList = ref(null);
 let stopModelScroll = () => {};
@@ -1223,15 +1224,15 @@ async function persistModelOrder() {
 }
 onMounted(() => {
   void loadModelsDevProviders(); void loadList();
-  window.addEventListener('resize', keepModelSearchVisible);
-  window.visualViewport?.addEventListener('resize', keepModelSearchVisible);
-  window.visualViewport?.addEventListener('scroll', keepModelSearchVisible);
+  window.addEventListener('resize', scheduleModelSearchVisibility);
+  window.visualViewport?.addEventListener('resize', scheduleModelSearchVisibility);
+  window.visualViewport?.addEventListener('scroll', scheduleModelSearchVisibility);
 });
 onBeforeUnmount(() => {
-  window.removeEventListener('resize', keepModelSearchVisible);
-  window.visualViewport?.removeEventListener('resize', keepModelSearchVisible);
-  window.visualViewport?.removeEventListener('scroll', keepModelSearchVisible);
-  if (searchViewportFrame) window.cancelAnimationFrame(searchViewportFrame);
+  window.removeEventListener('resize', scheduleModelSearchVisibility);
+  window.visualViewport?.removeEventListener('resize', scheduleModelSearchVisibility);
+  window.visualViewport?.removeEventListener('scroll', scheduleModelSearchVisibility);
+  if (searchViewportTimer) window.clearTimeout(searchViewportTimer);
   finishModelScroll();
   for (const key of channelTestPollers.keys()) clearChannelTestPoller(key);
 });
@@ -1447,7 +1448,7 @@ onBeforeUnmount(() => {
                   <input
                     ref="modelSearchInput"
                     v-model="modelSearchQuery"
-                    @focus="keepModelSearchVisible"
+                    @focus="scheduleModelSearchVisibility"
                     class="mac-input h-7 text-xs pl-7 pr-6"
                     placeholder="搜索模型 ID / 名称…"
                     aria-label="搜索模型 ID / 名称"
