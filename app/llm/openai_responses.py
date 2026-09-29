@@ -269,7 +269,6 @@ class OpenAIResponsesBackend(LLMBackend):
         )
         url = f"{self._base}/responses"
 
-        calls: list[ToolCall] = []
         encrypted_reasoning: dict[str, str] = {}
         final_usage: Usage | None = None
         provider_billing: dict[str, Any] = {}
@@ -277,15 +276,18 @@ class OpenAIResponsesBackend(LLMBackend):
         # Native items are ordered by output_index once the item set is known.
         # Text deltas, tool events and tool scheduling are still not delayed:
         # tool calls were already emitted only after the SSE stream ended.
-        native_entries: list[dict[str, Any]] = []
-        native_by_index: dict[int, dict[str, Any]] = {}
+        # Keep the same latest done payload for replay and tool execution,
+        # including when native continuation is disabled. Entries retain their
+        # first-completion slot so independent tool execution is not reordered.
+        output_entries: list[dict[str, Any]] = []
+        output_by_index: dict[int, dict[str, Any]] = {}
         added_indexes: dict[tuple[str, str], int] = {}
         terminal_output: list[Any] | None = None
 
         def flush_native() -> list[StreamEvent]:
-            items = _order_native_items(native_entries, terminal_output)
-            native_entries.clear()
-            native_by_index.clear()
+            items = _order_native_items(output_entries, terminal_output) if opts.get("native_continuation") else []
+            output_entries.clear()
+            output_by_index.clear()
             return [StreamEvent(kind="native_output_item", native_output_items=[item]) for item in items]
 
         async for ev_name, data in self._client.post_sse(
@@ -373,22 +375,26 @@ class OpenAIResponsesBackend(LLMBackend):
                         continue
                     if index is None and identity:
                         index = added_indexes.get(identity)
-                    if opts.get("native_continuation"):
-                        entry = native_by_index.get(index) if index is not None else None
-                        if entry is not None:
-                            entry["item"] = item  # repeated done for one output slot
-                        else:
-                            entry = {"item": item, "index": index}
-                            native_entries.append(entry)
-                            if index is not None:
-                                native_by_index[index] = entry
-                    if item.get("type") == "function_call":
-                        calls.append(ToolCall(
-                            id=item.get("call_id") or item.get("id", ""),
-                            name=item.get("name", ""),
-                            arguments=item.get("arguments", "") or "{}",
-                        ))
+                    entry = output_by_index.get(index) if index is not None else None
+                    if entry is not None:
+                        entry["item"] = item  # repeated done for one output slot
+                    else:
+                        entry = {"item": item, "index": index}
+                        output_entries.append(entry)
+                        if index is not None:
+                            output_by_index[index] = entry
 
+        # Only native replay uses output_index ordering. Tools keep completion
+        # order, but consume the same final payload rather than stale duplicates.
+        calls = [
+            ToolCall(
+                id=item.get("call_id") or item.get("id", ""),
+                name=item.get("name", ""),
+                arguments=item.get("arguments", "") or "{}",
+            )
+            for entry in output_entries
+            if (item := entry["item"]).get("type") == "function_call"
+        ]
         for native_event in flush_native():
             yield native_event
         if final_usage:
