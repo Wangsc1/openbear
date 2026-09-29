@@ -9,7 +9,8 @@
     <link rel="icon" type="image/x-icon" sizes="16x16 32x32 48x48 64x64" href="/assets/brand/favicon-d60af5867ad8.ico" />
     <link rel="icon" type="image/png" sizes="32x32" href="/assets/brand/favicon-32-d60af5867ad8.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png" />
-    <meta name="color-scheme" content="light dark" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#f8f8f8" />
     <link rel="stylesheet" href="/src/theme-tokens.css" />
     <script>
       (() => {
@@ -24,6 +25,11 @@
         root.classList.toggle("dark", dark);
         root.classList.toggle("light", !dark);
         root.style.colorScheme = dark ? "dark" : "light";
+        const browserColor = dark ? "#161616" : "#f8f8f8";
+        const resolvedTheme = dark ? "dark" : "light";
+        root.style.backgroundColor = browserColor;
+        document.querySelector('meta[name="theme-color"]').content = browserColor;
+        document.querySelector('meta[name="color-scheme"]').content = resolvedTheme;
         root.dataset.theme = dark ? "dark" : "light";
         root.dataset.themeMode = mode;
       })();
@@ -34,6 +40,8 @@
     <title>OpenBear</title>
   </head>
   <body>
+    <div class="safari-tint safari-tint-top" aria-hidden="true"></div>
+    <div class="safari-tint safari-tint-bottom" aria-hidden="true"></div>
     <div id="app"></div>
     <script type="module" src="/src/main.js"></script>
   </body>

@@ -29,6 +29,17 @@ function writeStoredThemeMode(storage, mode) {
   }
 }
 
+function syncBrowserChrome(doc, resolvedTheme) {
+  if (!doc) return;
+  const color = resolvedTheme === "dark" ? "#161616" : "#f8f8f8";
+  const root = doc.documentElement;
+  if (root?.style) root.style.backgroundColor = color;
+  const themeColor = doc.querySelector?.('meta[name="theme-color"]');
+  const colorScheme = doc.querySelector?.('meta[name="color-scheme"]');
+  themeColor?.setAttribute?.("content", color);
+  colorScheme?.setAttribute?.("content", resolvedTheme);
+}
+
 export function createThemeController({ windowObject, documentObject, storageObject } = {}) {
   const win = windowObject;
   const doc = documentObject;
@@ -48,6 +59,7 @@ export function createThemeController({ windowObject, documentObject, storageObj
     root.classList.toggle("dark", next.dark);
     root.classList.toggle("light", !next.dark);
     root.style.colorScheme = next.resolvedTheme;
+    syncBrowserChrome(doc, next.resolvedTheme);
     root.dataset.theme = next.resolvedTheme;
     root.dataset.themeMode = next.mode;
   }

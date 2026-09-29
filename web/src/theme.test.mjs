@@ -38,10 +38,23 @@ function harness({ systemDark = false, stored = null, throwRead = false, throwWr
     CustomEvent: FakeCustomEvent,
     dispatchEvent(event) { events.push(event); },
   };
-  const controller = createThemeController({ windowObject, documentObject: { documentElement: root }, storageObject: storage });
+  const metas = {
+    theme: {attrs: {}, setAttribute(name, value) { this.attrs[name] = value; }},
+    scheme: {attrs: {}, setAttribute(name, value) { this.attrs[name] = value; }},
+  };
+  const documentObject = {
+    documentElement: root,
+    querySelector(selector) {
+      if (selector === 'meta[name="theme-color"]') return metas.theme;
+      if (selector === 'meta[name="color-scheme"]') return metas.scheme;
+      return null;
+    },
+  };
+  const controller = createThemeController({ windowObject, documentObject, storageObject: storage });
   return {
     controller,
     root,
+    metas,
     values,
     events,
     setSystemDark(dark) {
@@ -73,6 +86,9 @@ test("missing preference defaults to auto and follows system changes", () => {
   assert.deepEqual(env.controller.getState(), { mode: "auto", resolvedTheme: "dark", dark: true });
   assert.equal(env.root.classList.contains("dark"), true);
   assert.equal(env.root.style.colorScheme, "dark");
+  assert.equal(env.root.style.backgroundColor, "#161616");
+  assert.equal(env.metas.theme.attrs.content, "#161616");
+  assert.equal(env.metas.scheme.attrs.content, "dark");
 });
 
 test("manual light and dark persist, ignore system changes, and auto resolves immediately", () => {
@@ -88,6 +104,9 @@ test("manual light and dark persist, ignore system changes, and auto resolves im
   env.controller.setMode("light");
   env.setSystemDark(true);
   assert.deepEqual(env.controller.getState(), { mode: "light", resolvedTheme: "light", dark: false });
+  assert.equal(env.root.style.backgroundColor, "#f8f8f8");
+  assert.equal(env.metas.theme.attrs.content, "#f8f8f8");
+  assert.equal(env.metas.scheme.attrs.content, "light");
   assert.equal(changes, 2, "fixed light must not react to system changes");
   env.controller.setMode("auto");
   assert.deepEqual(env.controller.getState(), { mode: "auto", resolvedTheme: "dark", dark: true });
