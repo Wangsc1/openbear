@@ -22,7 +22,9 @@ html, body { transition: none !important; }
   position: fixed;
   left: 0;
   right: 0;
-  z-index: -1;
+  /* OpenBear has full-viewport opaque login/app shells, unlike the calculator.
+     Keep the 4px in-viewport sampler above them so Safari can actually see it. */
+  z-index: 4000;
   height: 12px;
   background: var(--ob-bg);
   pointer-events: none;

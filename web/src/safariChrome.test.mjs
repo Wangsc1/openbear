@@ -18,6 +18,8 @@ test('fixed edge samplers expose background without any exclusion filter', () =>
   assert.match(html, /safari-tint safari-tint-bottom/);
   const sampler = css.match(/\.safari-tint\s*\{([^}]+)\}/)[1].replace(/\/\*[\s\S]*?\*\//g, '');
   assert.match(sampler, /position:\s*fixed/);
+  assert.match(sampler, /z-index:\s*4000/);
+  assert.match(sampler, /pointer-events:\s*none/);
   assert.match(sampler, /background:\s*var\(--ob-bg\)/);
   assert.doesNotMatch(sampler, /(?:backdrop-)?filter\s*:/);
   assert.match(css, /html, body\s*\{\s*transition:\s*none\s*!important/);
