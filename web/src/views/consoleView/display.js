@@ -86,7 +86,12 @@ export function fmtNum(n) {
 }
 
 export function fmtCost(n) {
-	return Number(n || 0) > 0 ? `$${Number(n).toFixed(5)}` : "—";
+	const value = Number(n || 0);
+	if (!(value > 0)) return "—";
+	// One decimal keeps the phone footer on one line. Round half up to 0.1,
+	// correcting binary floating-point cases such as 0.25 -> 0.3.
+	const rounded = Math.round((value + Number.EPSILON) * 10) / 10;
+	return rounded > 0 ? `$${rounded.toFixed(1)}` : "<$0.1";
 }
 
 export function fmtTps(value) {
