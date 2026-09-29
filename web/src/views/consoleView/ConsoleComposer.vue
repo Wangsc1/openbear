@@ -1919,10 +1919,6 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 	height: 0.78rem;
 }
 
-.run-config-status-fast {
-	color: var(--ob-blue);
-}
-
 .run-config-chip-model {
 	max-width: 100%;
 	min-width: 0;
