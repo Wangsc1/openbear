@@ -65,6 +65,11 @@ body {
     min-height: 0;
     overflow: hidden;
   }
+  /* The shell's bottom safe-area padding is outside the chat surface. Paint it
+     with the chat background, not the darker page background, in dark mode. */
+  html[data-openbear-mobile-viewport] .app-shell.is-console {
+    background: var(--ob-chat-bg);
+  }
 }
 /* A landscape phone/tablet can retain the existing wide sidebar; no 48px bar
    is added in that layout. Only its safe area needs reserving. */

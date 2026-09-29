@@ -49,6 +49,7 @@ test('phone safe top is reserved once by main/bar, bottom by shell, and fixed fl
   assert.equal(shell.position, 'fixed'); assert.equal(shell.height, 'var(--mobile-viewport-height, 100dvh)');
   assert.equal(shell.transform, 'translateY(var(--mobile-viewport-top, 0px))'); assert.equal(shell['padding-top'], undefined);
   assert.equal(shell['padding-bottom'], 'env(safe-area-inset-bottom, 0px)');
+  assert.match(fs.readFileSync(new URL('./style.css', import.meta.url), 'utf8'), /html\[data-openbear-mobile-viewport\] \.app-shell\.is-console \{\s*background: var\(--ob-chat-bg\);/, 'chat safe area uses the chat background');
   const main = declarations('./App.vue', '.app-main', phone), bar = declarations('./App.vue', '.mobile-app-bar', phone);
   assert.equal(main['padding-top'], 'calc(48px + env(safe-area-inset-top, 0px))'); assert.equal(bar.height, main['padding-top']);
   assert.equal(declarations('./style.css', 'html[data-openbear-mobile-viewport] body', phone).overflow, 'hidden');
