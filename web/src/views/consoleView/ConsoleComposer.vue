@@ -899,12 +899,10 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 								<button type="button" class="status-chip run-config-chip" aria-label="运行配置" :aria-description="`上下文压缩：${runConfigStrategyText}`"
 								        :class="props.modelMenuOpen ? 'status-chip-active' : ''">
 									<span class="run-config-chip-main">
-										<span class="run-config-chip-title">
-											<span class="run-config-chip-model">{{ runConfigModelText }}</span>
-											<span v-if="runConfigStatusLabel" class="run-config-chip-status" :aria-label="runConfigStatusLabel">
-												<span v-if="runConfigThinkingBadge" class="run-config-status-thinking"><ModelFeatureIcon name="brain"/>{{ runConfigThinkingBadge }}</span>
-												<span v-if="props.currentFast" class="run-config-status-fast"><ModelFeatureIcon name="zap"/>Fast</span>
-											</span>
+										<span class="run-config-chip-model">{{ runConfigModelText }}</span>
+										<span v-if="runConfigStatusLabel" class="run-config-chip-status" role="img" :aria-label="runConfigStatusLabel">
+											<span v-if="runConfigThinkingBadge" class="run-config-status-thinking">{{ runConfigThinkingBadge }}</span>
+											<span v-if="props.currentFast" class="run-config-status-fast"><ModelFeatureIcon name="zap"/></span>
 										</span>
 										<span v-if="runConfigMetaText" class="run-config-chip-meta">{{ runConfigMetaText }}</span>
 									</span>
@@ -1885,38 +1883,32 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 	overflow: hidden;
 }
 
-.run-config-chip-title {
-	display: inline-flex;
-	min-width: 0;
-	flex-direction: column;
-	align-items: flex-start;
-	justify-content: center;
-	line-height: 1.08;
-}
-
 .run-config-chip-status {
 	display: none;
-	max-width: 100%;
-	min-width: 0;
+	flex: 0 0 auto;
 	align-items: center;
-	gap: 0.75rem;
-	overflow: hidden;
 	color: var(--ob-text-muted);
-	font-size: 9.5px;
-	font-weight: 560;
-	line-height: 1.1;
+	font-weight: 520;
 	white-space: nowrap;
 }
 
 .run-config-chip-status > span {
 	display: inline-flex;
 	align-items: center;
-	gap: 0.12rem;
 }
 
+/* Separators match the strategy's: "model · 高 · ⚡ · 滑窗压缩". */
+.run-config-chip-status::before,
+.run-config-chip-status > span + span::before {
+	content: "·";
+	margin: 0 0.28rem;
+	color: var(--ob-text-muted);
+}
+.run-config-chip-status::before { margin-left: 0; }
+
 .run-config-chip-status .model-feature-icon {
-	width: 0.78rem;
-	height: 0.78rem;
+	width: 1.15em;
+	height: 1.15em;
 }
 
 .run-config-chip-model {
@@ -2340,11 +2332,9 @@ button.status-chip:hover, .status-chip-active {
 		padding-inline: .375rem;
 	}
 	.run-config-chip-model { font-weight: 500; }
-	/* Bottom-anchor the model entry: its status row shares the send button's baseline. */
-	.composer-status { align-items: flex-end; }
-	.composer-toolbar button.run-config-chip { height: auto; min-height: 44px; padding-block: 6px 0; align-items: flex-end; }
-	.composer-toolbar button.run-config-chip .chip-caret { margin-bottom: 1px; }
-	.run-config-chip-status { display: inline-flex; margin-top: 3px; }
+	.run-config-chip-status { display: inline-flex; font-size: 10px; }
+	/* Icons sit at the input box's inner edge, mirroring the send button's inset. */
+	.composer-actions .tool-btn { place-items: center start; }
 	.composer-clear:disabled { display: none; }
 	.composer-toolbar button.run-config-chip:focus-visible { outline: 2px solid var(--bear-accent); outline-offset: -2px; }
 	.run-config-chip-meta { display: none; }

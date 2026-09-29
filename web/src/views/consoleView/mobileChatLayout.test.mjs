@@ -90,10 +90,9 @@ test('editor has primary vertical space and model is an unboxed secondary text e
     assert.equal(css(f,'.run-config-chip-model',env)['font-weight'],'500');
     assert.equal(css(f,'.run-config-chip-meta',env).display,'none','phone model entry must not repeat thinking/context metadata');
     assert.equal(css(f,'.composer-status .run-config-chip-strategy',env).display,'inline');
-    assert.equal(css(f,'.run-config-chip-status',env).display,'inline-flex','phone shows active thinking/Fast below the model');
-    assert.equal(css(f,link,env)['min-height'],'44px');
-    assert.equal(css(f,'.composer-status',env)['align-items'],'flex-end','model status shares the send button bottom edge');
-    assert.equal(css(f,link,env)['align-items'],'flex-end');
+    assert.equal(css(f,'.run-config-chip-status',env).display,'inline-flex','phone shows active thinking/Fast beside the model');
+    assert.equal(css(f,'.run-config-chip-status',env)['font-size'],'10px','status matches the compression label size');
+    assert.equal(css(f,'.composer-actions .tool-btn',env)['place-items'],'center start','tool icons sit at the same inset as send');
     assert.equal(css(f,':deep(.reference-editor-content)',env)['min-height'],'min(3rem, calc(var(--mobile-viewport-height, 100dvh) * .22))');
     assert.equal(css(f,':deep(.reference-editor-content)',env)['font-size'],undefined);
     assert.equal(css(f,'.composer-clear:disabled',env).display,'none');
