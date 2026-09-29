@@ -48,7 +48,7 @@ function harness(overrides = {}, tab = "main") {
   vm.runInContext(script, context);
   vm.runInContext(`runConfigTab.value = ${JSON.stringify(tab)}`, context);
   const bindings = proxyRefs(vm.runInContext(`({props, emit, runConfigTab, isAgentTab, contextDetailText, contextMeterStyle,
-    runConfigModelText, runConfigMetaText, runConfigStrategyText, menuSelectedModel, menuThinkingLevels, menuSupportsThinking, menuThinkingLevel, menuDefaultThinking,
+    runConfigModelText, runConfigMetaText, runConfigStrategyText, runConfigThinkingBadge, runConfigStatusLabel, menuSelectedModel, menuThinkingLevels, menuSupportsThinking, menuThinkingLevel, menuDefaultThinking,
     agentFastTriState, fmtTokens, modelLabel, modelTags, modelFeatures, rolloverTriggerForModel, compactThinkingLabel, selectMenuModel, selectMenuThinking,
     activeModelDetail, modelDetailId, showModelFeature, clearModelDetail, runConfigPopoverVisible})`, context));
   let trees = [];
@@ -56,6 +56,7 @@ function harness(overrides = {}, tab = "main") {
   return {bindings, calls, tooltips, async renderChip() {
     const app = createSSRApp({render() { return renderChip.call(this, bindings, []); }});
     app.component('ArrowDown', {render: () => h('svg', {'data-icon': 'ArrowDown'})});
+    app.component('ModelFeatureIcon', {props: ['name'], render() { return h('span', {'data-icon': this.name}); }});
     return renderToString(app);
   }, async render() {
     trees = []; tooltips.length = 0;
@@ -195,6 +196,9 @@ test('collapsed model button exposes the shared compression mode without losing 
   assert.doesNotMatch(html, /data-icon="SlidingWindowIcon"|run-config-chip-strategy-icon/);
   assert.match(html, /aria-description="上下文压缩：滑动窗口"/);
   assert.match(html, /class="run-config-chip-meta">[^<]*xhigh · Fast · 216K \/ 300K</);
+  assert.match(html, /class="run-config-chip-status" aria-label="思考强度：极高，Fast 模式已开启"/);
+  assert.match(html, /class="run-config-status-thinking"><span data-icon="brain"><\/span>极高</);
+  assert.match(html, /class="run-config-status-fast"><span data-icon="zap"><\/span>Fast</);
   h.bindings.props.contextStrategy = 'model_summary';
   html = await h.renderChip();
   assert.match(html, /class="run-config-chip-strategy" aria-label="上下文压缩：模型摘要">摘要压缩</);
@@ -207,6 +211,21 @@ test('collapsed model button exposes the shared compression mode without losing 
   assert.deepEqual(h.calls, [], 'rendering the selected strategy never changes configuration');
 });
 
+test('collapsed status row follows effective thinking and Fast, omitting off states', async () => {
+  const h = harness({modelMenuOpen: false, currentFast: false, effectiveThinking: 'low'});
+  let html = await h.renderChip();
+  assert.match(html, /aria-label="思考强度：低"/);
+  assert.match(html, /class="run-config-status-thinking"><span data-icon="brain"><\/span>低</);
+  assert.doesNotMatch(html, /run-config-status-fast/);
+  h.bindings.props.effectiveThinking = 'off'; h.bindings.props.currentFast = true;
+  html = await h.renderChip();
+  assert.match(html, /aria-label="Fast 模式已开启"/);
+  assert.doesNotMatch(html, /run-config-status-thinking/);
+  h.bindings.props.currentFast = false;
+  assert.doesNotMatch(await h.renderChip(), /run-config-chip-status/);
+  assert.deepEqual(h.calls, [], 'status display never changes configuration');
+});
+
 test('collapsed button keeps quiet model typography and explicit compression metadata without a badge', async () => {
   const h = harness({currentModelInfo: null, supportsThinking: false, contextDisplay: '—'});
   const html = await h.renderChip();
@@ -214,9 +233,11 @@ test('collapsed button keeps quiet model typography and explicit compression met
   assert.match(html, /class="run-config-chip-strategy" aria-label="上下文压缩：滑动窗口">滑窗压缩</);
   assert.doesNotMatch(html, /data-icon="SlidingWindowIcon"|run-config-chip-strategy-icon/);
   assert.doesNotMatch(html, /class="run-config-chip-meta"/);
+  assert.doesNotMatch(html, /class="run-config-chip-status"/, 'no empty status row without thinking or Fast');
   assert.match(source, /\.run-config-chip-main\s*\{[^}]*display: inline-flex/);
   assert.doesNotMatch(source, /\.run-config-chip-main\s*\{[^}]*flex-direction: column/);
-  assert.doesNotMatch(source, /class="run-config-chip-title"|run-config-chip-strategy-icon|SlidingWindowIcon/);
+  assert.match(source, /\.run-config-chip-title\s*\{[^}]*flex-direction: column/);
+  assert.doesNotMatch(source, /run-config-chip-strategy-icon|SlidingWindowIcon/);
   const strategyCss = source.match(/\.run-config-chip-strategy\s*\{([^}]*)\}/)[1];
   assert.match(strategyCss, /flex: 0 0 auto/);
   assert.doesNotMatch(strategyCss, /background:|border:|padding:|font-size:/);
@@ -224,7 +245,7 @@ test('collapsed button keeps quiet model typography and explicit compression met
   assert.match(source, /\.run-config-chip-meta\s*\{[^}]*display: none/); // Phone toolbar shows only the model; details remain in settings.
   const css = source.slice(source.indexOf('.run-config-chip {'), source.indexOf('.chip-caret {'));
   const sizes = [...css.matchAll(/font-size:\s*([\d.]+)px/g)].map(match => Number(match[1]));
-  assert.deepEqual(sizes, [11.2]); // The chip retains its restored size independently of the popup's 13/12px scale.
+  assert.deepEqual(sizes, [11.2, 9.5]); // The chip retains its restored size independently of the popup's 13/12px scale.
   assert.match(css, /height: 1\.78rem/);
   assert.match(css, /gap: 0\.34rem/);
   assert.match(css, /padding: 0 0\.34rem 0 0\.48rem/);
