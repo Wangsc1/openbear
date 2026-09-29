@@ -1818,7 +1818,8 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 }
 
 .tool-btn:hover, .tool-btn-active {
-	background: var(--ob-hover);
+	/* Keep the generous tap target while drawing a smaller visual circle. */
+	background: radial-gradient(circle at center, var(--ob-hover) 0 16px, transparent 16.5px);
 	color: var(--ob-text-strong);
 }
 
