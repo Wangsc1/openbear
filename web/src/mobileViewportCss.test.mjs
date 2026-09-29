@@ -49,13 +49,17 @@ test('phone safe top is reserved once by main/bar, bottom by shell, and fixed fl
   assert.equal(shell.position, 'fixed'); assert.equal(shell.height, 'var(--mobile-viewport-height, 100dvh)');
   assert.equal(shell.transform, 'translateY(var(--mobile-viewport-top, 0px))'); assert.equal(shell['padding-top'], undefined);
   assert.equal(shell['padding-bottom'], 'env(safe-area-inset-bottom, 0px)');
-  assert.match(fs.readFileSync(new URL('./style.css', import.meta.url), 'utf8'), /html\[data-openbear-mobile-viewport\] \.app-shell\.is-console \{\s*background: var\(--ob-chat-bg\);/, 'chat safe area uses the chat background');
+  const chatShell = declarations('./style.css', 'html[data-openbear-mobile-viewport] .app-shell.is-console', phone);
+  assert.equal(chatShell.background, 'var(--ob-chat-bg)');
+  assert.equal(chatShell['padding-bottom'], undefined, 'chat retains the shell safe-area padding');
+  assert.deepEqual(declarations('./style.css', 'html[data-openbear-mobile-viewport] .app-shell.is-console', desktop), {});
   const main = declarations('./App.vue', '.app-main', phone), bar = declarations('./App.vue', '.mobile-app-bar', phone);
   assert.equal(main['padding-top'], 'calc(48px + env(safe-area-inset-top, 0px))'); assert.equal(bar.height, main['padding-top']);
   assert.equal(declarations('./style.css', 'html[data-openbear-mobile-viewport] body', phone).overflow, 'hidden');
   const landscapeTouch = { ...phone, width: 844, height: 390 };
   assert.equal(declarations('./App.vue', '.mobile-app-bar', landscapeTouch).display, 'none');
   assert.equal(declarations('./style.css', 'html[data-openbear-mobile-viewport] .app-shell', landscapeTouch)['padding-top'], 'env(safe-area-inset-top, 0px)');
+  assert.equal(declarations('./style.css', 'html[data-openbear-mobile-viewport] .app-shell.is-console', landscapeTouch).background, 'var(--ob-chat-bg)');
 });
 
 test('mobile recents keep title and status on one 44px row and reserve more height for the tree without changing desktop', () => {

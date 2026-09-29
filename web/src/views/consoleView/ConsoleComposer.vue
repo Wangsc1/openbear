@@ -187,6 +187,12 @@ const menuDefaultThinking = computed(() => compactThinkingLabel(isAgentTab.value
 const menuSelectedModel = computed(() => isAgentTab.value ? props.agentModel : props.currentModel);
 const contextDetailText = computed(() => `已用 ${props.contextUsedDisplay} · 压缩阈值 ${props.contextThresholdDisplay} · 模型窗口 ${props.contextWindowDisplay}`);
 
+const runConfigThinkingBadge = computed(() => props.supportsThinking && props.effectiveThinking && props.effectiveThinking !== 'off'
+	? compactThinkingLabel(props.effectiveThinking) : '');
+const runConfigStatusLabel = computed(() => [
+	runConfigThinkingBadge.value && `思考强度：${runConfigThinkingBadge.value}`,
+	props.currentFast && 'Fast 模式已开启',
+].filter(Boolean).join('，'));
 function compactThinkingLabel(level) {
 	return {off: '关闭', minimal: '极简', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高'}[level] || level || '默认';
 }
@@ -907,10 +913,14 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 						            :show-arrow="false"
 						            :hide-after="0">
 							<template #reference>
-								<button type="button" class="status-chip run-config-chip" aria-label="运行配置" :aria-description="`上下文压缩：${runConfigStrategyText}`"
+								<button type="button" class="status-chip run-config-chip" aria-label="运行配置" :aria-description="[`上下文压缩：${runConfigStrategyText}`, runConfigStatusLabel].filter(Boolean).join('，')"
 								        :class="props.modelMenuOpen ? 'status-chip-active' : ''">
 									<span class="run-config-chip-main">
 										<span class="run-config-chip-model">{{ runConfigModelText }}</span>
+										<span v-if="runConfigStatusLabel" class="run-config-chip-status" aria-hidden="true">
+											<span v-if="runConfigThinkingBadge" class="run-config-status-thinking">{{ runConfigThinkingBadge }}</span>
+											<span v-if="props.currentFast" class="run-config-status-fast"><ModelFeatureIcon name="zap"/></span>
+										</span>
 										<span v-if="runConfigMetaText" class="run-config-chip-meta">{{ runConfigMetaText }}</span>
 									</span>
 									<span class="run-config-chip-strategy" :aria-label="`上下文压缩：${runConfigStrategyText}`">{{ props.contextStrategy === 'model_summary' ? '摘要压缩' : '滑窗压缩' }}</span>
@@ -1890,7 +1900,36 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 	overflow: hidden;
 }
 
+.run-config-chip-status {
+	display: none;
+	flex: 0 0 auto;
+	align-items: center;
+	color: var(--ob-text-muted);
+	font-weight: 520;
+	white-space: nowrap;
+}
+
+.run-config-chip-status > span {
+	display: inline-flex;
+	align-items: center;
+}
+
+/* Separators match the strategy's: "model · 高 · ⚡ · 滑窗压缩". */
+.run-config-chip-status::before,
+.run-config-chip-status > span + span::before {
+	content: "·";
+	margin: 0 0.28rem;
+	color: var(--ob-text-muted);
+}
+.run-config-chip-status::before { margin-left: 0; }
+
+.run-config-chip-status .model-feature-icon {
+	width: 1.15em;
+	height: 1.15em;
+}
+
 .run-config-chip-model {
+	max-width: 100%;
 	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -2323,6 +2362,7 @@ button.status-chip:hover, .status-chip-active {
 		padding-inline: .375rem;
 	}
 	.run-config-chip-model { font-weight: 500; }
+	.run-config-chip-status { display: inline-flex; font-size: 10px; }
 	.composer-clear:disabled { display: none; }
 	.composer-toolbar button.run-config-chip:focus-visible { outline: 2px solid var(--bear-accent); outline-offset: -2px; }
 	.run-config-chip-meta { display: none; }

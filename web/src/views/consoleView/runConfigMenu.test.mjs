@@ -48,7 +48,7 @@ function harness(overrides = {}, tab = "main") {
   vm.runInContext(script, context);
   vm.runInContext(`runConfigTab.value = ${JSON.stringify(tab)}`, context);
   const bindings = proxyRefs(vm.runInContext(`({props, emit, runConfigTab, isAgentTab, contextDetailText, contextMeterStyle,
-    runConfigModelText, runConfigMetaText, runConfigStrategyText, menuSelectedModel, menuThinkingLevels, menuSupportsThinking, menuThinkingLevel, menuDefaultThinking,
+    runConfigModelText, runConfigMetaText, runConfigStrategyText, runConfigThinkingBadge, runConfigStatusLabel, menuSelectedModel, menuThinkingLevels, menuSupportsThinking, menuThinkingLevel, menuDefaultThinking,
     agentFastTriState, fmtTokens, modelLabel, modelTags, modelFeatures, rolloverTriggerForModel, compactThinkingLabel, selectMenuModel, selectMenuThinking,
     activeModelDetail, modelDetailId, showModelFeature, clearModelDetail, runConfigPopoverVisible})`, context));
   let trees = [];
@@ -56,6 +56,7 @@ function harness(overrides = {}, tab = "main") {
   return {bindings, calls, tooltips, async renderChip() {
     const app = createSSRApp({render() { return renderChip.call(this, bindings, []); }});
     app.component('ArrowDown', {render: () => h('svg', {'data-icon': 'ArrowDown'})});
+    app.component('ModelFeatureIcon', {props: ['name'], render() { return h('span', {'data-icon': this.name}); }});
     return renderToString(app);
   }, async render() {
     trees = []; tooltips.length = 0;
@@ -193,10 +194,21 @@ test('collapsed model button exposes the shared compression mode without losing 
   assert.match(html, /class="run-config-chip-model">GPT-6 Astra</);
   assert.match(html, /class="run-config-chip-strategy" aria-label="上下文压缩：滑动窗口">滑窗压缩</);
   assert.doesNotMatch(html, /data-icon="SlidingWindowIcon"|run-config-chip-strategy-icon/);
-  assert.match(html, /aria-description="上下文压缩：滑动窗口"/);
+  const button = html.match(/^<button[^>]*>/)[0];
+  assert.match(button, /aria-label="运行配置"/);
+  assert.match(button, /aria-description="上下文压缩：滑动窗口，思考强度：极高，Fast 模式已开启"/);
   assert.match(html, /class="run-config-chip-meta">[^<]*xhigh · Fast · 216K \/ 300K</);
+  assert.match(html, /class="run-config-chip-status" aria-hidden="true"/);
+  assert.doesNotMatch(html, /run-config-chip-status" role="img"/);
+  assert.match(html, /class="run-config-status-thinking">极高</, 'thinking shows only the level, without an icon');
+  assert.match(html, /class="run-config-status-fast"><span data-icon="zap"><\/span><\/span>/, 'Fast is an icon only');
+  assert.doesNotMatch(html, /data-icon="brain"/);
+  const inline = html.indexOf('run-config-chip-model') < html.indexOf('run-config-chip-status')
+    && html.indexOf('run-config-chip-status') < html.indexOf('run-config-chip-strategy');
+  assert.ok(inline, 'model, then thinking · Fast, then compression, on one line');
   h.bindings.props.contextStrategy = 'model_summary';
   html = await h.renderChip();
+  assert.match(html.match(/^<button[^>]*>/)[0], /aria-description="上下文压缩：模型摘要，思考强度：极高，Fast 模式已开启"/);
   assert.match(html, /class="run-config-chip-strategy" aria-label="上下文压缩：模型摘要">摘要压缩</);
   assert.doesNotMatch(html, /data-icon="ContextCompactionIcon"|>滑窗压缩</);
   assert.doesNotMatch(html, /滑动窗口/);
@@ -207,6 +219,41 @@ test('collapsed model button exposes the shared compression mode without losing 
   assert.deepEqual(h.calls, [], 'rendering the selected strategy never changes configuration');
 });
 
+test('collapsed status row follows effective thinking and Fast, omitting off states', async () => {
+  const h = harness({modelMenuOpen: false, currentFast: false, effectiveThinking: 'low'});
+  let html = await h.renderChip();
+  assert.match(html.match(/^<button[^>]*>/)[0], /aria-description="上下文压缩：滑动窗口，思考强度：低"/);
+  assert.match(html, /class="run-config-status-thinking">低</);
+  assert.doesNotMatch(html, /run-config-status-fast/);
+  h.bindings.props.effectiveThinking = 'off'; h.bindings.props.currentFast = true;
+  html = await h.renderChip();
+  assert.match(html.match(/^<button[^>]*>/)[0], /aria-description="上下文压缩：滑动窗口，Fast 模式已开启"/);
+  assert.doesNotMatch(html, /run-config-status-thinking/);
+  h.bindings.props.currentFast = false;
+  html = await h.renderChip();
+  assert.doesNotMatch(html, /run-config-chip-status/);
+  assert.match(html.match(/^<button[^>]*>/)[0], /aria-description="上下文压缩：滑动窗口"/);
+  assert.deepEqual(h.calls, [], 'status display never changes configuration');
+});
+
+test('collapsed status maps every supported level and describes only effective main settings, not the Agent tab', async () => {
+  for (const [level, label] of Object.entries({minimal: '极简', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高'})) {
+    const h = harness({effectiveThinking: level, currentFast: false, agentEffectiveThinking: 'max', agentEffectiveFast: true}, 'agent');
+    const html = await h.renderChip();
+    assert.equal(h.bindings.runConfigThinkingBadge, label);
+    assert.ok(html.match(/^<button[^>]*>/)[0].includes(`aria-description="上下文压缩：滑动窗口，思考强度：${label}"`));
+    assert.match(html, /run-config-chip-status" aria-hidden="true"/);
+    assert.doesNotMatch(html, /run-config-status-fast/);
+    assert.deepEqual(h.calls, []);
+  }
+  for (const effectiveThinking of ['high', 'off', '']) {
+    const h = harness({supportsThinking: false, effectiveThinking, currentFast: false});
+    const html = await h.renderChip();
+    assert.doesNotMatch(html, /run-config-chip-status/);
+    assert.match(html.match(/^<button[^>]*>/)[0], /aria-description="上下文压缩：滑动窗口"/);
+  }
+});
+
 test('collapsed button keeps quiet model typography and explicit compression metadata without a badge', async () => {
   const h = harness({currentModelInfo: null, supportsThinking: false, contextDisplay: '—'});
   const html = await h.renderChip();
@@ -214,9 +261,12 @@ test('collapsed button keeps quiet model typography and explicit compression met
   assert.match(html, /class="run-config-chip-strategy" aria-label="上下文压缩：滑动窗口">滑窗压缩</);
   assert.doesNotMatch(html, /data-icon="SlidingWindowIcon"|run-config-chip-strategy-icon/);
   assert.doesNotMatch(html, /class="run-config-chip-meta"/);
+  assert.doesNotMatch(html, /class="run-config-chip-status"/, 'no empty status row without thinking or Fast');
   assert.match(source, /\.run-config-chip-main\s*\{[^}]*display: inline-flex/);
   assert.doesNotMatch(source, /\.run-config-chip-main\s*\{[^}]*flex-direction: column/);
-  assert.doesNotMatch(source, /class="run-config-chip-title"|run-config-chip-strategy-icon|SlidingWindowIcon/);
+  assert.doesNotMatch(source, /run-config-chip-title/, 'status is inline beside the model, not a second row');
+  assert.match(source, /\.run-config-chip-status::before,\s*\.run-config-chip-status > span \+ span::before\s*\{\s*content: "·"/);
+  assert.doesNotMatch(source, /run-config-chip-strategy-icon|SlidingWindowIcon/);
   const strategyCss = source.match(/\.run-config-chip-strategy\s*\{([^}]*)\}/)[1];
   assert.match(strategyCss, /flex: 0 0 auto/);
   assert.doesNotMatch(strategyCss, /background:|border:|padding:|font-size:/);
