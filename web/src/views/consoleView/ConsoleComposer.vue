@@ -1899,7 +1899,7 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 	max-width: 100%;
 	min-width: 0;
 	align-items: center;
-	gap: 0.34rem;
+	gap: 0.75rem;
 	overflow: hidden;
 	color: var(--ob-text-muted);
 	font-size: 9.5px;
