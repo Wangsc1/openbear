@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "node --test",
+    "postinstall": "node scripts/patch-sortable-scroll.mjs",
     "test:timeline": "node --test src/timelineProjection.test.mjs"
   },
   "dependencies": {

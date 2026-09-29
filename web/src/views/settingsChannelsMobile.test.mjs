@@ -295,7 +295,7 @@ test('mobile model list scrolls normally and short viewports scroll the stack wi
     for (const c of chain.slice(1, -1)) {
       const style = css(channels, `.${c}`, width);
       assert.equal(style['min-height'], c === 'channel-models-panel' ? '240px' : '0', c);
-      assert.equal(style.flex, c === 'channel-models-panel' ? '1 0 auto' : '1 1 0%', c);
+      assert.equal(style.flex, c === 'channel-models-panel' ? '1 0 240px' : '1 1 0%', c);
       assert.equal(style.overflow, 'hidden', c);
       if (c === 'channel-detail-stack') assert.equal(style['overflow-y'], 'auto');
     }
@@ -488,13 +488,13 @@ test('real Sortable touch/pointer startup ignores ordinary card content; only co
   assert.equal(prepared, 0);
 });
 
-// Load the unmodified installed Sortable library in an isolated DOM/timer realm.
+// Load the installed Sortable library in an isolated DOM/timer realm.
 // Rectangles are deterministic inputs, not browser layout or iOS keyboard claims.
-function sortableScrollRealm({listTop = 398, listBottom = 540, listScrollHeight = 3000} = {}) {
+function sortableScrollRealm({listTop = 398, listBottom = 540, listScrollHeight = 3000, desktop = false} = {}) {
   const intervals = new Map(), timeouts = new Map(); let nextTimer = 0;
   function element(name, top, bottom, scrollHeight = bottom - top) {
     return {
-      nodeType: 1, nodeName: name, tagName: name, parentNode: null, style: {}, children: [],
+      nodeType: 1, nodeName: name, tagName: name, parentNode: null, style: {}, children: [], draggable: true,
       scrollTop: 0, scrollLeft: 0, scrollHeight, scrollWidth: 320, clientHeight: bottom - top, clientWidth: 320,
       currentStyle: {overflowY: 'auto', overflowX: 'hidden', position: 'static', transform: 'none'},
       getBoundingClientRect: () => ({top, bottom, left: 0, right: 320, width: 320, height: bottom - top}),
@@ -504,17 +504,20 @@ function sortableScrollRealm({listTop = 398, listBottom = 540, listScrollHeight 
   const page = element('HTML', 0, 874, 2000), settingsContent = element('DIV', 80, 874, 1900);
   const stack = element('DIV', 100, 430, 900), list = element('DIV', listTop, listBottom, listScrollHeight);
   const row = element('ARTICLE', listTop, listTop + 44);
+  const providers = element('DIV', 144, 700, 1800);
+  let hit = row;
   const document = {
     documentElement: page, scrollingElement: page,
-    addEventListener() {}, removeEventListener() {}, elementFromPoint: () => row,
+    addEventListener() {}, removeEventListener() {}, elementFromPoint: () => hit,
     createElement: name => element(name.toUpperCase(), 0, 0),
   };
-  const navigator = {userAgent: 'Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 Safari/604.1'};
+  const navigator = {userAgent: desktop ? 'Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15 Safari/605.1.15' : 'Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 Safari/604.1'};
   const window = {document, navigator, innerHeight: 874, innerWidth: 320, devicePixelRatio: 1,
     addEventListener() {}, removeEventListener() {}, getComputedStyle: el => el.currentStyle};
   document.defaultView = window;
   document.body = element('BODY', 0, 874); document.body.parentNode = page;
   settingsContent.parentNode = document.body; stack.parentNode = settingsContent; list.parentNode = stack; row.parentNode = list;
+  providers.parentNode = document.body;
   const module = {exports: {}};
   const context = vm.createContext({window, document, navigator, module, exports: module.exports,
     setInterval(callback, delay) { const id = ++nextTimer; intervals.set(id, {callback, delay}); return id; },
@@ -525,7 +528,9 @@ function sortableScrollRealm({listTop = 398, listBottom = 540, listScrollHeight 
   const require = createRequire(import.meta.url);
   const library = createRequire(require.resolve('vuedraggable')).resolve('sortablejs');
   vm.runInContext(fs.readFileSync(library, 'utf8'), context, {filename: library});
-  return {Sortable: module.exports, list, row, stack, settingsContent, page,
+  return {Sortable: module.exports, list, row, stack, settingsContent, page, providers,
+    setHit(element) { hit = element; },
+    tickThrottle() { for (const [id, timer] of [...timeouts]) if (timer.delay === 30) { timeouts.delete(id); timer.callback(); } },
     tickScroll() { for (const timer of [...intervals.values()]) if (timer.delay === 24) timer.callback(); },
     assertClean() { assert.equal(intervals.size, 0); assert.equal(timeouts.size, 0); },
   };
@@ -577,6 +582,48 @@ test('real Sortable autoScroll reaches the short-screen stack, retains list scro
     } finally {
       sortable.scroll.drop(); sortable.scroll.nulling();
       realm.assertClean();
+    }
+  }
+});
+
+test('continuous native/fallback drag events retain the scroll guard across edge and direction changes', async () => {
+  for (const fallback of [false, true]) for (const forbidden of [false, true]) {
+    const realm = sortableScrollRealm({desktop: true, listTop: 200, listBottom: 430});
+    const r = channelRuntime(2), calls = [];
+    r.ctx.target = {$el: realm.list}; r.ctx.stack = realm.stack;
+    r.run('modelScrollList.value=markRaw(target);channelDetailStack.value=markRaw(stack)');
+    const view = await render(channels, r);
+    const props = view.nodes.find(n => n.type === draggable && classHas(n, 'model-list-scroll')).props;
+    const sortable = new realm.Sortable(realm.list, {
+      scroll: props.scroll, bubbleScroll: props['bubble-scroll'], forceAutoScrollFallback: props['force-auto-scroll-fallback'],
+      scrollSensitivity: props['scroll-sensitivity'], scrollSpeed: props['scroll-speed'], forceFallback: fallback,
+      scrollFn(...args) { calls.push(args[4]); return props['scroll-fn'](...args); },
+    });
+    sortable._onTouchMove = () => {};
+    realm.Sortable.active = sortable; realm.Sortable.dragged = realm.row;
+    assert.equal(sortable.nativeDraggable, !fallback);
+    if (forbidden) realm.setHit(realm.providers);
+    const move = y => {
+      realm.tickThrottle();
+      const point = {clientX: forbidden ? 4 : 160, clientY: y};
+      sortable.scroll._handleAutoScroll(fallback ? {type: 'touchmove', touches: [point]} : {type: 'dragover', ...point}, fallback);
+      realm.tickScroll();
+    };
+    try {
+      move(forbidden ? 400 : 300); // no edge velocity, but fixes the same hit root
+      move(forbidden ? 686 : 418); // new timer must still ask the guard
+      if (forbidden) {
+        assert.ok(calls.includes(realm.providers));
+        assert.equal(realm.providers.scrollTop, 0, 'sibling channel list remains still');
+        assert.equal(realm.list.scrollTop, 0); assert.equal(realm.stack.scrollTop, 0);
+      } else {
+        assert.equal(realm.list.scrollTop, 18); assert.equal(realm.stack.scrollTop, 18);
+        move(214); // reverse direction without changing the hit root
+        assert.equal(realm.list.scrollTop, 0, 'allowed list still scrolls upward');
+      }
+      assert.equal(realm.settingsContent.scrollTop, 0); assert.equal(realm.page.scrollTop, 0);
+    } finally {
+      sortable.scroll.drop(); sortable.scroll.nulling(); realm.assertClean();
     }
   }
 });

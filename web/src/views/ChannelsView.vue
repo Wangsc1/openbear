@@ -2512,10 +2512,11 @@ button:disabled { cursor: not-allowed; opacity: .48; }
     overflow: hidden;
   }
   .channels-workspace { padding: 0 12px 8px; }
-  /* The keyboard reduces the visual viewport, not the intrinsic height of
-     the channel identity card. Let this stack scroll on short screens. */
+  /* Keep the full channel card and a usable minimum model panel. A fixed
+     flex basis (not auto/content height) leaves long lists scrolling inside
+     the panel; only insufficient viewport space overflows the outer stack. */
   .channel-detail-stack { height: 100%; gap: 8px; overflow-y: auto; overscroll-behavior: contain; }
-  .channel-models-panel { flex: 1 0 auto; min-height: 240px; }
+  .channel-models-panel { flex: 1 0 240px; min-height: 240px; }
   .channels-heading { display: none; }
   .channel-models-header { flex: none; }
   .channels-overview { flex: none; max-height: 120px; overflow-y: auto; }
