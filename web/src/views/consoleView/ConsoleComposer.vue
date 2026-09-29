@@ -865,7 +865,7 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 				<div class="composer-toolbar">
 					<div class="composer-actions relative flex min-w-0 flex-1 items-center gap-1.5">
 						<el-tooltip content="新话题（Ctrl+N）" placement="top" :show-after="260">
-							<button type="button" class="tool-btn" aria-label="新话题（Ctrl+N）" @click="emit('new-session')">
+							<button type="button" class="tool-btn composer-new-session" aria-label="新话题（Ctrl+N）" @click="emit('new-session')">
 								<Plus/>
 							</button>
 						</el-tooltip>
@@ -2337,6 +2337,7 @@ button.status-chip:hover, .status-chip-active {
 	/* Move each complete control—not only its glyph—toward the input edge. This
 	   keeps the circular hover/press feedback and tooltip anchored to the icon. */
 	.composer-actions .tool-btn { transform: translateX(-14px); }
+	.composer-actions .composer-new-session { transform: translateX(-12px); }
 	.composer-clear:disabled { display: none; }
 	.composer-toolbar button.run-config-chip:focus-visible { outline: 2px solid var(--bear-accent); outline-offset: -2px; }
 	.run-config-chip-meta { display: none; }

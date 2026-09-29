@@ -93,6 +93,7 @@ test('editor has primary vertical space and model is an unboxed secondary text e
     assert.equal(css(f,'.run-config-chip-status',env).display,'inline-flex','phone shows active thinking/Fast beside the model');
     assert.equal(css(f,'.run-config-chip-status',env)['font-size'],'10px','status matches the compression label size');
     assert.equal(css(f,'.composer-actions .tool-btn',env).transform,'translateX(-14px)','the entire tool control moves with its icon and circular feedback');
+    assert.equal(css(f,'.composer-actions .composer-new-session',env).transform,'translateX(-12px)','the plus control sits 2px farther right than the attachment control');
     assert.equal(css(f,'.tool-btn:hover',env).background,'radial-gradient(circle at center, var(--ob-hover) 0 16px, transparent 16.5px)','the visual circle is 32px while the tap target stays 44px');
     assert.equal(css(f,':deep(.reference-editor-content)',env)['min-height'],'min(3rem, calc(var(--mobile-viewport-height, 100dvh) * .22))');
     assert.equal(css(f,':deep(.reference-editor-content)',env)['font-size'],undefined);
