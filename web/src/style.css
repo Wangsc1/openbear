@@ -22,14 +22,17 @@ html, body { transition: none !important; }
   position: fixed;
   left: 0;
   right: 0;
-  /* OpenBear has full-viewport opaque login/app shells, unlike the calculator.
-     Keep the 4px in-viewport sampler above them so Safari can actually see it. */
+  /* Keep edge samplers above opaque app surfaces without intercepting input.
+     Native Safari tint behavior must still be verified on the device. */
   z-index: 4000;
   height: 12px;
   background: var(--ob-bg);
   pointer-events: none;
 }
-.safari-tint-top { top: -8px; }
+.safari-tint-top {
+  top: 0;
+  height: max(12px, env(safe-area-inset-top, 0px));
+}
 .safari-tint-bottom { bottom: -8px; }
 
 /* macOS 风格滚动条 */
