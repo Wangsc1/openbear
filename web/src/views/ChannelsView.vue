@@ -54,6 +54,26 @@ function modelSectionId(row, section) {
   return `channel-model-${section}-${encodeURIComponent(row.fullname || `${selectedName.value}/${row.id}`)}`;
 }
 const modelSearchQuery = ref("");
+const modelSearchInput = ref(null);
+const channelDetailStack = ref(null);
+let searchViewportFrame = 0;
+function keepModelSearchVisible() {
+  if (searchViewportFrame) return;
+  searchViewportFrame = window.requestAnimationFrame(() => {
+    searchViewportFrame = 0;
+    const input = modelSearchInput.value, stack = channelDetailStack.value;
+    if (!input || !stack || document.activeElement !== input ||
+        !window.matchMedia('(max-width: 760px)').matches) return;
+    const viewport = window.visualViewport;
+    if (viewport && Math.abs(viewport.scale - 1) > .01) return;
+    const bounds = stack.getBoundingClientRect(), rect = input.getBoundingClientRect();
+    const top = Math.max(bounds.top, viewport?.offsetTop || 0) + 8;
+    const bottom = Math.min(bounds.bottom, (viewport?.offsetTop || 0) + (viewport?.height || window.innerHeight)) - 8;
+    // Scroll this panel only; never reset the document scroll or move focus.
+    if (rect.bottom > bottom) stack.scrollTop += rect.bottom - bottom;
+    else if (rect.top < top) stack.scrollTop -= top - rect.top;
+  });
+}
 const modelScrollList = ref(null);
 let stopModelScroll = () => {};
 function startModelScroll() {
@@ -1201,8 +1221,17 @@ async function persistModelOrder() {
   try { okOrThrow(await Api.reorderChannelModels(selectedName.value, models.map((m) => m.id))); await loadList(selectedName.value); }
   catch (error) { ElMessage.error(apiError(error)); await loadList(selectedName.value); }
 }
-onMounted(() => { void loadModelsDevProviders(); void loadList(); });
+onMounted(() => {
+  void loadModelsDevProviders(); void loadList();
+  window.addEventListener('resize', keepModelSearchVisible);
+  window.visualViewport?.addEventListener('resize', keepModelSearchVisible);
+  window.visualViewport?.addEventListener('scroll', keepModelSearchVisible);
+});
 onBeforeUnmount(() => {
+  window.removeEventListener('resize', keepModelSearchVisible);
+  window.visualViewport?.removeEventListener('resize', keepModelSearchVisible);
+  window.visualViewport?.removeEventListener('scroll', keepModelSearchVisible);
+  if (searchViewportFrame) window.cancelAnimationFrame(searchViewportFrame);
   finishModelScroll();
   for (const key of channelTestPollers.keys()) clearChannelTestPoller(key);
 });
@@ -1343,7 +1372,7 @@ onBeforeUnmount(() => {
             <button class="mac-small-button mac-primary-button" @click="openCreateProvider">＋ 添加渠道</button>
           </div>
         </div>
-        <div v-else class="channel-detail-stack h-full min-h-0 flex flex-col gap-3 sm:gap-4">
+        <div v-else ref="channelDetailStack" class="channel-detail-stack h-full min-h-0 flex flex-col gap-3 sm:gap-4">
           <!-- 渠道基本信息卡片：URL与Key并排，4项统计严格等高 -->
           <div class="channel-overview-card mac-panel mac-shadow p-4 sm:p-5 shrink-0" :class="{ 'is-open': providerDetailsOpen }">
             <div class="channel-overview-layout flex flex-col sm:flex-row sm:items-start justify-between gap-4">
@@ -1416,7 +1445,9 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="channel-model-search relative min-w-[140px] sm:min-w-[190px]">
                   <input
+                    ref="modelSearchInput"
                     v-model="modelSearchQuery"
+                    @focus="keepModelSearchVisible"
                     class="mac-input h-7 text-xs pl-7 pr-6"
                     placeholder="搜索模型 ID / 名称…"
                     aria-label="搜索模型 ID / 名称"
@@ -2474,11 +2505,14 @@ button:disabled { cursor: not-allowed; opacity: .48; }
     overflow: hidden;
   }
   .channels-workspace { padding: 0 12px 8px; }
-  .channel-detail-stack { height: 100%; gap: 8px; }
+  /* The keyboard reduces the visual viewport, not the intrinsic height of
+     the channel identity card. Let this stack scroll on short screens. */
+  .channel-detail-stack { height: 100%; gap: 8px; overflow-y: auto; overscroll-behavior: contain; }
+  .channel-models-panel { flex: 1 0 auto; min-height: 240px; }
   .channels-heading { display: none; }
   .channel-models-header { flex: none; }
   .channels-overview { flex: none; max-height: 120px; overflow-y: auto; }
-  .channels-view .channel-overview-card { flex: none; max-height: 40%; overflow-y: auto; }
+  .channels-view .channel-overview-card { flex: none; max-height: none; overflow: visible; }
   .channels-mobile-header-actions { grid-column: 1 / -1; justify-self: end; }
   .model-list-scroll {
     flex: 1 1 0%; min-height: 0; min-width: 0; overflow-y: auto; scrollbar-width: none;

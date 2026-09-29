@@ -125,6 +125,7 @@ const fileInput = ref(null);
 const composerShell = ref(null);
 const composerTextarea = ref(null);
 const runConfigPopover = ref(null);
+const runConfigPopperOptions = ref({});
 let composerResizeObserver = null;
 let runConfigPositionFrame = 0;
 const interactionDrafts = ref({});
@@ -588,7 +589,22 @@ function scheduleRunConfigPosition() {
 	if (!props.modelMenuOpen || runConfigPositionFrame) return;
 	runConfigPositionFrame = window.requestAnimationFrame(() => {
 		runConfigPositionFrame = 0;
-		if (props.modelMenuOpen) runConfigPopover.value?.popperRef?.popperInstanceRef?.update?.();
+		if (!props.modelMenuOpen) return;
+		// A body-teleported popover must use the visual viewport, not follow its
+		// anchor offscreen while iOS pans/resizes the viewport for the keyboard.
+		const mobile = window.matchMedia?.('(max-width: 760px), (hover: none) and (pointer: coarse)')?.matches;
+		const strategy = mobile ? 'fixed' : 'absolute';
+		if (runConfigPopperOptions.value.strategy !== strategy) {
+			runConfigPopperOptions.value = mobile ? {
+				strategy,
+				modifiers: [
+					{name: 'preventOverflow', options: {altAxis: true, tether: false, padding: 12}},
+				],
+			} : {strategy};
+		}
+		nextTick(() => {
+			if (props.modelMenuOpen) runConfigPopover.value?.popperRef?.popperInstanceRef?.update?.();
+		});
 	});
 }
 
@@ -885,6 +901,7 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 						<el-popover ref="runConfigPopover" v-model:visible="runConfigPopoverVisible"
 						            popper-class="composer-menu-popper run-config-menu-popper"
 						            placement="top-end"
+						            :popper-options="runConfigPopperOptions"
 						            trigger="click"
 						            :width="'min(26rem, calc(100vw - 2rem))'"
 						            :show-arrow="false"
@@ -2212,6 +2229,19 @@ button.status-chip:hover, .status-chip-active {
 	.run-config-popover { overflow-y: auto; }
 	.run-config-model-section { flex: 0 0 auto; }
 	.run-config-model-list { flex: 0 0 auto; max-height: 180px; }
+}
+/* dvh and max-height media queries do not shrink with the iOS keyboard.
+   Bound the body-teleported menu by the visual viewport, and scroll its
+   contents rather than allowing its search field to escape above the screen. */
+@media (max-width: 760px), (hover: none) and (pointer: coarse) {
+	.run-config-popover {
+		max-height: min(600px, calc(var(--mobile-viewport-height, 100dvh) - 48px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)));
+		overflow-y: auto;
+		overscroll-behavior: contain;
+	}
+	.run-config-model-section { flex: 0 0 auto; }
+	.run-config-model-list { flex: 0 0 auto; max-height: min(320px, calc(var(--mobile-viewport-height, 100dvh) * .32)); }
+	.run-config-search { position: sticky; top: 0; z-index: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
 	.run-config-popover *, .run-config-popover *::before { transition: none; }

@@ -251,7 +251,7 @@ test('320–760px navigation is a 44px picker and quiet restart, never a horizon
   }
 });
 
-test('mobile model list scrolls within the remaining height while search and channel controls stay fixed', () => {
+test('mobile model list scrolls normally and short viewports scroll the stack without squeezing the channel card', () => {
   const chain = ['channels-view', 'channels-workspace', 'channel-detail', 'channel-detail-stack', 'channel-models-panel', 'model-list-scroll'];
   let parent = node(channels, chain[0]);
   assert.ok(hasClass(parent, 'h-full'));
@@ -267,9 +267,13 @@ test('mobile model list scrolls within the remaining height while search and cha
     assert.equal(root['touch-action'], 'pan-y pinch-zoom');
     for (const c of chain.slice(1, -1)) {
       const style = css(channels, `.${c}`, width);
-      assert.equal(style['min-height'], '0', c); assert.equal(style.flex, '1 1 0%', c);
+      assert.equal(style['min-height'], c === 'channel-models-panel' ? '240px' : '0', c);
+      assert.equal(style.flex, c === 'channel-models-panel' ? '1 0 auto' : '1 1 0%', c);
       assert.equal(style.overflow, 'hidden', c);
+      if (c === 'channel-detail-stack') assert.equal(style['overflow-y'], 'auto');
     }
+    assert.equal(css(channels, '.channels-view .channel-overview-card', width)['max-height'], 'none');
+    assert.equal(css(channels, '.channels-view .channel-overview-card', width).overflow, 'visible');
     assert.equal(css(channels, '.channel-models-header', width).flex, 'none');
     const list = css(channels, '.model-list-scroll', width);
     assert.equal(list['overflow-y'], 'auto');
