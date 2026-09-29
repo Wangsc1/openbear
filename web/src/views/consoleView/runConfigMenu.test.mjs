@@ -194,9 +194,12 @@ test('collapsed model button exposes the shared compression mode without losing 
   assert.match(html, /class="run-config-chip-model">GPT-6 Astra</);
   assert.match(html, /class="run-config-chip-strategy" aria-label="上下文压缩：滑动窗口">滑窗压缩</);
   assert.doesNotMatch(html, /data-icon="SlidingWindowIcon"|run-config-chip-strategy-icon/);
-  assert.match(html, /aria-description="上下文压缩：滑动窗口"/);
+  const button = html.match(/^<button[^>]*>/)[0];
+  assert.match(button, /aria-label="运行配置"/);
+  assert.match(button, /aria-description="上下文压缩：滑动窗口，思考强度：极高，Fast 模式已开启"/);
   assert.match(html, /class="run-config-chip-meta">[^<]*xhigh · Fast · 216K \/ 300K</);
-  assert.match(html, /class="run-config-chip-status" role="img" aria-label="思考强度：极高，Fast 模式已开启"/);
+  assert.match(html, /class="run-config-chip-status" aria-hidden="true"/);
+  assert.doesNotMatch(html, /run-config-chip-status" role="img"/);
   assert.match(html, /class="run-config-status-thinking">极高</, 'thinking shows only the level, without an icon');
   assert.match(html, /class="run-config-status-fast"><span data-icon="zap"><\/span><\/span>/, 'Fast is an icon only');
   assert.doesNotMatch(html, /data-icon="brain"/);
@@ -205,6 +208,7 @@ test('collapsed model button exposes the shared compression mode without losing 
   assert.ok(inline, 'model, then thinking · Fast, then compression, on one line');
   h.bindings.props.contextStrategy = 'model_summary';
   html = await h.renderChip();
+  assert.match(html.match(/^<button[^>]*>/)[0], /aria-description="上下文压缩：模型摘要，思考强度：极高，Fast 模式已开启"/);
   assert.match(html, /class="run-config-chip-strategy" aria-label="上下文压缩：模型摘要">摘要压缩</);
   assert.doesNotMatch(html, /data-icon="ContextCompactionIcon"|>滑窗压缩</);
   assert.doesNotMatch(html, /滑动窗口/);
@@ -218,16 +222,36 @@ test('collapsed model button exposes the shared compression mode without losing 
 test('collapsed status row follows effective thinking and Fast, omitting off states', async () => {
   const h = harness({modelMenuOpen: false, currentFast: false, effectiveThinking: 'low'});
   let html = await h.renderChip();
-  assert.match(html, /aria-label="思考强度：低"/);
+  assert.match(html.match(/^<button[^>]*>/)[0], /aria-description="上下文压缩：滑动窗口，思考强度：低"/);
   assert.match(html, /class="run-config-status-thinking">低</);
   assert.doesNotMatch(html, /run-config-status-fast/);
   h.bindings.props.effectiveThinking = 'off'; h.bindings.props.currentFast = true;
   html = await h.renderChip();
-  assert.match(html, /aria-label="Fast 模式已开启"/);
+  assert.match(html.match(/^<button[^>]*>/)[0], /aria-description="上下文压缩：滑动窗口，Fast 模式已开启"/);
   assert.doesNotMatch(html, /run-config-status-thinking/);
   h.bindings.props.currentFast = false;
-  assert.doesNotMatch(await h.renderChip(), /run-config-chip-status/);
+  html = await h.renderChip();
+  assert.doesNotMatch(html, /run-config-chip-status/);
+  assert.match(html.match(/^<button[^>]*>/)[0], /aria-description="上下文压缩：滑动窗口"/);
   assert.deepEqual(h.calls, [], 'status display never changes configuration');
+});
+
+test('collapsed status maps every supported level and describes only effective main settings, not the Agent tab', async () => {
+  for (const [level, label] of Object.entries({minimal: '极简', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高'})) {
+    const h = harness({effectiveThinking: level, currentFast: false, agentEffectiveThinking: 'max', agentEffectiveFast: true}, 'agent');
+    const html = await h.renderChip();
+    assert.equal(h.bindings.runConfigThinkingBadge, label);
+    assert.ok(html.match(/^<button[^>]*>/)[0].includes(`aria-description="上下文压缩：滑动窗口，思考强度：${label}"`));
+    assert.match(html, /run-config-chip-status" aria-hidden="true"/);
+    assert.doesNotMatch(html, /run-config-status-fast/);
+    assert.deepEqual(h.calls, []);
+  }
+  for (const effectiveThinking of ['high', 'off', '']) {
+    const h = harness({supportsThinking: false, effectiveThinking, currentFast: false});
+    const html = await h.renderChip();
+    assert.doesNotMatch(html, /run-config-chip-status/);
+    assert.match(html.match(/^<button[^>]*>/)[0], /aria-description="上下文压缩：滑动窗口"/);
+  }
 });
 
 test('collapsed button keeps quiet model typography and explicit compression metadata without a badge', async () => {

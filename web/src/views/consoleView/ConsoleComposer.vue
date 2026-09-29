@@ -865,7 +865,7 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 				<div class="composer-toolbar">
 					<div class="composer-actions relative flex min-w-0 flex-1 items-center gap-1.5">
 						<el-tooltip content="新话题（Ctrl+N）" placement="top" :show-after="260">
-							<button type="button" class="tool-btn composer-new-session" aria-label="新话题（Ctrl+N）" @click="emit('new-session')">
+							<button type="button" class="tool-btn" aria-label="新话题（Ctrl+N）" @click="emit('new-session')">
 								<Plus/>
 							</button>
 						</el-tooltip>
@@ -896,11 +896,11 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 						            :show-arrow="false"
 						            :hide-after="0">
 							<template #reference>
-								<button type="button" class="status-chip run-config-chip" aria-label="运行配置" :aria-description="`上下文压缩：${runConfigStrategyText}`"
+								<button type="button" class="status-chip run-config-chip" aria-label="运行配置" :aria-description="[`上下文压缩：${runConfigStrategyText}`, runConfigStatusLabel].filter(Boolean).join('，')"
 								        :class="props.modelMenuOpen ? 'status-chip-active' : ''">
 									<span class="run-config-chip-main">
 										<span class="run-config-chip-model">{{ runConfigModelText }}</span>
-										<span v-if="runConfigStatusLabel" class="run-config-chip-status" role="img" :aria-label="runConfigStatusLabel">
+										<span v-if="runConfigStatusLabel" class="run-config-chip-status" aria-hidden="true">
 											<span v-if="runConfigThinkingBadge" class="run-config-status-thinking">{{ runConfigThinkingBadge }}</span>
 											<span v-if="props.currentFast" class="run-config-status-fast"><ModelFeatureIcon name="zap"/></span>
 										</span>
@@ -1818,8 +1818,7 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 }
 
 .tool-btn:hover, .tool-btn-active {
-	/* Keep the generous tap target while drawing a smaller visual circle. */
-	background: radial-gradient(circle at center, var(--ob-hover) 0 16px, transparent 16.5px);
+	background: var(--ob-hover);
 	color: var(--ob-text-strong);
 }
 
@@ -2334,10 +2333,6 @@ button.status-chip:hover, .status-chip-active {
 	}
 	.run-config-chip-model { font-weight: 500; }
 	.run-config-chip-status { display: inline-flex; font-size: 10px; }
-	/* Move each complete control—not only its glyph—toward the input edge. This
-	   keeps the circular hover/press feedback and tooltip anchored to the icon. */
-	.composer-actions .tool-btn { transform: translateX(-14px); }
-	.composer-actions .composer-new-session { transform: translateX(-12px); }
 	.composer-clear:disabled { display: none; }
 	.composer-toolbar button.run-config-chip:focus-visible { outline: 2px solid var(--bear-accent); outline-offset: -2px; }
 	.run-config-chip-meta { display: none; }
