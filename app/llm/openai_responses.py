@@ -88,6 +88,53 @@ def _to_responses_input(messages: list[Message]) -> list[dict[str, Any]]:
     return out
 
 
+def _output_index(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _item_identity(item: dict[str, Any]) -> tuple[str, str] | None:
+    kind = str(item.get("type") or "")
+    ident = item.get("id") or (item.get("call_id") if kind == "function_call" else "")
+    return (kind, str(ident)) if kind and ident else None
+
+
+def _order_native_items(
+    entries: list[dict[str, Any]],
+    terminal_output: list[Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Restore Responses output order from ``output_index`` without guessing.
+
+    ``response.output_item.done`` events are allowed to finish out of order. Items
+    with a known index occupy the indexed slots in ascending order; items with no
+    index keep their arrival slot instead of being moved by type. A terminal
+    ``response.output`` can supply an index only through an exact, unique
+    type+id/call_id match. It is never used to add or rewrite items.
+    """
+    if not entries:
+        return []
+    positions: dict[tuple[str, str], list[int]] = {}
+    for pos, raw in enumerate(terminal_output or []):
+        identity = _item_identity(raw) if isinstance(raw, dict) else None
+        if identity:
+            positions.setdefault(identity, []).append(pos)
+    used = {e["index"] for e in entries if e["index"] is not None}
+    indexes: list[int | None] = []
+    for entry in entries:
+        index = entry["index"]
+        if index is None:
+            identity = _item_identity(entry["item"])
+            found = positions.get(identity, []) if identity else []
+            if len(found) == 1 and found[0] not in used:
+                index = found[0]
+                used.add(index)
+        indexes.append(index)
+    slots = [i for i, index in enumerate(indexes) if index is not None]
+    ordered = [entry["item"] for entry in entries]
+    for slot, source in zip(slots, sorted(slots, key=lambda i: indexes[i]), strict=True):
+        ordered[slot] = entries[source]["item"]
+    return ordered
+
+
 def _to_responses_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
     """中性 schema → Responses flat function tools。
 
@@ -227,6 +274,19 @@ class OpenAIResponsesBackend(LLMBackend):
         final_usage: Usage | None = None
         provider_billing: dict[str, Any] = {}
         stop = "stop"
+        # Native items are ordered by output_index once the item set is known.
+        # Text deltas, tool events and tool scheduling are still not delayed:
+        # tool calls were already emitted only after the SSE stream ended.
+        native_entries: list[dict[str, Any]] = []
+        native_by_index: dict[int, dict[str, Any]] = {}
+        added_indexes: dict[tuple[str, str], int] = {}
+        terminal_output: list[Any] | None = None
+
+        def flush_native() -> list[StreamEvent]:
+            items = _order_native_items(native_entries, terminal_output)
+            native_entries.clear()
+            native_by_index.clear()
+            return [StreamEvent(kind="native_output_item", native_output_items=[item]) for item in items]
 
         async for ev_name, data in self._client.post_sse(
             url,
@@ -242,6 +302,8 @@ class OpenAIResponsesBackend(LLMBackend):
             t = data.get("type") or ev_name
             if t in ("response.completed", "response.incomplete", "response.failed"):
                 resp = data.get("response") or {}
+                if isinstance(resp.get("output"), list):
+                    terminal_output = resp["output"]
                 u = resp.get("usage") or {}
                 terminal_billing = provider_billing_details(
                     resp.get("service_tier") or u.get("service_tier"),
@@ -264,6 +326,8 @@ class OpenAIResponsesBackend(LLMBackend):
                 if t == "response.failed" or resp.get("status") == "failed":
                     # Failed Responses may still carry billable usage. Emit it
                     # before the normalized terminal error.
+                    for native_event in flush_native():
+                        yield native_event
                     if final_usage:
                         yield StreamEvent(
                             kind="usage",
@@ -279,6 +343,8 @@ class OpenAIResponsesBackend(LLMBackend):
                     return
             err = error_event(data, event_name=ev_name)
             if err:
+                for native_event in flush_native():
+                    yield native_event
                 yield err
                 return
             if t == "response.output_text.delta":
@@ -299,10 +365,23 @@ class OpenAIResponsesBackend(LLMBackend):
                             kind="encrypted_reasoning",
                             text="\n\n".join(encrypted_reasoning.values()),
                         )
+                    identity = _item_identity(item)
+                    index = _output_index(data.get("output_index"))
                     if t != "response.output_item.done":
+                        if identity and index is not None:
+                            added_indexes[identity] = index
                         continue
+                    if index is None and identity:
+                        index = added_indexes.get(identity)
                     if opts.get("native_continuation"):
-                        yield StreamEvent(kind="native_output_item", native_output_items=[item])
+                        entry = native_by_index.get(index) if index is not None else None
+                        if entry is not None:
+                            entry["item"] = item  # repeated done for one output slot
+                        else:
+                            entry = {"item": item, "index": index}
+                            native_entries.append(entry)
+                            if index is not None:
+                                native_by_index[index] = entry
                     if item.get("type") == "function_call":
                         calls.append(ToolCall(
                             id=item.get("call_id") or item.get("id", ""),
@@ -310,6 +389,8 @@ class OpenAIResponsesBackend(LLMBackend):
                             arguments=item.get("arguments", "") or "{}",
                         ))
 
+        for native_event in flush_native():
+            yield native_event
         if final_usage:
             yield StreamEvent(
                 kind="usage",
