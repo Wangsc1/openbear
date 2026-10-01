@@ -43,6 +43,14 @@ body {
    desktop height override, global touch-action, zoom restriction or body scroll
    correction. The transform makes chat's fixed floating controls shell-relative. */
 @media (max-width: 760px), (hover: none) and (pointer: coarse) {
+  /* Match the exposed page canvas to chat, including the gap above iOS's
+     keyboard accessory bar. Override theme.js's inline root background only
+     on the authenticated mobile conversation page. */
+  html[data-openbear-mobile-viewport][data-openbear-console],
+  html[data-openbear-mobile-viewport][data-openbear-console] body,
+  html[data-openbear-mobile-viewport][data-openbear-console] #app {
+    background-color: var(--ob-chat-bg) !important;
+  }
   html[data-openbear-mobile-viewport],
   html[data-openbear-mobile-viewport] body,
   html[data-openbear-mobile-viewport] #app {
