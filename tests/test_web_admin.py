@@ -3157,6 +3157,16 @@ async def test_active_controller_generation_hands_late_control_to_post_turn_work
     cfg = _cfg()
     generation_entered = asyncio.Event()
     release_generation = asyncio.Event()
+    worker_finished = asyncio.Event()
+    original_worker = web_env.server._run_web_task_notification_when_idle
+
+    async def observed_worker(**kwargs):
+        try:
+            await original_worker(**kwargs)
+        finally:
+            worker_finished.set()
+
+    monkeypatch.setattr(web_env.server, "_run_web_task_notification_when_idle", observed_worker)
 
     class BlockingGenerationBackend(FakeStreamBackend):
         async def stream(self, messages, *, model, system="", tools=None, max_tokens=8192, **opts):
@@ -3246,9 +3256,9 @@ async def test_active_controller_generation_hands_late_control_to_post_turn_work
         "taskUuid": "task-active-a", "status": "needs_openbear_control", "summary": "A needs a ruling",
         "content": "A control boundary", "recentEvents": [{"seq": 1}],
     })
-    await asyncio.wait_for(generation_entered.wait(), timeout=3)
-    assert len(callbacks) == 1
     try:
+        await asyncio.wait_for(generation_entered.wait(), timeout=3)
+        assert len(callbacks) == 1
         await callbacks[0]({
             "kind": "task-notification",
             "taskUuid": "task-active-b", "status": "needs_openbear_control",
@@ -3257,22 +3267,21 @@ async def test_active_controller_generation_hands_late_control_to_post_turn_work
         })
     finally:
         release_generation.set()
+        # Await the real claim/ack worker, including on failure, before the
+        # fixture closes the DB. A SELECT started before completion can retain
+        # 'processing' even if the worker exits while fetchall() is awaited.
+        await asyncio.wait_for(worker_finished.wait(), timeout=5)
 
+    assert row["conversation_uuid"] not in web_env.server._web_task_notification_workers
     states_by_task = {}
-    for _ in range(250):
-        cur = await web_env.db.conn.execute(
-            "SELECT task_uuid,state FROM web_task_notifications WHERE task_uuid IN ('task-active-a','task-active-b') ORDER BY id",
-        )
-        states_by_task = {}
+    cur = await web_env.db.conn.execute(
+        "SELECT task_uuid,state FROM web_task_notifications WHERE task_uuid IN ('task-active-a','task-active-b') ORDER BY id",
+    )
+    try:
         for item in await cur.fetchall():
             states_by_task.setdefault(str(item["task_uuid"]), []).append(str(item["state"]))
-        if (
-            backend.calls >= 3
-            and row["conversation_uuid"] not in web_env.server._web_task_notification_workers
-            and states_by_task.get("task-active-a") and states_by_task.get("task-active-b")
-        ):
-            break
-        await asyncio.sleep(0.02)
+    finally:
+        await cur.close()
 
     assert backend.calls == 3
     assert all(original in str(messages) for messages in backend.seen_convos)
