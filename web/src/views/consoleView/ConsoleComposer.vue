@@ -168,13 +168,14 @@ const runConfigPopoverVisible = computed({
 });
 const runConfigModelText = computed(() => props.currentModelInfo ? modelShortLabel(props.currentModelInfo) : "模型");
 const runConfigStrategyText = computed(() => props.contextStrategy === 'model_summary' ? '模型摘要' : '滑动窗口');
-const runConfigMetaText = computed(() => {
+const runConfigMetaParts = computed(() => {
 	const parts = [];
-	if (props.supportsThinking) parts.push(thinkingLabel(props.effectiveThinking));
-	if (props.currentFast) parts.push("Fast");
-	if (props.contextDisplay && props.contextDisplay !== "—") parts.push(props.contextDisplay);
-	return parts.join(" · ");
+	if (props.supportsThinking) parts.push({key: 'thinking', text: compactThinkingLabel(props.effectiveThinking)});
+	if (props.currentFast) parts.push({key: 'fast', text: 'Fast'});
+	if (props.contextDisplay && props.contextDisplay !== "—") parts.push({key: 'context', text: props.contextDisplay});
+	return parts;
 });
+const runConfigMetaText = computed(() => runConfigMetaParts.value.map(part => part.text).join(" · "));
 const currentDefaultThinkingLabel = computed(() => {
 	const level = modelDefaultThinking(props.currentModelInfo);
 	return level ? thinkingLabel(level) : "无";
@@ -214,7 +215,7 @@ function selectMenuThinking(level) {
 
 const runConfigSettingsSummary = computed(() => {
 	const thinking = menuSupportsThinking.value
-		? `思考 ${isAgentTab.value && !props.agentThinkLevel ? '默认' : compactThinkingLabel(menuThinkingLevel.value)}`
+		? `思考 ${isAgentTab.value && !props.agentThinkLevel ? '跟随' : compactThinkingLabel(menuThinkingLevel.value)}`
 		: '思考未声明';
 	const fast = isAgentTab.value
 		? `Fast ${{follow: '跟随', on: '开', off: '关'}[agentFastTriState.value]}`
@@ -985,7 +986,7 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 											<span v-if="runConfigThinkingBadge" class="run-config-status-thinking">{{ runConfigThinkingBadge }}</span>
 											<span v-if="props.currentFast" class="run-config-status-fast"><ModelFeatureIcon name="zap"/></span>
 										</span>
-										<span v-if="runConfigMetaText" class="run-config-chip-meta">{{ runConfigMetaText }}</span>
+										<span v-if="runConfigMetaParts.length" class="run-config-chip-meta"><span v-for="part in runConfigMetaParts" :key="part.key" class="run-config-meta-part" :class="part.key === 'fast' ? 'run-config-meta-fast' : ''" :title="part.key === 'fast' ? 'Fast 模式' : undefined"><ModelFeatureIcon v-if="part.key === 'fast'" name="zap"/><template v-else>{{ part.text }}</template></span></span>
 									</span>
 									<span class="run-config-chip-strategy" :aria-label="`上下文压缩：${runConfigStrategyText}`">{{ props.contextStrategy === 'model_summary' ? '摘要压缩' : '滑窗压缩' }}</span>
 									<ArrowDown class="chip-caret"/>
@@ -1049,10 +1050,10 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 								</div>
 								<div v-show="!runConfigCompact || runConfigSettingsOpen" class="run-config-controls">
 									<div class="thinking-control">
-										<div class="run-config-control-head"><span class="config-label"><ModelFeatureIcon name="brain"/>思考强度</span><span class="config-hint">{{ menuSupportsThinking ? `默认 ${menuDefaultThinking}` : '未声明支持' }}</span></div>
+										<div class="run-config-control-head"><span class="config-label"><ModelFeatureIcon name="brain"/>思考强度</span><span class="config-hint">{{ menuSupportsThinking ? (isAgentTab ? (props.agentThinkLevel ? '未跟随主会话' : `跟随：${compactThinkingLabel(props.agentEffectiveThinking)}`) : `默认 ${menuDefaultThinking}`) : '未声明支持' }}</span></div>
 										<div v-if="menuSupportsThinking || isAgentTab" class="thinking-segments" role="group" aria-label="思考强度">
-											<el-tooltip v-if="isAgentTab" :content="`使用模型默认思考强度：${props.agentDefaultThinkingLabel}`" placement="top" :show-after="400">
-												<button type="button" :class="!props.agentThinkLevel ? 'is-active' : ''" :aria-pressed="!props.agentThinkLevel" @click="selectMenuThinking('')">默认</button>
+											<el-tooltip v-if="isAgentTab" :content="`跟随主会话思考强度，当前为${compactThinkingLabel(props.agentEffectiveThinking)}`" placement="top" :show-after="400">
+												<button type="button" :class="!props.agentThinkLevel ? 'is-active' : ''" :aria-pressed="!props.agentThinkLevel" @click="selectMenuThinking('')">跟随</button>
 											</el-tooltip>
 											<el-tooltip v-for="level in menuThinkingLevels" :key="level" :content="`思考强度：${level}`" placement="top" :show-after="400">
 												<button type="button" :class="menuThinkingLevel === level ? 'is-active' : ''" :aria-pressed="menuThinkingLevel === level" @click="selectMenuThinking(level)">{{ compactThinkingLabel(level) }}</button>
@@ -2028,6 +2029,17 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 	font-weight: 520;
 }
 
+.run-config-meta-part + .run-config-meta-part::before {
+	content: " · ";
+	color: var(--ob-text-muted);
+}
+
+.run-config-meta-fast .model-feature-icon {
+	width: 1.15em;
+	height: 1.15em;
+	vertical-align: -0.2em;
+}
+
 .run-config-chip-meta::before, .run-config-chip-strategy::before {
 	content: "·";
 	margin-right: 0.28rem;
@@ -2312,7 +2324,7 @@ button.status-chip:hover, .status-chip-active {
 }
 .config-value { display: flex; align-items: center; gap: 9px; }
 .agent-fast-segments { flex: 0 0 auto; }
-.agent-fast-segments button { min-width: 30px; padding: 2px 8px; font-size: 12px; }
+.agent-fast-segments button { flex: 0 0 auto; min-width: 30px; padding: 2px 10px; font-size: 12px; text-align: center; }
 .fast-switch {
 	position: relative;
 	width: 36px;
@@ -2424,7 +2436,16 @@ button.status-chip:hover, .status-chip-active {
 		gap: 0;
 		padding: 0;
 	}
-	.composer-actions { flex: 0 0 auto; gap: 0; }
+	/* Move the complete controls (including their hit areas and feedback)
+	   left, and give the reclaimed 12px to the model instead of just painting
+	   translated icons. The 44px controls remain separate and reachable. */
+	.composer-actions { flex: 0 0 auto; gap: 0; margin-left: -9px; }
+	/* Tighten the icon pitch without shrinking the 44px touch height. The 3px
+	   group offset difference keeps the first icon at its current position. */
+	.composer-actions .tool-btn { width: 38px; }
+	.composer-actions .tool-btn:hover, .composer-actions .tool-btn-active {
+		background: radial-gradient(circle at center, var(--ob-hover) 0 16px, transparent 16.5px);
+	}
 	.composer-status {
 		flex: 1 1 0;
 		min-width: 0;
@@ -2447,6 +2468,9 @@ button.status-chip:hover, .status-chip-active {
 	}
 	.run-config-chip-model { font-weight: 500; }
 	.run-config-chip-status { display: inline-flex; font-size: 10px; }
+	/* Phone uses the text itself as the menu affordance; the caret space is
+	   returned to the right-aligned model/status group. */
+	.composer-toolbar button.run-config-chip .chip-caret { display: none; }
 	.composer-clear:disabled { display: none; }
 	.composer-toolbar button.run-config-chip:focus-visible { outline: 2px solid var(--bear-accent); outline-offset: -2px; }
 	.run-config-chip-meta { display: none; }
@@ -2458,7 +2482,7 @@ button.status-chip:hover, .status-chip-active {
 /* The extra usage control must not squeeze the model name away on small
    phones. Only the narrowest toolbar uses two tracks; all actions stay visible. */
 @media (max-width: 360px) {
-	.composer-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) 44px; }
+	.composer-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) 38px; }
 	.composer-status { display: contents; }
 	.composer-actions { grid-row: 2; grid-column: 1; }
 	.composer-toolbar button.run-config-chip { grid-row: 1; grid-column: 1; justify-self: start; max-width: 100%; }
@@ -2481,6 +2505,9 @@ button.status-chip:hover, .status-chip-active {
 		height: 44px;
 		flex: 0 0 auto;
 	}
+	/* Keep the tool controls at 44px height, but make the primary send button a
+	   little smaller so more of the row can be used by the model name. */
+	.send-button { width: 38px; height: 38px; }
 	.run-config-chip { min-height: 44px; }
 	.attachment-remove {
 		top: 0;

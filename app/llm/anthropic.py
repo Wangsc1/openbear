@@ -369,7 +369,11 @@ class AnthropicBackend(LLMBackend):
                                "name": cb.get("name", ""), "args": "",
                                "native": dict(cb) if cb.get("type") in {"thinking", "redacted_thinking", "text", "tool_use"} else None}
                 if cb.get("type") == "tool_use":
-                    progress = tool_input.update(str(idx), name=cb.get("name") or "")
+                    initial_input = cb.get("input")
+                    progress = tool_input.update(
+                        str(idx), name=cb.get("name") or "",
+                        arguments=json.dumps(initial_input, ensure_ascii=False) if initial_input else None,
+                    )
                     if progress is not None:
                         yield progress
             elif t == "content_block_delta":
@@ -398,7 +402,7 @@ class AnthropicBackend(LLMBackend):
                 elif dt == "input_json_delta":
                     blocks.setdefault(idx, {"args": ""})
                     blocks[idx]["args"] = blocks[idx].get("args", "") + d.get("partial_json", "")
-                    progress = tool_input.update(str(idx), delta=d.get("partial_json") or "")
+                    progress = tool_input.update(str(idx), arguments=blocks[idx]["args"])
                     if progress is not None:
                         yield progress
             elif t == "content_block_stop":
@@ -406,7 +410,8 @@ class AnthropicBackend(LLMBackend):
                 blk = blocks.get(idx) or {}
                 blk["closed"] = True
                 if blk.get("type") == "tool_use":
-                    progress = tool_input.update(str(idx), arguments=blk.get("args") or "", done=True)
+                    arguments = blk.get("args") or json.dumps((blk.get("native") or {}).get("input", {}), ensure_ascii=False)
+                    progress = tool_input.update(str(idx), arguments=arguments, done=True)
                     if progress is not None:
                         yield progress
                 native = blk.get("native")

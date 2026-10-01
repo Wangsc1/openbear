@@ -1961,6 +1961,8 @@ class AgentExecutor(AgentTaskContext):
         partial = AgentResult()
         partial_time = time.monotonic()
         partial_chars = 0
+        tool_input_active = False
+        attempt_id = ""
 
         async def persist_partial(*, force=False):
             nonlocal partial_time, partial_chars
@@ -1978,6 +1980,7 @@ class AgentExecutor(AgentTaskContext):
             await self.emit("model_stream_progress", agent_key=self.agent.agent_key,
                 summary=f"模型流式输出中 · {len(text)} 字",
                 detail={"round": round_no, "attempt": max(0, attempt_no - 1),
+                        "attemptId": attempt_id,
                         "textChars": len(text), "reasoningChars": len(reasoning)})
             partial_time, partial_chars = now, chars
 
@@ -2002,9 +2005,11 @@ class AgentExecutor(AgentTaskContext):
             }, metadata={"ticket": ticket})
 
         async def started(outcome):
-            nonlocal attempt_no, partial_time, partial_chars
+            nonlocal attempt_no, partial_time, partial_chars, tool_input_active, attempt_id
             attempt_no += 1
             partial_time, partial_chars = time.monotonic(), 0
+            tool_input_active = False
+            attempt_id = outcome.attempt_id
             await self.dao.update_task(self.task_uuid, current_agent_key=self.agent.agent_key,
                                        current_status="模型调用中")
             await self.emit("model_call_started", agent_key=self.agent.agent_key,
@@ -2015,11 +2020,15 @@ class AgentExecutor(AgentTaskContext):
                 })
 
         async def observe(event, logical_partial, outcome):
-            nonlocal partial
+            nonlocal partial, tool_input_active
             partial = logical_partial
-            if event.kind in {"content", "reasoning"}:
-                await persist_partial()
+            if event.kind in {"content", "reasoning"} and event.text:
+                # A phase change must clear parameter progress immediately, even
+                # when the new text is below the ordinary persistence throttle.
+                await persist_partial(force=tool_input_active)
+                tool_input_active = False
             elif event.kind == "tool_input":
+                tool_input_active = True
                 progress = {**event.details, "attemptId": outcome.attempt_id}
                 summary = tool_input_status(progress)
                 await self.dao.update_task(self.task_uuid, current_status=summary)
@@ -2055,12 +2064,15 @@ class AgentExecutor(AgentTaskContext):
                         await value
             if outcome.status != "ok":
                 await persist_partial(force=True)
-                if partial.text or partial.reasoning or outcome.response.tool_calls:
-                    await self.emit("model_stream_interrupted", agent_key=self.agent.agent_key,
-                        summary="模型流中断，保留部分输出并进入恢复流程", detail={
-                            "round": round_no, "reason": detail["errorType"],
-                            "textChars": len(partial.text), "toolCallCount": len(outcome.response.tool_calls),
-                        })
+                # Parameter-only attempts also have a physical end. This is not
+                # logical failure: the driver may still retry or recover tools.
+                await self.emit("model_stream_interrupted", agent_key=self.agent.agent_key,
+                    summary="模型调用已取消" if outcome.status == "cancelled" else "模型流已中断", detail={
+                        "round": round_no, "attempt": max(0, attempt_no - 1),
+                        "attemptId": outcome.attempt_id, "status": outcome.status,
+                        "reason": detail["errorType"], "durationMs": outcome.total_time_ms,
+                        "textChars": len(partial.text), "toolCallCount": len(outcome.response.tool_calls),
+                    })
             else:
                 await self.emit("model_call_finished", agent_key=self.agent.agent_key,
                                 summary=f"{self.agent.name} 模型调用完成", detail=detail)
@@ -2083,10 +2095,13 @@ class AgentExecutor(AgentTaskContext):
             output.update(retry=dict(payload), taskUuid=self.task_uuid)
             output.setdefault("agent", agent_to_snapshot(self.agent))
             active = bool(payload.get("active"))
+            settled_status = {
+                "completed": "模型调用完成", "failed": "模型调用中断", "cancelled": "模型调用已取消",
+            }.get(str(payload.get("status") or "")) if payload.get("terminal") else None
             await self.dao.update_task(self.task_uuid, output=output, control_state="retry_wait" if active else "",
-                current_status=f"等待重试 {payload.get('attempt')}/{self.retry_policy.max_retries}" if active else "模型调用中")
+                current_status=f"等待重试 {payload.get('attempt')}/{self.retry_policy.max_retries}" if active else (settled_status or "模型调用中"))
             await self.emit("model_call_retry_wait" if active else "model_call_retry_resumed",
-                agent_key=self.agent.agent_key, summary="等待模型重试" if active else "模型重试等待结束",
+                agent_key=self.agent.agent_key, summary="等待模型重试" if active else (settled_status or "模型重试等待结束"),
                 detail={"retry": dict(payload), "round": round_no})
             if active:
                 await self.emit("model_call_retry", agent_key=self.agent.agent_key,

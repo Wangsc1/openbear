@@ -8302,6 +8302,15 @@ async def test_conversation_agent_run_config_api_and_state(web_env):
     assert state["conversation"]["agentThinkLevel"] == "medium"
     assert state["conversation"]["agentFastMode"] is False
 
+    # Follow the main conversation's explicit level, not this model's medium default.
+    thinking_resp = await web_env.client.post(
+        f"/api/conversations/{uuid}/thinking",
+        json={"level": "high"},
+        cookies=cookie,
+    )
+    assert thinking_resp.status == 200
+    assert (await thinking_resp.json())["runConfig"]["effectiveThinkingLevel"] == "high"
+
     # Clear overrides back to follow main.
     clear_resp = await web_env.client.post(
         f"/api/conversations/{uuid}/agent-run-config",
@@ -8316,10 +8325,30 @@ async def test_conversation_agent_run_config_api_and_state(web_env):
     assert cleared["agentRunConfig"]["effective"]["model"] == "openai/gpt"
     assert cleared["agentRunConfig"]["effective"]["source"]["model"] == "main"
     assert cleared["runConfig"]["agentRunConfig"] == cleared["agentRunConfig"]
-    assert cleared["runConfig"]["agentRunConfig"]["effective"]["thinkLevel"] == "medium"
+    assert cleared["runConfig"]["defaultThinkingLevel"] == "medium"
+    assert cleared["runConfig"]["agentRunConfig"]["effective"]["thinkLevel"] == "high"
     assert cleared["runConfig"]["agentRunConfig"]["effective"]["source"] == {
-        "model": "main", "thinkLevel": "model_default", "fastMode": "main",
+        "model": "main", "thinkLevel": "main", "fastMode": "main",
     }
+    followed_state = await (await web_env.client.get(f"/api/conversations/{uuid}/state", cookies=cookie)).json()
+    assert followed_state["agentRunConfig"] == cleared["agentRunConfig"]
+
+    # The cheap Agent model cannot follow high; fall back to its own low default.
+    fallback_resp = await web_env.client.post(
+        f"/api/conversations/{uuid}/agent-run-config",
+        json={"model": "openai/cheap"},
+        cookies=cookie,
+    )
+    assert fallback_resp.status == 200
+    fallback = await fallback_resp.json()
+    assert fallback["runConfig"]["effectiveThinkingLevel"] == "high"
+    assert fallback["agentRunConfig"]["thinkLevel"] == ""
+    assert fallback["agentRunConfig"]["effective"]["thinkLevel"] == "low"
+    assert fallback["agentRunConfig"]["effective"]["source"] == {
+        "model": "conversation", "thinkLevel": "model_default", "fastMode": "main",
+    }
+    fallback_state = await (await web_env.client.get(f"/api/conversations/{uuid}/state", cookies=cookie)).json()
+    assert fallback_state["agentRunConfig"] == fallback["agentRunConfig"]
 
 
 

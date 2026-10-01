@@ -455,12 +455,14 @@ def assistant_event_operation_specs(
     if typ == "cut":
         specs.append(_operation_spec(
             op_id=f"assistant:{turn_uuid}:{segment}", op_type="assistant_message", action="end", turn_uuid=turn_uuid,
-            payload={"complete": True, "segmentBoundary": True, "segmentIndex": segment_index},
+            payload={"complete": True, "segmentBoundary": True, "segmentIndex": segment_index,
+                     **({"text": text} if text else {})},
             status="completed", source="assistant", skip_if_missing=True,
         ))
         specs.append(_operation_spec(
             op_id=f"reasoning:{turn_uuid}:{segment}", op_type="reasoning", action="end", turn_uuid=turn_uuid,
-            payload={"complete": True, "segmentBoundary": True, "segmentIndex": segment_index},
+            payload={"complete": True, "segmentBoundary": True, "segmentIndex": segment_index,
+                     **({"text": reasoning} if reasoning else {})},
             status="completed", source="assistant", skip_if_missing=True,
         ))
         return specs

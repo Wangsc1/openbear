@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {readFile, unlink, writeFile} from "node:fs/promises";
 import {compileScript, parse} from "@vue/compiler-sfc";
-import {effectScope, reactive} from "vue";
+import {createRenderer, reactive} from "vue";
 
 const sharedUrl = new URL("./AgentProcessActivity.vue", import.meta.url);
 const activityListUrl = new URL("./AgentActivityList.vue", import.meta.url);
@@ -47,9 +47,16 @@ test("shared Agent process activity compacts source lifecycles once and limits l
     limit: 0,
     emptyText: "empty",
   });
-  const scope = effectScope();
-  const bindings = scope.run(() => AgentProcessActivity.setup(props, {expose: () => {}}));
-  t.after(() => scope.stop());
+  let bindings;
+  const app = createRenderer({
+    createComment: () => ({}), insert() {}, remove() {},
+    parentNode: () => null, nextSibling: () => null,
+  }).createApp({setup() {
+    bindings = AgentProcessActivity.setup(props, {expose: () => {}});
+    return () => null;
+  }});
+  app.mount({});
+  t.after(() => app.unmount());
 
   assert.deepEqual(bindings.displayLines.value.map((line) => line.message), [
     "调用工具 Bash √",

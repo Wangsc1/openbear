@@ -23,6 +23,7 @@ const MODEL_STATUS_LABELS = {
 	running: "调用中",
 	success: "执行完成 √",
 	failed: "调用失败 ×",
+	ended: "调用已结束",
 };
 
 const STATUS_TONES = {
@@ -30,6 +31,7 @@ const STATUS_TONES = {
 	success: "success",
 	failed: "danger",
 	denied: "danger",
+	ended: "muted",
 };
 
 function isModelProcessLine(line = {}) {

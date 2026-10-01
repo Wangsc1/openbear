@@ -94,7 +94,7 @@ test('Agent model row shows parameter generation rather than pretending a tool i
   const rows = compactAgentStepActivityLines([
     {seq:1,kind:'model_call_started',detail:{modelLabel:'OpenAI/gpt'}},
     {seq:2,kind:'model_stream_progress',detail:{toolInput:{toolNames:['Write'],receivedBytes:12010,updatedAtMs:202000,elapsedMs:201000,phase:'generating'}}},
-  ]);
+  ], {nowMs: 202000});
   assert.equal(rows.length,1);
   assert.match(rows[0].message,/正在生成文件内容/);
   assert.match(rows[0].message,/12.01 kB/);
@@ -669,4 +669,56 @@ test("Agent context compaction activity preserves output, failure reason, and ho
   assert.match(legacy.cardPreview, /压缩前上下文：未记录 · 压缩后上下文：未记录/);
   assert.equal(legacy.output, "");
   assert.equal(legacy.emptyOutputText, "旧记录未持久化压缩摘要");
+});
+
+test("parameter lifecycle closes legacy terminal histories without claiming model success", () => {
+  const start = {seq: 1, kind: "model_call_started", detail: {modelLabel: "GPT", attemptId: "a"}};
+  const input = {seq: 2, kind: "model_stream_progress", detail: {toolInput: {
+    attemptId: "a", toolNames: ["Read"], receivedBytes: 12010, updatedAtMs: 2000, elapsedMs: 1000,
+  }}};
+  for (const kind of ["task_failed", "task_cancelled", "task_interrupted", "task_completed", "tool_call_started", "model_call_started"]) {
+    const boundary = {seq: 3, kind, detail: kind === "tool_call_started" ? {name: "Read"} : {}};
+    const rows = compactAgentStepActivityLines([start, input, boundary], {nowMs: 32000});
+    assert.ok(!["running", "success"].includes(rows[0].modelStatus), kind);
+    assert.doesNotMatch(rows[0].modelStatusText, /生成|等待模型结束/);
+    assert.equal(rows[0].detail.toolInput, undefined);
+    if (kind.startsWith("task_")) assert.equal(rows.at(-1).kind, kind, "keep the task event itself");
+  }
+  const interrupted = {seq: 3, kind: "model_stream_interrupted", detail: {status: "error", reason: "network"}};
+  for (const kind of ["task_completed", "tool_call_started", "model_call_started"]) {
+    const rows = compactAgentStepActivityLines([start, input, interrupted, {seq: 4, kind, detail: {}}]);
+    assert.equal(rows[0].modelStatus, "failed", "a later boundary must not hide the interrupted request");
+    assert.match(rows[0].modelStatusText, /中断/);
+  }
+});
+
+test("retry terminal metadata never opens a phantom failed row or masks recovered tools", () => {
+  const events = [
+    {seq: 1, kind: "model_call_started", detail: {modelLabel: "GPT"}},
+    {seq: 2, kind: "model_stream_interrupted", detail: {reason: "upstream", status: "error"}},
+    {seq: 3, kind: "model_call_retry_wait", detail: {retry: {active: true, attempt: 1, maxRetries: 2}}},
+    {seq: 4, kind: "model_call_retry_resumed", detail: {retry: {terminal: true, status: "resumed", attempt: 1, maxRetries: 2}}},
+    {seq: 5, kind: "model_call_started", detail: {attempt: 1}},
+  ];
+  for (const status of ["completed", "failed", "cancelled"]) {
+    const terminal = {seq: 7, kind: "model_call_retry_resumed", detail: {retry: {terminal: true, status}}};
+    const end = status === "completed"
+      ? {seq: 6, kind: "model_call_finished", detail: {durationMs: 20}}
+      : {seq: 6, kind: "model_stream_interrupted", detail: {reason: "network", status: status === "cancelled" ? "cancelled" : "error"}};
+    const rows = compactAgentStepActivityLines([...events, end, terminal]);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].modelStatus, status === "completed" ? "success" : "failed");
+    assert.doesNotMatch(rows[0].modelStatusText, /正在重试/);
+    if (status === "failed") {
+      const recovered = compactAgentStepActivityLines([...events, end, terminal,
+        {seq: 8, kind: "model_stream_recovered_tool_calls", detail: {toolCallCount: 1}},
+        {seq: 9, kind: "tool_call_started", detail: {name: "Read"}},
+        {seq: 10, kind: "model_call_started", detail: {attempt: 0}},
+      ]);
+      assert.equal(recovered.length, 3);
+      assert.equal(recovered[0].modelStatus, "failed");
+      assert.match(recovered[0].modelStatusText, /完整工具调用已恢复/);
+      assert.equal(recovered[0].detail.reason, "network");
+    }
+  }
 });

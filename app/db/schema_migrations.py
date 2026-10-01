@@ -60,6 +60,39 @@ async def remove_removed_tools_from_agent_allowlists(conn: aiosqlite.Connection)
     return changed
 
 
+WEB_OPERATION_HISTORY_MIGRATION = "web_operation_history_v1"
+_HISTORY_BATCH_SIZE = 256
+
+
+async def migrate_web_operation_history(conn: aiosqlite.Connection) -> tuple[int, int]:
+    """Repair legacy history once; repairs and completion marker commit together.
+
+    Current operation writes already persist terminal times and their matching
+    frames atomically. Runtime interruption recovery is separate and still runs
+    on every startup. An absent marker (including on an old DB) requires repair.
+    """
+    cur = await conn.execute(
+        "SELECT 1 FROM schema_data_migrations WHERE name=?",
+        (WEB_OPERATION_HISTORY_MIGRATION,),
+    )
+    if await cur.fetchone() is not None:
+        return 0, 0
+    await conn.execute("SAVEPOINT web_operation_history_migration")
+    try:
+        terminal_times = await backfill_web_operation_terminal_times(conn)
+        frames = await reconcile_web_operation_snapshot_frames(conn)
+        await conn.execute(
+            "INSERT INTO schema_data_migrations(name, applied_at) VALUES (?,?)",
+            (WEB_OPERATION_HISTORY_MIGRATION, int(time.time())),
+        )
+        await conn.execute("RELEASE web_operation_history_migration")
+    except BaseException:
+        await conn.execute("ROLLBACK TO web_operation_history_migration")
+        await conn.execute("RELEASE web_operation_history_migration")
+        raise
+    return terminal_times, frames
+
+
 async def backfill_web_operation_terminal_times(conn: aiosqlite.Connection) -> int:
     """Persist the first terminal boundary before old transport frames expire."""
     for table in ("web_operations", "web_event_frames"):
@@ -69,36 +102,52 @@ async def backfill_web_operation_terminal_times(conn: aiosqlite.Connection) -> i
         )
         if await cur.fetchone() is None:
             return 0
-    cur = await conn.execute(
-        """
-        SELECT o.id, o.payload_json, MIN(f.created_at_ms) AS terminal_at_ms
-        FROM web_operations AS o
-        JOIN web_event_frames AS f
-          ON f.conversation_uuid=o.conversation_uuid AND f.op_id=o.op_id
-        WHERE o.lifecycle IN ('terminal', 'waiting_control')
-          AND f.action IN ('end', 'error', 'cancel', 'stop')
-        GROUP BY o.id
-        """
-    )
     changed = 0
-    for row in await cur.fetchall():
-        try:
-            payload = json.loads(str(row["payload_json"] or "{}"))
-            if not isinstance(payload, dict):
-                payload = {}
-        except Exception:
-            payload = {}
-        if int(payload.get("terminalAtMs") or 0) > 0:
-            continue
-        terminal_at_ms = int(row["terminal_at_ms"] or 0)
-        if terminal_at_ms <= 0:
-            continue
-        payload["terminalAtMs"] = terminal_at_ms
-        await conn.execute(
-            "UPDATE web_operations SET payload_json=?, revision=revision+1 WHERE id=?",
-            (json.dumps(payload, ensure_ascii=False, separators=(",", ":")), int(row["id"])),
+    last_id = None
+    while True:
+        after = "AND o.id > ?" if last_id is not None else ""
+        params = (last_id, _HISTORY_BATCH_SIZE) if last_id is not None else (_HISTORY_BATCH_SIZE,)
+        cur = await conn.execute(
+            f"""
+            SELECT o.id, o.payload_json, MIN(f.created_at_ms) AS terminal_at_ms
+            FROM web_operations AS o
+            JOIN web_event_frames AS f
+              ON f.conversation_uuid=o.conversation_uuid AND f.op_id=o.op_id
+            WHERE o.lifecycle IN ('terminal', 'waiting_control')
+              AND f.action IN ('end', 'error', 'cancel', 'stop')
+              AND CASE WHEN json_valid(o.payload_json)
+                    THEN COALESCE(CAST(json_extract(o.payload_json, '$.terminalAtMs') AS INTEGER), 0)
+                    ELSE 0 END <= 0
+              {after}
+            GROUP BY o.id
+            ORDER BY o.id
+            LIMIT ?
+            """,
+            params,
         )
-        changed += 1
+        rows = await cur.fetchall()
+        await cur.close()
+        if not rows:
+            break
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload_json"] or "{}"))
+                if not isinstance(payload, dict):
+                    payload = {}
+            except Exception:
+                payload = {}
+            terminal_at_ms = int(row["terminal_at_ms"] or 0)
+            if terminal_at_ms <= 0:
+                continue
+            payload["terminalAtMs"] = terminal_at_ms
+            await conn.execute(
+                "UPDATE web_operations SET payload_json=?, revision=revision+1 WHERE id=?",
+                (json.dumps(payload, ensure_ascii=False, separators=(",", ":")), int(row["id"])),
+            )
+            changed += 1
+        last_id = int(rows[-1]["id"])
+        if len(rows) < _HISTORY_BATCH_SIZE:
+            break
     return changed
 
 

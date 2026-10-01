@@ -31,7 +31,7 @@ function environment({ mobile = true, visual = true } = {}) {
   const media = target({ matches: mobile }), standalone = target({ matches: false });
   const viewport = visual ? target({ height: 800, width: 390, offsetTop: 0, offsetLeft: 0, scale: 1 }) : null;
   const win = target({
-    innerHeight: 800, innerWidth: 390, visualViewport: viewport, document: { documentElement: root },
+    innerHeight: 800, innerWidth: 390, visualViewport: viewport, document: target({ documentElement: root, activeElement: null }),
     matchMedia: query => query === MOBILE_VIEWPORT_QUERY ? media : standalone,
     requestAnimationFrame(fn) { const id = ++frameId; frames.set(id, fn); return id; },
     cancelAnimationFrame(id) { frames.delete(id); },
@@ -102,6 +102,120 @@ test('phone keyboard resize, viewport offset/scroll, keyboard dismissal and rota
   h.standalone.emit('change'); h.flush(); h.win.emit('pageshow'); h.flush();
   assert.deepEqual(calls, Array.from({ length: 7 }, () => ['before', 'anchor']).flat());
   stop(); assert.equal(h.attributes.size, 0); assert.equal(h.styles.size, 0);
+});
+
+test('software keyboard drops the bottom safe-area reservation only while an editor is focused and the visual viewport shrinks', () => {
+  const h = environment(), attr = 'data-openbear-keyboard', editor = { tagName: 'TEXTAREA' };
+  const stop = installMobileViewport({ window: h.win });
+  assert.equal(h.attributes.has(attr), false);
+  h.win.document.activeElement = editor; h.viewport.height = 430; h.viewport.emit('resize'); h.flush();
+  assert.equal(h.attributes.has(attr), true, 'focused editor plus a large shrink is a keyboard');
+  h.viewport.height = 800; h.win.document.activeElement = null; h.win.document.emit('focusout'); h.flush();
+  assert.equal(h.attributes.has(attr), false, 'dismissal restores the reservation');
+  h.win.document.activeElement = editor; h.viewport.height = 430; h.viewport.emit('resize'); h.flush();
+  h.viewport.height = 800; h.viewport.emit('resize'); h.flush();
+  assert.equal(h.attributes.has(attr), false, 'keyboard hide while focus remains also restores it');
+  h.win.document.activeElement = { tagName: 'BUTTON' }; h.viewport.height = 430; h.viewport.emit('resize'); h.flush();
+  assert.equal(h.attributes.has(attr), false, 'browser/toolbar-like shrink without a text editor is ignored');
+  h.win.document.activeElement = { tagName: 'INPUT', type: 'text' }; h.viewport.height = 700; h.viewport.emit('resize'); h.flush();
+  assert.equal(h.attributes.has(attr), false, 'small toolbar-sized changes are ignored');
+  h.viewport.height = 430; h.viewport.emit('resize'); h.flush();
+  assert.equal(h.attributes.has(attr), true);
+  stop(); assert.equal(h.attributes.size, 0);
+});
+
+test('focused contenteditable keeps keyboard detection through rotation and returning to portrait', () => {
+  const h = environment(), attr = 'data-openbear-keyboard';
+  h.win.innerHeight = h.viewport.height = 844;
+  const stop = installMobileViewport({window: h.win});
+  const resize = (width, layoutHeight, height) => {
+    Object.assign(h.win, {innerWidth: width, innerHeight: layoutHeight});
+    Object.assign(h.viewport, {width, height});
+    h.win.emit('orientationchange'); h.viewport.emit('resize'); h.flush();
+  };
+  h.win.document.activeElement = {tagName: 'DIV', isContentEditable: true};
+  resize(390, 844, 430); assert.equal(h.attributes.has(attr), true);
+  resize(844, 390, 190); assert.equal(h.attributes.has(attr), true, 'rotation must use the new unoccluded layout height');
+  resize(390, 844, 430); assert.equal(h.attributes.has(attr), true, 'returning to portrait keeps the keyboard flag');
+  h.win.emit('pageshow'); h.viewport.emit('scroll'); h.flush();
+  assert.equal(h.attributes.has(attr), true);
+  resize(390, 844, 844); assert.equal(h.attributes.has(attr), false, 'hide while focus remains');
+  stop();
+});
+
+test('initial focused editor uses an independent layout height, but toolbar-sized gaps and non-editors do not', () => {
+  for (const editor of [{tagName: 'TEXTAREA'}, {tagName: 'INPUT', type: 'search'}, {tagName: 'DIV', isContentEditable: true}, {tagName: 'BUTTON'}]) {
+    for (const height of [430, 720, 844]) {
+      const h = environment(), attr = 'data-openbear-keyboard';
+      h.win.innerHeight = 844; h.viewport.height = height; h.win.document.activeElement = editor;
+      const stop = installMobileViewport({window: h.win});
+      assert.equal(h.attributes.has(attr), height === 430 && editor.tagName !== 'BUTTON');
+      stop(); assert.equal(h.attributes.size, 0);
+    }
+  }
+});
+
+test('current focused layout height is not retained as a stale baseline after rotation settles', () => {
+  const h = environment(), attr = 'data-openbear-keyboard';
+  h.win.innerHeight = h.viewport.height = 844;
+  const stop = installMobileViewport({window: h.win});
+  h.win.document.activeElement = {tagName: 'TEXTAREA'};
+  h.viewport.height = 430; h.viewport.emit('resize'); h.flush();
+  assert.equal(h.attributes.has(attr), true);
+  // The visual viewport can report its new orientation before innerHeight.
+  h.win.innerWidth = h.viewport.width = 844; h.viewport.height = 190;
+  h.win.emit('orientationchange'); h.flush();
+  assert.equal(h.attributes.has(attr), true);
+  h.win.innerHeight = 390; h.viewport.height = 390;
+  h.win.emit('resize'); h.flush();
+  assert.equal(h.attributes.has(attr), false, 'settled landscape with no keyboard must not keep the old portrait layout height');
+  stop();
+});
+
+test('sampled height fallback retains keyboard cycles when innerHeight also shrinks, with or without VisualViewport', () => {
+  for (const visual of [true, false]) {
+    const h = environment({visual}), attr = 'data-openbear-keyboard';
+    const stop = installMobileViewport({window: h.win});
+    const resize = (width, height) => {
+      Object.assign(h.win, {innerWidth: width, innerHeight: height});
+      if (h.viewport) Object.assign(h.viewport, {width, height});
+      h.win.emit('resize'); h.flush();
+    };
+    h.win.document.activeElement = {tagName: 'TEXTAREA'};
+    resize(390, 430); assert.equal(h.attributes.has(attr), true);
+    resize(390, 800); assert.equal(h.attributes.has(attr), false, 'hide without blur');
+    resize(844, 390); assert.equal(h.attributes.has(attr), false, 'old portrait baseline cannot imply a landscape keyboard');
+    resize(844, 190); assert.equal(h.attributes.has(attr), true, 'sampled landscape height supports the next opening');
+    h.win.document.activeElement = null; h.win.document.emit('focusout'); h.flush();
+    assert.equal(h.attributes.has(attr), false);
+    stop();
+  }
+});
+
+test('focused keyboard state preserves pinch behavior and desktop/teardown remove attributes and focus listeners', () => {
+  const h = environment(), attr = 'data-openbear-keyboard';
+  const stop = installMobileViewport({window: h.win});
+  h.win.document.activeElement = {tagName: 'INPUT', type: 'text'};
+  const beforeZoom = h.writes.length;
+  Object.assign(h.viewport, {width: 195, height: 220, scale: 2});
+  h.viewport.emit('resize'); h.flush();
+  assert.equal(h.writes.length, beforeZoom); assert.equal(h.attributes.has(attr), false);
+  Object.assign(h.viewport, {width: 390, height: 430, scale: 1});
+  h.viewport.emit('resize'); h.flush(); assert.equal(h.attributes.has(attr), true);
+  const beforePan = h.writes.length;
+  h.viewport.scale = 2; h.viewport.emit('scroll'); h.flush();
+  assert.equal(h.writes.length, beforePan);
+  h.viewport.scale = 1; h.viewport.height = 800; h.viewport.emit('resize'); h.flush();
+  assert.equal(h.attributes.has(attr), false);
+  h.viewport.height = 430; h.viewport.emit('resize'); h.flush();
+  assert.equal(h.attributes.has(attr), true);
+  h.media.matches = false; h.media.emit('change'); h.flush();
+  assert.equal(h.attributes.size, 0); assert.equal(h.styles.size, 0);
+  h.media.matches = true; h.media.emit('change'); h.flush();
+  assert.equal(h.attributes.has(attr), true, 're-entering mobile with an already-focused editor uses the current layout height');
+  h.win.document.emit('focusin'); assert.equal(h.frames.size, 1);
+  stop(); stop(); assert.equal(h.frames.size, 0); assert.equal(h.attributes.size, 0);
+  assert.equal(h.win.document.count() + h.win.count() + h.viewport.count() + h.media.count() + h.standalone.count(), 0);
 });
 
 test('fallback without VisualViewport, desktop transition and teardown restore previous values/priorities exactly', () => {

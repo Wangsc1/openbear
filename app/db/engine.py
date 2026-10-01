@@ -12,9 +12,8 @@ from app.db.agent_continuity_migration import migrate_agent_continuity
 from app.db.connection_router import SQLiteConnectionRouter
 from app.db.reference_schema import reference_schema
 from app.db.schema_migrations import (
-    backfill_web_operation_terminal_times,
     dedupe_active_rath_agent_sessions,
-    reconcile_web_operation_snapshot_frames,
+    migrate_web_operation_history,
     remove_removed_tools_from_agent_allowlists,
 )
 from app.logging import get_logger
@@ -52,10 +51,9 @@ class DB:
         await self._conn.executescript(_SCHEMA)
         await self._conn.executescript(reference_schema())
         await self._remove_structural_memory_categories()
-        backfilled_terminal_times = await backfill_web_operation_terminal_times(self._conn)
+        backfilled_terminal_times, repaired_web_frames = await migrate_web_operation_history(self._conn)
         if backfilled_terminal_times:
             log.info("已固化历史 Web Operation 首次终结时间", 数量=backfilled_terminal_times)
-        repaired_web_frames = await reconcile_web_operation_snapshot_frames(self._conn)
         if repaired_web_frames:
             log.info("已补齐历史 Web Operation 快照帧", 数量=repaired_web_frames)
         await self._migrate_rath_schema()

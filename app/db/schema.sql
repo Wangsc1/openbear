@@ -1,3 +1,9 @@
+-- Completed data migrations are recorded with their repaired data, not on every boot.
+CREATE TABLE IF NOT EXISTS schema_data_migrations (
+  name       TEXT PRIMARY KEY,
+  applied_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
   chat_id                  INTEGER PRIMARY KEY,
   created_at               INTEGER,

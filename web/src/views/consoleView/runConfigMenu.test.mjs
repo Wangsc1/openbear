@@ -16,7 +16,7 @@ try {
   fs.writeFileSync(displayUrl, displaySource);
   display = await import(displayUrl.href);
 } finally { fs.rmSync(displayUrl, {force: true}); }
-const {fmtTokens, modelDefaultThinking, modelLabel, modelShortLabel, thinkingLabel} = display;
+const {fmtTokens, modelDefaultThinking, modelThinkingLevels, modelLabel, modelShortLabel, thinkingLabel} = display;
 
 const source = fs.readFileSync(new URL("./ConsoleComposer.vue", import.meta.url), "utf8");
 const {descriptor} = parse(source);
@@ -48,7 +48,7 @@ function harness(overrides = {}, tab = "main") {
   vm.runInContext(script, context);
   vm.runInContext(`runConfigTab.value = ${JSON.stringify(tab)}`, context);
   const bindings = proxyRefs(vm.runInContext(`({props, emit, runConfigTab, isAgentTab, contextDetailText, contextMeterStyle,
-    runConfigModelText, runConfigMetaText, runConfigStrategyText, runConfigThinkingBadge, runConfigStatusLabel, menuSelectedModel, menuThinkingLevels, menuSupportsThinking, menuThinkingLevel, menuDefaultThinking,
+    runConfigModelText, runConfigMetaText, runConfigMetaParts, runConfigStrategyText, runConfigThinkingBadge, runConfigStatusLabel, menuSelectedModel, menuThinkingLevels, menuSupportsThinking, menuThinkingLevel, menuDefaultThinking,
     agentFastTriState, fmtTokens, modelLabel, modelTags, modelFeatures, rolloverTriggerForModel, compactThinkingLabel, selectMenuModel, selectMenuThinking,
     activeModelDetail, modelDetailId, showModelFeature, clearModelDetail, runConfigPopoverVisible,
     runConfigContent, runConfigSearchInput, runConfigCompact, runConfigSettingsOpen, runConfigSettingsSummary, toggleRunConfigSettings, finishRunConfigSearch})`, context));
@@ -108,7 +108,7 @@ test("main thinking labels stay compact while events retain raw metadata values,
   assert.deepEqual(h.calls.shift(), ["update:modelQuery", "sol"]);
 });
 
-test("Agent tab preserves independent model selection, model-default thinking and nullable Fast inheritance", async () => {
+test("Agent tab preserves independent model selection, main-following thinking and nullable Fast inheritance", async () => {
   const h = harness({agentModel: "", agentThinkLevel: "", agentFastMode: null}, "agent");
   const {html, buttons} = await h.render();
   assert.doesNotMatch(html, /72\.0%/); // Never present Controller usage as Agent usage.
@@ -118,7 +118,7 @@ test("Agent tab preserves independent model selection, model-default thinking an
   assert.deepEqual(h.calls.shift(), ["select-agent-model", ""]);
   buttons.find(node => hasClass(node, "model-select")).props.onClick(uiEvent({type: 'click'}));
   assert.deepEqual(h.calls.shift(), ["select-agent-model", "OpenAI/astra"]);
-  buttons.find(node => node.children === "默认").props.onClick();
+  buttons.find(node => node.children === "跟随" && !node.props["aria-label"]).props.onClick();
   assert.deepEqual(h.calls.shift(), ["select-agent-thinking", ""]);
   buttons.find(node => node.children === "高").props.onClick();
   assert.deepEqual(h.calls.shift(), ["select-agent-thinking", "high"]);
@@ -198,7 +198,9 @@ test('collapsed model button exposes the shared compression mode without losing 
   const button = html.match(/^<button[^>]*>/)[0];
   assert.match(button, /aria-label="运行配置"/);
   assert.match(button, /aria-description="上下文压缩：滑动窗口，思考强度：极高，Fast 模式已开启"/);
-  assert.match(html, /class="run-config-chip-meta">[^<]*xhigh · Fast · 216K \/ 300K</);
+  assert.match(html, /class="run-config-chip-meta"><!--\[--><span class="run-config-meta-part"><!--\[-->极高<!--\]--><\/span><span class="run-config-meta-part run-config-meta-fast" title="Fast 模式"><span data-icon="zap"><\/span><\/span><span class="run-config-meta-part"><!--\[-->216K \/ 300K<!--\]--><\/span><!--\]--><\/span>/);
+  assert.equal((html.match(/class="run-config-chip-meta"[\s\S]*?<\/span><\/span>/)?.[0].match(/Fast(?! 模式)/g) || []).length, 0, 'desktop metadata uses the icon instead of Fast text');
+  assert.equal(h.bindings.runConfigMetaText, '极高 · Fast · 216K / 300K');
   assert.match(html, /class="run-config-chip-status" aria-hidden="true"/);
   assert.doesNotMatch(html, /run-config-chip-status" role="img"/);
   assert.match(html, /class="run-config-status-thinking">极高</, 'thinking shows only the level, without an icon');
@@ -341,3 +343,155 @@ test("popup typography and surfaces are unified, and short viewports keep every 
   assert.match(css, /\.model-row-name[^}]*text-overflow: ellipsis/);
   assert.match(css, /\.thinking-segments[^}]*flex-wrap: wrap/);
 });
+
+test('Agent unset thinking is presented as following the main conversation, not the model default', async () => {
+  const h = harness({agentThinkLevel: '', agentEffectiveThinking: 'low', agentDefaultThinkingLabel: 'xhigh'}, 'agent');
+  const {html} = await h.render();
+  const tooltips = h.tooltips;
+  assert.match(html, />跟随</);
+  assert.match(html, /跟随：低/);
+  assert.doesNotMatch(html, /<button[^>]*>默认<\/button>/);
+  assert.ok(tooltips.includes('跟随主会话思考强度，当前为低'));
+  assert.match(h.bindings.runConfigSettingsSummary, /^思考 跟随/);
+});
+
+test('Agent manual thinking hint says it is not following the main conversation', async () => {
+  const h = harness({agentThinkLevel: 'low', agentEffectiveThinking: 'low'}, 'agent');
+  const {html} = await h.render();
+  assert.match(html, /未跟随主会话/);
+  assert.doesNotMatch(html, /跟随：/);
+});
+
+test('main tab keeps model-default wording for main thinking', async () => {
+  const h = harness({}, 'main');
+  const {html} = await h.render();
+  assert.match(html, /默认 极高/);
+  assert.doesNotMatch(html, /跟随主会话思考强度/);
+});
+
+const viewSource = fs.readFileSync(new URL('./ConsoleView.vue', import.meta.url), 'utf8');
+function viewSection(start, end) {
+  const from = viewSource.indexOf(start);
+  const to = viewSource.indexOf(end, from);
+  assert.ok(from >= 0 && to > from, `ConsoleView section: ${start}`);
+  return viewSource.slice(from, to);
+}
+
+// Exercise the real local defaults -> state rebuild -> computed props -> Composer path.
+// The stale state deliberately differs from local refs until reset assigns its new object.
+function localConfigHarness({mainLevels = ['off', 'low', 'medium', 'high'], agentLevels = ['low', 'medium']} = {}) {
+  const context = vm.createContext({
+    computed, ref, modelDefaultThinking, modelThinkingLevels, thinkingLabel,
+    props: {conversationUuid: 'local:new'}, isLocalConversation: ref(true),
+    chatState: ref({model: 'old/model', effectiveThinkingLevel: 'xhigh'}),
+    localModel: ref(''), localThinking: ref(''), localFast: ref(false),
+    localAgentModel: ref(''), localAgentThinking: ref(''), localAgentFast: ref(null),
+    localContextStrategy: ref('sliding_window'), DEFAULT_NEW_CONVERSATION_THINKING: 'high',
+    currentPrimaryModelKey: ref('test/main'), primaryModelKey: ref('test/main'),
+    modelOptions: ref([
+      {key: 'test/main', thinkingLevels: mainLevels, defaultThinkingLevel: mainLevels.length ? 'high' : ''},
+      {key: 'test/agent', thinkingLevels: agentLevels, defaultThinkingLevel: agentLevels.length ? 'low' : ''},
+    ]),
+    pinnedActiveTurnIndex: null, readingAnchor: null, activeTurnIndex: ref(0),
+    messages: ref([]), lastStats: ref(null), running: ref(false), foregroundRunning: ref(false),
+    rootTurnRunning: ref(false), runStartedAt: ref(0), status: ref(''),
+    closeWs() {}, clearUiCaches() {}, resetOperationStore() {}, clearActiveRun() {},
+    normalizeLedgerUsageBaseline: value => value,
+  });
+  vm.runInContext([
+    'const displayedRunConfig = computed(() => chatState.value);',
+    viewSection('const currentModel = computed(', 'const agentFastSupported = computed('),
+    viewSection('function primaryModelInfo()', 'async function loadLocalRunDefaults('),
+    viewSection('function resetLocalConversationState(', 'function detailKey('),
+    viewSection('function buildLocalAgentRunConfig(', 'async function saveAgentRunConfig('),
+  ].join('\n'), context);
+  return vm.runInContext(`({chatState, localThinking, effectiveThinking, agentModel, agentThinkLevel,
+    agentThinkLevels, agentSupportsThinking, agentEffectiveThinking, agentDefaultThinkingLabel,
+    applyLocalRunDefaults, resetLocalConversationState, buildLocalAgentRunConfig, completeLocalRunConfig})`, context);
+}
+
+function localAgentMenu(local) {
+  return harness({
+    agentModel: local.agentModel.value, agentThinkLevel: local.agentThinkLevel.value,
+    agentThinkLevels: local.agentThinkLevels.value, agentSupportsThinking: local.agentSupportsThinking.value,
+    agentEffectiveThinking: local.agentEffectiveThinking.value,
+    agentDefaultThinkingLabel: local.agentDefaultThinkingLabel.value,
+    effectiveThinking: local.effectiveThinking.value,
+  }, 'agent');
+}
+
+for (const [name, defaults, capabilities, expected, source, label] of [
+  ['same model follows low instead of high default', {mainThinkingLevel: 'low'}, {}, 'low', 'main', '低'],
+  ['different model follows supported medium', {mainThinkingLevel: 'medium', agentModel: 'test/agent'}, {}, 'medium', 'main', '中'],
+  ['off remains a valid inherited value', {mainThinkingLevel: 'off'}, {}, 'off', 'main', '关闭'],
+  ['unsupported high falls back to Agent model default', {mainThinkingLevel: 'high', agentModel: 'test/agent'}, {}, 'low', 'model_default', '低'],
+  ['unsupported off also falls back to Agent model default', {mainThinkingLevel: 'off', agentModel: 'test/agent'}, {}, 'low', 'model_default', '低'],
+  ['Agent with no thinking capability uses off', {mainThinkingLevel: 'high', agentModel: 'test/agent'}, {agentLevels: []}, 'off', 'model_default', '关闭'],
+  ['main with no thinking capability supplies off', {mainThinkingLevel: 'high', agentModel: 'test/agent'}, {mainLevels: [], agentLevels: ['off', 'low']}, 'off', 'main', '关闭'],
+  ['unset main thinking uses its effective model default', {agentModel: 'test/agent'}, {agentLevels: ['low', 'high']}, 'high', 'main', '高'],
+]) {
+  test(`local Agent preview: ${name}`, async () => {
+    const local = localConfigHarness(capabilities);
+    local.applyLocalRunDefaults(defaults);
+    assert.equal(local.effectiveThinking.value, 'xhigh', 'chatState has not been rebuilt yet');
+    local.resetLocalConversationState();
+    const config = local.chatState.value.agentRunConfig;
+    assert.equal(config.thinkLevel, '');
+    assert.equal(config.effective.thinkLevel, expected);
+    assert.equal(config.effective.source.thinkLevel, source);
+    assert.equal(local.completeLocalRunConfig().agentThinkLevel, '', 'preview never persists a resolved override');
+    const menu = localAgentMenu(local);
+    const {html} = await menu.render();
+    if (config.effective.supportsThinking) assert.ok(html.includes(`跟随：${label}`));
+    else assert.match(html, /未声明支持/);
+    assert.ok(menu.tooltips.includes(`跟随主会话思考强度，当前为${label}`));
+  });
+}
+
+test('local Agent preview preserves explicit thinking, including off', async () => {
+  for (const explicit of ['high', 'off']) {
+    const local = localConfigHarness();
+    local.applyLocalRunDefaults({mainThinkingLevel: 'low', agentThinkLevel: explicit});
+    local.resetLocalConversationState();
+    const config = local.chatState.value.agentRunConfig;
+    assert.equal(config.thinkLevel, explicit);
+    assert.equal(config.effective.thinkLevel, explicit);
+    assert.equal(config.effective.source.thinkLevel, 'conversation');
+    assert.match((await localAgentMenu(local).render()).html, /未跟随主会话/);
+  }
+});
+
+test('local Agent follows newly edited refs before chatState catches up, including a model switch', () => {
+  const local = localConfigHarness();
+  local.applyLocalRunDefaults({mainThinkingLevel: 'low'});
+  local.resetLocalConversationState();
+  local.applyLocalRunDefaults({mainThinkingLevel: 'off'});
+  assert.equal(local.effectiveThinking.value, 'low');
+  assert.equal(local.buildLocalAgentRunConfig().effective.thinkLevel, 'off');
+  local.resetLocalConversationState();
+  assert.equal(local.agentEffectiveThinking.value, 'off');
+  local.applyLocalRunDefaults({mainModel: 'test/agent', mainThinkingLevel: 'medium'});
+  assert.equal(local.effectiveThinking.value, 'off');
+  local.resetLocalConversationState();
+  assert.equal(local.agentEffectiveThinking.value, 'medium');
+  assert.equal(local.chatState.value.agentRunConfig.effective.model, 'test/agent');
+});
+
+for (const running of [false, true]) {
+  test(`selecting Agent follow confirms main conversation${running ? ' for next new Agent' : ''}`, async () => {
+    const notices = [];
+    const patches = [];
+    const context = vm.createContext({
+      running: ref(running), activeConversationUuid: ref('conversation'), isLocalConversation: ref(false),
+      runConfigSaves: {enqueue: async (_uuid, save) => {await save(); return {applied: true};}},
+      Api: {conversationSetAgentRunConfig: async (_uuid, patch) => patches.push(patch)},
+      isRunConfigInteractionCurrent: () => true,
+      ElMessage: {success: text => notices.push(text), error: error => {throw error;}},
+      apiError: error => error,
+    });
+    vm.runInContext(viewSection('async function saveAgentRunConfig(', 'async function selectAgentFast('), context);
+    await vm.runInContext('selectAgentThinking("")', context);
+    assert.equal(patches[0].thinkLevel, '');
+    assert.deepEqual(notices, [`Agent 思考已跟随主会话${running ? '，下一次新 Agent 生效' : ''}`]);
+  });
+}

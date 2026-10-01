@@ -569,6 +569,9 @@ async def test_web_operation_snapshot_frame_migration_repairs_revision_drift_onc
     await db.conn.commit()
     await db.close()
 
+    # This fixture represents a pre-marker database, not newly written data.
+    with sqlite3.connect(db_path) as legacy:
+        legacy.execute("DROP TABLE schema_data_migrations")
     repaired = DB(str(db_path))
     await repaired.connect()
     try:
@@ -628,6 +631,9 @@ async def test_web_operation_terminal_time_backfill_survives_frame_retention(tmp
     await db.conn.commit()
     await db.close()
 
+    # Legacy installs have no completed one-time history migration marker.
+    with sqlite3.connect(db_path) as legacy:
+        legacy.execute("DROP TABLE schema_data_migrations")
     migrated = DB(str(db_path))
     await migrated.connect()
     cur = await migrated.conn.execute(

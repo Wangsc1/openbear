@@ -162,7 +162,14 @@ async def execute_attempt(
             raise
     partial = logical_partial if logical_partial is not None else AgentResult()
     started = time.monotonic()
-    first_reasoning: float | None = None
+    reasoning_started: float | None = None
+
+    def finish_reasoning(now: float) -> None:
+        nonlocal reasoning_started
+        if reasoning_started is not None:
+            outcome.reasoning_ms += max(1, int((now - reasoning_started) * 1000))
+            reasoning_started = None
+
     callback_failure: BaseException | None = None
     cancelled: asyncio.CancelledError | None = None
     events = None
@@ -186,19 +193,26 @@ async def execute_attempt(
                 elif event.kind == "content":
                     if event.text:
                         outcome.first_token_ms = outcome.first_token_ms or max(1, int((now-started)*1000))
-                        if first_reasoning is not None and not outcome.reasoning_ms:
-                            outcome.reasoning_ms = max(1, int((now-first_reasoning)*1000))
+                        finish_reasoning(now)
                     result.text += event.text
                     partial.text += event.text
                 elif event.kind == "reasoning":
                     if event.text:
-                        first_reasoning = first_reasoning or now
+                        if reasoning_started is None:
+                            reasoning_started = now
                         outcome.first_token_ms = outcome.first_token_ms or max(1, int((now-started)*1000))
                     result.reasoning += event.text
                     partial.reasoning += event.text
                     if event.signature:
                         result.signature = event.signature
+                elif event.kind == "tool_input":
+                    # A tool item starts the parameter phase even before its
+                    # first argument byte. Only actual bytes prove first output.
+                    finish_reasoning(now)
+                    if event.details.get("receivedBytes", 0) > 0:
+                        outcome.first_token_ms = outcome.first_token_ms or max(1, int((now-started)*1000))
                 elif event.kind == "tool_call":
+                    finish_reasoning(now)
                     outcome.first_token_ms = outcome.first_token_ms or max(1, int((now-started)*1000))
                     result.tool_calls = copy.deepcopy(event.tool_calls or [])
                     partial.tool_calls = copy.deepcopy(result.tool_calls)
@@ -284,8 +298,7 @@ async def execute_attempt(
             raise
         finally:
             outcome.total_time_ms = max(0, int((time.monotonic()-started)*1000))
-            if first_reasoning is not None and not outcome.reasoning_ms:
-                outcome.reasoning_ms = max(1, int((time.monotonic()-first_reasoning)*1000))
+            finish_reasoning(time.monotonic())
             if settle is not None:
                 if cancelled is not None:
                     await _cancel_settle(settle, outcome, cancel_settle_timeout_s)

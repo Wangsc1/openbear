@@ -25,7 +25,12 @@ from app.runtime.lifecycle import RunSession, ObserverProxy
 from app.runtime.tool_result import ToolOutcome
 from app.context.window import source_of
 from app.agent.tool_call_hooks import normalize_tool_calls
-from app.agent.transcript_repair import MISSING_TOOL_RESULT_TEXT, repair_role_alternation
+from app.agent.transcript_repair import (
+    MISSING_TOOL_RESULT_TEXT,
+    is_role_alternation_bridge,
+    is_role_alternation_bridge_prefix,
+    repair_role_alternation,
+)
 from app.context.request_view import expanded_request_view
 from app.context.runtime import WindowRuntime
 from app.context.store import ControllerMessagesAppended, StaleWindow, merge_controller_additions
@@ -689,26 +694,58 @@ class Agent:
                 async def started(outcome):
                     nonlocal attempts_started, encrypted_reasoning_text
                     encrypted_reasoning_text = ""
+                    model_start = getattr(renderer, "on_model_start", None)
+                    if callable(model_start):
+                        await model_start(retry=bool(attempts_started))
                     if attempts_started:
                         result.model_retry += 1
                     attempts_started += 1
                     result.model_calls += 1
 
+                async def finish_bridge_preview(*, allow_marker=False):
+                    nonlocal full_text, signature, native_output_items, native_round_replayable, open_rendered
+                    if is_role_alternation_bridge(full_text) and not allow_marker:
+                        log.warning("模型只复述了协议桥接标记，按空响应处理", 轮次=round_no)
+                        full_text = ""
+                        # Never replay an opaque turn whose readable answer was
+                        # rejected. Do not partially rewrite provider-owned items.
+                        native_output_items = []
+                        signature = ""
+                        native_round_replayable = False
+                    elif is_role_alternation_bridge_prefix(full_text):
+                        # A short literal prefix (e.g. '[') or a tool preface is
+                        # ordinary content once this response has ended.
+                        open_rendered = True
+                        await renderer.on_delta(full_text, _reasoning_for_display())
+
                 async def observe(event, partial, outcome):
                     nonlocal full_text, reasoning_text, open_rendered, encrypted_reasoning_text, tool_input_active
                     full_text, reasoning_text = partial.text, partial.reasoning
+                    new_output = bool(event.text) and (
+                        event.kind in {"content", "reasoning"}
+                        or event.kind == "encrypted_reasoning" and event.text != encrypted_reasoning_text
+                    )
                     if event.kind == "encrypted_reasoning":
                         encrypted_reasoning_text = event.text
-                    if event.kind in {"content", "reasoning", "tool_call"} and not result.first_token_ms:
+                    if (event.kind in {"content", "reasoning", "tool_call"}
+                            or event.kind == "tool_input" and event.details.get("receivedBytes", 0) > 0) and not result.first_token_ms:
                         result.first_token_ms = max(1, int((time.monotonic() - t0) * 1000))
+                    if new_output and tool_input_active and input_progress is not None:
+                        await input_progress(None)
+                        tool_input_active = False
                     if event.kind == "tool_input" and input_progress is not None:
                         tool_input_active = True
                         await input_progress({**event.details, "attemptId": outcome.attempt_id})
-                    if event.kind == "content":
+                    # Hold only this short possible marker, not ordinary text.
+                    # Final-only filtering is too late: streaming or a steering
+                    # cut could already have persisted it in the visible timeline.
+                    display_text = "" if is_role_alternation_bridge_prefix(full_text) else full_text
+                    display_reasoning = _reasoning_for_display()
+                    if event.kind == "content" and (display_text or display_reasoning):
                         open_rendered = True
-                        await renderer.on_delta(full_text, _reasoning_for_display())
-                    elif event.kind in {"reasoning", "encrypted_reasoning"} and _reasoning_for_display():
-                        await renderer.on_delta(full_text, _reasoning_for_display())
+                        await renderer.on_delta(display_text, display_reasoning)
+                    elif new_output and event.kind in {"reasoning", "encrypted_reasoning"} and display_reasoning:
+                        await renderer.on_delta(display_text, display_reasoning)
 
                 async def settle(outcome):
                     nonlocal tool_input_active
@@ -789,6 +826,7 @@ class Agent:
                         control_check=retry_control_check, on_start=started,
                     )
                 except RetryCancelledError:
+                    await finish_bridge_preview()
                     result.model_fail += 1
                     result.halted_reason = "retry_cancelled"
                     result.total_time_ms = int((time.monotonic() - t0) * 1000)
@@ -800,6 +838,7 @@ class Agent:
                     await renderer.finalize_notice("（已取消模型重试；之前完成的内容已保留）")
                     return RuntimeDecision.complete(result)
                 except OpenBearLLMError as error:
+                    await finish_bridge_preview()
                     result.model_fail += 1
                     if full_text.strip():
                         await _persist_assistant(content=full_text, reasoning=reasoning_text,
@@ -814,6 +853,7 @@ class Agent:
                 pending, finish = current.tool_calls, current.finish_reason
                 native_output_items = current.native_output_items
                 native_round_replayable = response.native_replayable
+                await finish_bridge_preview(allow_marker=finish == "tool_calls" and bool(pending))
                 if response.recovered_tool_calls:
                     result.model_retry += 1
                 result.reasoning += reasoning_text

@@ -502,6 +502,11 @@ class _WebStreamRenderer:
         self._last_delta_size = 0
         self._last_delta_persist_ms = 0
         self._tool_turns: dict[str, str] = {}
+        # The loop supplies cumulative snapshots. Keep completed display phases
+        # intact and show only their new suffix after a phase/retry boundary.
+        self._output_phase = ""
+        self._snapshot_text = self._snapshot_reasoning = ""
+        self._text_prefix = self._reasoning_prefix = ""
 
     @staticmethod
     def _delta_size(event: dict[str, Any]) -> int:
@@ -649,9 +654,27 @@ class _WebStreamRenderer:
     async def on_status(self, status: str) -> None:
         await self.emit({"type": "status", "status": status})
 
+    async def on_model_start(self, *, retry: bool = False) -> None:
+        await self._finish_output_phase()
+        if not retry:
+            self._snapshot_text = self._snapshot_reasoning = ""
+            self._text_prefix = self._reasoning_prefix = ""
+
+    async def _finish_output_phase(self) -> None:
+        if self._output_phase in {"reasoning", "content"}:
+            await self.cut()
+        self._output_phase = ""
+
+    @staticmethod
+    def _unshown_suffix(snapshot: str, prefix: str) -> str:
+        return snapshot[len(prefix):] if snapshot.startswith(prefix) else snapshot
+
     async def on_model_output_progress(self, progress: dict[str, Any] | None) -> None:
         if self.live is not None and self.live.status != "running":
             return  # An external stop has already closed this run; never reopen its status.
+        if progress and self._output_phase != "tool_input":
+            await self._finish_output_phase()
+            self._output_phase = "tool_input"
         await self.emit({
             "type": "status",
             "status": tool_input_status(progress) if progress else "模型参数输出已结束",
@@ -659,6 +682,8 @@ class _WebStreamRenderer:
         })
 
     async def on_retry_state(self, state: dict[str, Any]) -> None:
+        if state.get("active"):
+            await self._finish_output_phase()
         await self.emit({"type": "retry_wait", "retry": dict(state)})
 
     async def on_tool(self, tool_line: str) -> None:
@@ -758,7 +783,17 @@ class _WebStreamRenderer:
     async def on_delta(self, full_text: str, reasoning: str = "") -> None:
         if self._closed:
             return
-        event = {"type": "delta", "text": full_text, "reasoning": reasoning}
+        phase = ("content" if full_text != self._snapshot_text else
+                 "reasoning" if reasoning != self._snapshot_reasoning else self._output_phase)
+        if phase and phase != self._output_phase:
+            await self._finish_output_phase()
+        self._output_phase = phase
+        self._snapshot_text, self._snapshot_reasoning = full_text, reasoning
+        event = {
+            "type": "delta",
+            "text": self._unshown_suffix(full_text, self._text_prefix),
+            "reasoning": self._unshown_suffix(reasoning, self._reasoning_prefix),
+        }
         self._pending_delta = event
         now_ms = int(time.monotonic() * 1000)
         size = self._delta_size(event)
@@ -774,7 +809,11 @@ class _WebStreamRenderer:
             await self._flush_delta()
 
     async def finalize(self, full_text: str, reasoning: str = "") -> None:
-        await self.emit({"type": "final", "text": full_text, "reasoning": reasoning, "footer": self._footer})
+        await self.emit({
+            "type": "final", "text": self._unshown_suffix(full_text, self._text_prefix),
+            "reasoning": self._unshown_suffix(reasoning, self._reasoning_prefix), "footer": self._footer,
+        })
+        self._output_phase = ""
 
     async def finalize_notice(self, note: str) -> None:
         await self.emit({"type": "notice", "text": note, "footer": self._footer})
@@ -786,7 +825,13 @@ class _WebStreamRenderer:
         self._footer = footer_html or ""
 
     async def cut(self) -> None:
-        await self.emit({"type": "cut"})
+        await self.emit({
+            "type": "cut",
+            "text": self._unshown_suffix(self._snapshot_text, self._text_prefix),
+            "reasoning": self._unshown_suffix(self._snapshot_reasoning, self._reasoning_prefix),
+        })
+        self._text_prefix, self._reasoning_prefix = self._snapshot_text, self._snapshot_reasoning
+        self._output_phase = ""
 
 
 class _WebDBPersister:

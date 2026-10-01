@@ -6,7 +6,7 @@ import {register} from 'node:module';
 import {compileScript, compileStyle, compileTemplate, parse} from '@vue/compiler-sfc';
 import {createRenderer, h, nextTick, reactive, ref} from 'vue';
 import {conversationTimelineEntries} from './conversationTimeline.js';
-import {projectOperationMessages} from '../../timelineProjection.js';
+import {deriveOperationRunState, projectOperationMessages, reduceOperationFrame, withTransientIdleThinking} from '../../timelineProjection.js';
 import {contextMeter, conversationWorkChunks, isInlineProcess, lastAnswerIndex, reasoningDuration, workDurationLabel, WORK_MOTION} from './conversationWork.js';
 
 // Execute the real Vue components in memory, without a browser/layout engine.
@@ -200,6 +200,43 @@ test('real TurnList displays streaming tool-input activity and restores dots whe
   await nextTick();
   assert.equal(find(root,'model-output-progress'),undefined);
   assert.ok(find(root,'thinking-dots'));
+});
+
+test('phase-end frames stop reasoning while parameter activity runs and survive snapshot reload', async t => {
+  const now=Date.now();
+  const run={opId:'run:r',opType:'run',turnUuid:'phase-turn',runRootTurnId:'phase-turn',displaySeq:1,lifecycle:'active',status:'running',createdAtMs:now-3000,payload:{}};
+  const thought={opId:'reasoning:phase-turn:0',opType:'reasoning',turnUuid:'phase-turn',displaySeq:2,revision:1,lifecycle:'active',status:'running',createdAtMs:now-3000,updatedAtMs:now-2000,payload:{text:'完整的旧思考',complete:false}};
+  const ended=reduceOperationFrame(thought,{opId:thought.opId,opType:'reasoning',action:'end',revision:2,updatedAtMs:now-1000,payload:{complete:true,segmentBoundary:true}});
+  const status={opId:'status:r',opType:'status',turnUuid:'phase-turn',runRootTurnId:'phase-turn',displaySeq:3,lifecycle:'active',status:'running',payload:{modelOutput:{toolNames:['Write'],receivedBytes:12010,startedAtMs:now-1000,updatedAtMs:now,elapsedMs:1000,phase:'generating'}}};
+  const show = ops => {
+    const state=deriveOperationRunState(ops);
+    const events=projectOperationMessages(ops).flatMap(m=>m.localTimeline||[]);
+    return withTransientIdleThinking([{id:'phase-turn',turnUuid:'phase-turn',events}],state,{modelOutput:state.modelOutput});
+  };
+  const props=reactive({turns:show([run,ended,status]),running:true,detailKey:()=>'',isDetailOpen:()=>false,activeToolResultIndex:()=>0});
+  const root=mount(t,'TurnList.vue',props);
+  assert.match(text(root),/正在生成文件内容/);
+  assert.match(text(root),/持续了 2 秒/);
+  assert.doesNotMatch(text(root),/正在思考/);
+  assert.equal(find(root,'reasoning-preview'),undefined);
+  assert.equal(props.turns[0].events.find(e=>e.message?.reasoning).message.reasoning,'完整的旧思考');
+  props.turns=show(JSON.parse(JSON.stringify([run,ended,status])));
+  await nextTick();
+  assert.doesNotMatch(text(root),/正在思考/);
+  assert.equal(reasoningDuration(props.turns[0].events.find(e=>e.message?.reasoning)),2000);
+});
+
+test('retry keeps completed thought before retry and new active thought after it', () => {
+  const ops=[
+    {opId:'reasoning:retry-phase:0',opType:'reasoning',turnUuid:'retry-phase',displaySeq:1,lifecycle:'terminal',status:'completed',createdAtMs:1000,updatedAtMs:2000,payload:{text:'旧思考',complete:true}},
+    {opId:'retry:1',opType:'model_retry',turnUuid:'retry-phase',displaySeq:2,createdAtMs:2000,payload:{active:false,status:'resumed'}},
+    {opId:'reasoning:retry-phase:1',opType:'reasoning',turnUuid:'retry-phase',displaySeq:3,lifecycle:'active',status:'running',createdAtMs:3000,payload:{text:'新思考',complete:false}},
+  ];
+  const events=projectOperationMessages(ops).flatMap(m=>m.localTimeline||[]);
+  assert.deepEqual(events.map(e=>e.kind),['answer','model_retry','answer']);
+  assert.equal(events[0].reasoningActive,false);
+  assert.equal(events[2].reasoningActive,true);
+  assert.equal(events[2].message.reasoning,'新思考');
 });
 
 test('new tool disclosure defers detail rendering and preserves complete existing result and native detail behavior', async t => {
@@ -601,13 +638,13 @@ test('disclosure keeps content through the height/fade animation, restores readi
 
 test('small phone toolbar reserves separate tracks rather than hiding controls; reduced-motion and shared theme roles remain', () => {
   const composer=fs.readFileSync(new URL('./ConsoleComposer.vue',import.meta.url),'utf8');
-  assert.match(composer,/@media \(max-width: 360px\)[\s\S]*?grid-template-columns: minmax\(0, 1fr\) 44px/);
+  assert.match(composer,/@media \(max-width: 360px\)[\s\S]*?grid-template-columns: minmax\(0, 1fr\) 38px/);
   assert.match(composer,/\.composer-usage-summary \{ display: flex; flex-wrap: wrap/);
   assert.doesNotMatch(composer,/\.composer-box \{[^}]*margin-bottom: 32px/);
   assert.match(composer,/\.composer-toolbar \.send-button \{ grid-row: 2; grid-column: 2/);
-  // At 320px the shell (24), box padding/border (16) and send column (44)
-  // leave 236px for four 44px actions. Context has its own reserved row below.
-  assert.ok(320 - 40 - 44 >= 4 * 44);
+  // At 320px the shell (24), box padding/border (16) and send column (38)
+  // leave 242px for four 44px actions. Context has its own reserved row below.
+  assert.ok(320 - 40 - 38 >= 4 * 44);
   const css=fs.readFileSync(new URL('./conversationWork.css',import.meta.url),'utf8');
   assert.match(css,/--work-text: var\(--ob-text\)/);
   assert.match(css,/--work-panel: var\(--ob-surface\)/);

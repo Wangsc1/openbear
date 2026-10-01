@@ -1660,7 +1660,15 @@ function buildLocalAgentRunConfig(overrides = {}) {
 	const info = modelOptions.value.find((m) => m.key === effectiveModel) || null;
 	const levels = Array.isArray(info?.thinkingLevels) ? info.thinkingLevels.filter(Boolean) : [];
 	const defaultThinking = modelDefaultThinking(info) || "";
-	const resolvedThink = thinkLevel && levels.includes(thinkLevel) ? thinkLevel : (defaultThinking || "off");
+	// Local refs are updated before resetLocalConversationState replaces chatState.
+	// Do not inherit effectiveThinking here: it can still describe the previous state.
+	const mainInfo = currentModelInfo.value;
+	const mainLevels = modelThinkingLevels(mainInfo);
+	const mainThinking = mainLevels.includes(localThinking.value)
+		? localThinking.value : (modelDefaultThinking(mainInfo) || "off");
+	const requestedThink = thinkLevel || mainThinking;
+	const supportedThink = levels.includes(requestedThink);
+	const resolvedThink = supportedThink ? requestedThink : (defaultThinking || "off");
 	const supportsFast = Boolean(info?.supportsFast);
 	const resolvedFast = fastMode === true ? supportsFast : (fastMode === false ? false : Boolean(currentFast.value && supportsFast));
 	return {
@@ -1677,7 +1685,7 @@ function buildLocalAgentRunConfig(overrides = {}) {
 			supportsThinking: levels.length > 0,
 			source: {
 				model: model ? "conversation" : "main",
-				thinkLevel: thinkLevel ? "conversation" : "model_default",
+				thinkLevel: supportedThink ? (thinkLevel ? "conversation" : "main") : "model_default",
 				fastMode: fastMode === true || fastMode === false ? "conversation" : "main",
 			},
 		},
@@ -1717,7 +1725,7 @@ async function selectAgentModel(modelKey) {
 }
 
 async function selectAgentThinking(level) {
-	await saveAgentRunConfig({thinkLevel: level || ""}, level ? `Agent 思考已设为 ${level}` : "Agent 思考已跟随模型默认");
+	await saveAgentRunConfig({thinkLevel: level || ""}, level ? `Agent 思考已设为 ${level}` : "Agent 思考已跟随主会话");
 }
 
 async function selectAgentFast(mode) {

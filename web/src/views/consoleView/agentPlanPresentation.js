@@ -789,6 +789,22 @@ export function compactAgentStepActivityLines(events = [], options = {}) {
     if (finish) modelState = null;
   };
 
+  const endModel = (item, statusText, {finish = true, failed = true} = {}) => {
+    if (!failed && modelState?.settled) {
+      if (finish) modelState = null;
+      return; // A later boundary must not hide an already recorded interruption.
+    }
+    const previousDetail = object(output[modelState?.index]?.detail);
+    const endedItem = {...item, detail: {...object(item.detail), reason: item.detail?.reason || previousDetail.reason}};
+    updateModel(endedItem, (label) => ({
+      message: `模型调用：${label} · ${statusText}`,
+      description: compactDuration(item.detail?.durationMs),
+      status: failed ? "failed" : "ended",
+      statusText,
+    }), failed ? "danger" : "muted", {finish});
+    if (modelState) modelState.settled = true;
+  };
+
   for (const item of [...array(events)].sort((left, right) => number(left?.seq) - number(right?.seq))) {
     const kind = text(item?.kind || item?.type);
     const detail = object(item?.detail);
@@ -815,9 +831,36 @@ export function compactAgentStepActivityLines(events = [], options = {}) {
       continue;
     }
 
+    if (["task_completed", "task_failed", "task_cancelled", "task_interrupted"].includes(kind)) {
+      if (modelState) {
+        // A task terminal event also closes older histories without an explicit
+        // model end. Task completion alone does not prove model success.
+        const statusText = {
+          task_completed: "调用已结束（未记录模型结果）",
+          task_failed: "任务失败，调用已结束 ×",
+          task_cancelled: "调用已取消 ×",
+          task_interrupted: "调用已中断 ×",
+        }[kind];
+        endModel(item, statusText, {failed: kind !== "task_completed"});
+      }
+      output.push(item);
+      continue;
+    }
+
+    if (kind === "model_stream_interrupted") {
+      endModel(item, detail.status === "cancelled" ? "调用已取消 ×" : "模型流已中断 ×", {finish: false});
+      continue;
+    }
+
+    if (kind === "model_stream_recovered_tool_calls") {
+      endModel(item, "模型流已中断，完整工具调用已恢复");
+      continue;
+    }
+
     if (kind === "model_call_started") {
       const retry = retryPosition(item);
       if (!modelState || !retry.attempt) {
+        if (modelState) endModel(item, "调用已结束（未记录模型结果）", {failed: false});
         const label = text(detail.modelLabel || detail.model, fallbackModelLabel);
         const index = output.length;
         output.push(compactLine(
@@ -830,6 +873,7 @@ export function compactAgentStepActivityLines(events = [], options = {}) {
       } else {
         modelState.attempt = retry.attempt;
         modelState.maximum = retry.maximum;
+        modelState.settled = false;
         const description = `重试 ${retry.attempt}/${retry.maximum}${modelState.retrySummary ? ` · ${modelState.retrySummary}` : ""}`;
         const statusText = "正在重试 ×";
         output[modelState.index] = compactLine(
@@ -850,6 +894,17 @@ export function compactAgentStepActivityLines(events = [], options = {}) {
     }
 
     if (["model_call_retry", "model_call_retry_wait", "model_call_retry_resumed"].includes(kind)) {
+      const retryState = object(detail.retry);
+      if (kind === "model_call_retry_resumed" && retryState.terminal
+          && ["completed", "failed", "cancelled"].includes(retryState.status)) {
+        // This closes retry metadata AFTER physical settlement; it is not a
+        // fresh retry. Keep an interrupted row available for recovery/retry,
+        // and never create a phantom row after model_call_finished.
+        if (modelState && retryState.status !== "completed") {
+          endModel(item, retryState.status === "cancelled" ? "调用已取消 ×" : "模型流已中断 ×", {finish: false});
+        }
+        continue;
+      }
       const retry = retryPosition(item);
       const retrySummary = text(detail.retry?.summary || detail.summary, "");
       updateModel(
@@ -866,6 +921,7 @@ export function compactAgentStepActivityLines(events = [], options = {}) {
         "danger",
       );
       if (modelState) {
+        modelState.settled = false;
         modelState.attempt = retry.attempt || modelState.attempt;
         modelState.maximum = retry.maximum || modelState.maximum;
         if (retrySummary) modelState.retrySummary = retrySummary;
@@ -935,6 +991,9 @@ export function compactAgentStepActivityLines(events = [], options = {}) {
     }
 
     if (kind === "tool_call_started") {
+      // Historical/truncated event streams may not include model settlement.
+      // Executing a tool proves generation ended, not that the request succeeded.
+      if (modelState) endModel(item, "调用已结束（未记录模型结果）", {failed: false});
       const name = text(item.toolName || detail.name, "Tool");
       const round = number(detail.round);
       const isPlanProgress = name === "AgentPlanProgress";
@@ -1027,6 +1086,21 @@ export function compactAgentStepActivityLines(events = [], options = {}) {
     output.push(item);
   }
 
+  // Only the still-active parameter row uses wall time. Historical rows are
+  // reduced at their recorded timestamps and never acquire a live clock.
+  if (modelState) {
+    const line = output[modelState.index];
+    const progress = line.detail?.toolInput;
+    if (line.modelStatus === "running" && progress) {
+      const input = modelOutputView(progress, options.nowMs ?? Date.now());
+      const statusText = `${input.label}${input.tools ? ` · ${input.tools}` : ''} · 已接收 ${input.bytes} · ${input.elapsed}`;
+      output[modelState.index] = {
+        ...line,
+        modelStatusText: statusText,
+        message: `模型调用：${line.modelLabel}${line.modelDescription ? ` · ${line.modelDescription}` : ""} · ${statusText}`,
+      };
+    }
+  }
   return output;
 }
 

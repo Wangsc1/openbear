@@ -46,6 +46,22 @@ MISSING_TOOL_RESULT_TEXT = (
 ROLE_ALTERNATION_BRIDGE_TEXT = "[protocol: role-alternation bridge]"
 
 
+def is_role_alternation_bridge(text: Any) -> bool:
+    """True when model output is only the request-local bridge marker.
+
+    The marker is inserted by OpenBear for strict role alternation. If a model
+    echoes it as its whole answer, treat it like an empty response rather than
+    a user-visible final answer.
+    """
+    return isinstance(text, str) and text.strip() == ROLE_ALTERNATION_BRIDGE_TEXT
+
+
+def is_role_alternation_bridge_prefix(text: str) -> bool:
+    """Hold a possible bridge echo until ordinary text or response end disambiguates it."""
+    stripped = text.strip()
+    return bool(stripped) and ROLE_ALTERNATION_BRIDGE_TEXT.startswith(stripped)
+
+
 def _tool_calls_of(msg: Message) -> list[dict]:
     """取出 assistant 消息里的 tool_calls 列表(可能是 ToolCall 对象或 dict)。"""
     tc = msg.get("tool_calls")
