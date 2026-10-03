@@ -26,7 +26,7 @@ function select() { open.value = false; visibility.startSelection(props.target);
     </label>
     <template v-else>
     <button v-if="!props.mobileSelectionOnly" type="button" class="visibility-more visibility-mobile-more" aria-label="更多消息操作" aria-haspopup="dialog" :disabled="busy" @click="visibility.openMobileMenu(props.target, props.turn)"><MoreFilled/></button>
-    <el-popover v-model:visible="open" trigger="click" placement="bottom-start" :width="164" :show-arrow="false" popper-class="visibility-action-popover">
+    <el-popover v-model:visible="open" :persistent="false" trigger="click" placement="bottom-start" :width="164" :show-arrow="false" popper-class="visibility-action-popover">
       <template #reference><button type="button" class="visibility-more visibility-desktop-more" aria-label="更多消息操作" :aria-expanded="open" :disabled="busy"><MoreFilled/></button></template>
       <div class="visibility-action-menu">
         <button type="button" @click="hide"><Hide/><span>隐藏这条内容</span></button>

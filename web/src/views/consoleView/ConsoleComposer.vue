@@ -270,6 +270,11 @@ const contextPercentNumber = computed(() => {
 	return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
 });
 const contextMeterStyle = computed(() => ({width: `${contextPercentNumber.value}%`}));
+const runConfigContextRingClass = computed(() => ({
+	'is-unknown': !Number.isFinite(Number.parseFloat(props.contextPercentDisplay)),
+	'is-warning': contextPercentNumber.value >= 85 && contextPercentNumber.value < 100,
+	'is-danger': contextPercentNumber.value >= 100,
+}));
 
 function rolloverTriggerForModel(model) {
 	const explicit = Number(model?.rolloverTriggerTokens || 0);
@@ -716,11 +721,73 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+	cancelStopShapePress();
 	if (interactionClockTimer) window.clearInterval(interactionClockTimer);
 	interactionClockTimer = null;
 	composerResizeObserver?.disconnect();
 	composerResizeObserver = null;
 });
+
+const STOP_BUTTON_SHAPE_KEY = 'openbear.console.stopButtonShape.v1';
+function readStopButtonShape() {
+	try { return window.localStorage.getItem(STOP_BUTTON_SHAPE_KEY) === 'circle' ? 'circle' : 'square'; }
+	catch { return 'square'; }
+}
+// Read before the first render; send and stop share the same persisted shape,
+// including the idle frame before the conversation's running state is restored.
+const stopButtonShape = ref(readStopButtonShape());
+let stopShapePress = null;
+let stopShapeTimer = null;
+let suppressStopClick = false;
+function toggleStopButtonShape() {
+	stopButtonShape.value = stopButtonShape.value === 'circle' ? 'square' : 'circle';
+	try { window.localStorage.setItem(STOP_BUTTON_SHAPE_KEY, stopButtonShape.value); } catch { /* Private-mode storage can be unavailable. */ }
+}
+function cancelStopShapePress() {
+	if (stopShapeTimer !== null) window.clearTimeout(stopShapeTimer);
+	stopShapeTimer = null;
+	stopShapePress = null;
+}
+function startStopShapePress(event) {
+	cancelStopShapePress();
+	suppressStopClick = false;
+	if (event.pointerType !== 'touch' || event.isPrimary === false || event.button > 0) return;
+	stopShapePress = {id: event.pointerId, x: event.clientX, y: event.clientY};
+	stopShapeTimer = window.setTimeout(() => {
+		stopShapeTimer = null;
+		if (!stopShapePress || suppressStopClick) return;
+		suppressStopClick = true;
+		toggleStopButtonShape();
+	}, 550);
+}
+function moveStopShapePress(event) {
+	if (!stopShapePress || stopShapePress.id !== event.pointerId) return;
+	if (Math.hypot(event.clientX - stopShapePress.x, event.clientY - stopShapePress.y) > 10) {
+		suppressStopClick = true;
+		cancelStopShapePress();
+	}
+}
+function endStopShapePress(event) {
+	if (stopShapePress && stopShapePress.id !== event.pointerId) return;
+	cancelStopShapePress();
+}
+function stopButtonContextMenu() {
+	// Some touch browsers dispatch contextmenu before or after our long-press
+	// timer. Whichever arrives first owns the single toggle, never a stop.
+	if (!suppressStopClick) toggleStopButtonShape();
+	suppressStopClick = true;
+	cancelStopShapePress();
+}
+function clickStopButton(event) {
+	if (suppressStopClick && (event.detail !== 0 || event.pointerType === 'touch')) {
+		suppressStopClick = false;
+		event.preventDefault();
+		return;
+	}
+	suppressStopClick = false;
+	emit('stop');
+}
+watch(() => [props.conversationUuid, props.running, Boolean(props.draft.trim())], cancelStopShapePress);
 
 function focusInteraction(interactionId) {
 	const pending = props.pendingConfirmations.find(item => item.confirmationId === interactionId);
@@ -986,7 +1053,7 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 											<span v-if="runConfigThinkingBadge" class="run-config-status-thinking">{{ runConfigThinkingBadge }}</span>
 											<span v-if="props.currentFast" class="run-config-status-fast"><ModelFeatureIcon name="zap"/></span>
 										</span>
-										<span v-if="runConfigMetaParts.length" class="run-config-chip-meta"><span v-for="part in runConfigMetaParts" :key="part.key" class="run-config-meta-part" :class="part.key === 'fast' ? 'run-config-meta-fast' : ''" :title="part.key === 'fast' ? 'Fast 模式' : undefined"><ModelFeatureIcon v-if="part.key === 'fast'" name="zap"/><template v-else>{{ part.text }}</template></span></span>
+										<span v-if="runConfigMetaParts.length" class="run-config-chip-meta"><span v-for="part in runConfigMetaParts" :key="part.key" class="run-config-meta-part" :class="part.key === 'fast' ? 'run-config-meta-fast' : ''" :title="part.key === 'fast' ? 'Fast 模式' : undefined"><ModelFeatureIcon v-if="part.key === 'fast'" name="zap"/><template v-else><svg v-if="part.key === 'context'" class="run-config-context-ring" :class="runConfigContextRingClass" viewBox="0 0 24 24" aria-hidden="true"><circle class="run-config-context-ring-track" cx="12" cy="12" r="9"/><circle class="run-config-context-ring-fill" cx="12" cy="12" r="9" pathLength="100" :stroke-dasharray="`${contextPercentNumber} 100`"/></svg>{{ part.text }}</template></span></span>
 									</span>
 									<span class="run-config-chip-strategy" :aria-label="`上下文压缩：${runConfigStrategyText}`">{{ props.contextStrategy === 'model_summary' ? '摘要压缩' : '滑窗压缩' }}</span>
 									<ArrowDown class="chip-caret"/>
@@ -1095,13 +1162,13 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 								</div>
 							</div>
 						</el-popover>
-						<el-tooltip v-if="props.running && !props.draft.trim()" content="停止生成" placement="top" :show-after="260">
-							<button type="button" class="send-button stop-button" aria-label="停止生成" @click="emit('stop')">
+						<el-tooltip v-if="props.running && !props.draft.trim()" content="停止生成（右键或长按切换按钮形状）" placement="top" :show-after="260">
+							<button type="button" class="send-button stop-button" :class="{'is-round': stopButtonShape === 'circle'}" aria-label="停止生成" aria-description="右键单击或长按切换方形与圆形，偏好保存在当前浏览器" @click="clickStopButton" @contextmenu.prevent="stopButtonContextMenu" @pointerdown="startStopShapePress" @pointermove="moveStopShapePress" @pointerup="endStopShapePress" @pointercancel="cancelStopShapePress" @pointerleave="cancelStopShapePress">
 								<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/></svg>
 							</button>
 						</el-tooltip>
 						<el-tooltip v-else content="发送消息（Enter；触屏可用 Ctrl/⌘+Enter）" placement="top" :show-after="260">
-							<button type="button" class="send-button" aria-label="发送消息（桌面 Enter；触屏 Ctrl 或 Command 加 Enter）" :disabled="!props.canSend"
+							<button type="button" class="send-button" :class="{'is-round': stopButtonShape === 'circle'}" aria-label="发送消息（桌面 Enter；触屏 Ctrl 或 Command 加 Enter）" :disabled="!props.canSend"
 							        @click="emit('send')">
 								<Promotion/>
 							</button>
@@ -2034,6 +2101,16 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 	color: var(--ob-text-muted);
 }
 
+/* Override Tailwind's block SVG reset so the ring stays beside the usage text. */
+.run-config-context-ring { display: inline-block; width: 12px; height: 12px; margin-right: 5px; vertical-align: -2px; transform: rotate(-90deg); }
+.run-config-context-ring-track, .run-config-context-ring-fill { fill: none; stroke: currentColor; stroke-width: 3; }
+.run-config-context-ring-track { opacity: .22; }
+.run-config-context-ring-fill { stroke-linecap: round; opacity: .85; transition: stroke-dasharray 250ms ease; }
+.run-config-context-ring.is-unknown .run-config-context-ring-track { stroke-dasharray: 3 3; }
+.run-config-context-ring.is-warning { color: var(--ob-warning); }
+.run-config-context-ring.is-danger { color: var(--ob-danger); }
+@media (prefers-reduced-motion: reduce) { .run-config-context-ring-fill { transition: none; } }
+
 .run-config-meta-fast .model-feature-icon {
 	width: 1.15em;
 	height: 1.15em;
@@ -2405,7 +2482,10 @@ button.status-chip:hover, .status-chip-active {
 .stop-button {
 	background: var(--ob-danger);
 	box-shadow: 0 8px 18px rgb(var(--ob-danger-rgb) / 0.18);
+	-webkit-touch-callout: none;
+	user-select: none;
 }
+.send-button.is-round { border-radius: 50%; }
 
 .send-button:disabled {
 	background: var(--ob-text-disabled);

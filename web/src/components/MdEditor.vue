@@ -10,6 +10,7 @@ const props = defineProps({
   modelValue: { type: String, default: "" },
   language: { type: String, default: "markdown" },
   square: { type: Boolean, default: false },
+  readOnly: { type: Boolean, default: false },
   // completionMode:
   // - memory: 记忆/文档正文编辑,补 @mem/@secret/@doc 引用
   // - template: 提示词模板编辑,补 [[变量/函数]] + @if/@each 等模板指令
@@ -314,6 +315,7 @@ onMounted(() => {
   registerCompletion();
   editor = monaco.editor.create(el.value, {
     value: props.modelValue,
+    readOnly: props.readOnly,
     language: props.language,
     theme: registerEditorTheme(),
     fontSize: 13,
@@ -341,6 +343,7 @@ onMounted(() => {
   stopFontSubscription = bindMobileEditorFontSize(editor);
   editor.onDidFocusEditorWidget(syncCompletionContext);
   editor.onDidChangeModelContent(() => {
+    if (props.readOnly) return;
     syncCompletionContext();
     suppress = true;
     emit("update:modelValue", editor.getValue());
@@ -361,6 +364,8 @@ onMounted(() => {
 });
 
 watch(() => [props.refData, props.completionMode], syncCompletionContext, { deep: true });
+
+watch(() => props.readOnly, readOnly => editor?.updateOptions({ readOnly }));
 
 watch(() => props.modelValue, (v) => {
   if (!suppress && editor && v !== editor.getValue()) editor.setValue(v || "");

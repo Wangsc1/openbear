@@ -264,6 +264,7 @@ class WebAdminConversationTreeMixin:
                           AND COALESCE(o.internal,0)=0
                           AND COALESCE(json_extract(o.payload_json,'$.internal'),0)=0
                           AND COALESCE(json_extract(o.payload_json,'$.hidden'),0)=0
+                          AND COALESCE(json_extract(o.payload_json,'$.eventTriggered'),0)=0
                           AND ((o.op_type='user_message' AND
                                 (LENGTH(TRIM(COALESCE(json_extract(o.payload_json,'$.text'),'')))>0
                                  OR COALESCE(json_array_length(o.payload_json,'$.attachments'),0)>0))

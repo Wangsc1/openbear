@@ -49,6 +49,8 @@ class WebAdminChatRunMixin:
         root_turn_uuid: str = "",
         user_op_id: str = "",
         reference_bundle_id: str = "",
+        webhook_assignment_id: str = "",
+        webhook_resume_message_id: int = 0,
     ) -> bool:
         messages = MessageDAO(self.db)
         user_saved = False
@@ -240,6 +242,9 @@ class WebAdminChatRunMixin:
 
             visible_user_text = (user_text or "").strip() or ("请根据我发送的附件内容回答。" if media else "")
             llm_text = build_llm_text_with_media(user_text, media or [])
+            if webhook_assignment_id:
+                from app.webhooks.runtime_bridge import PROVENANCE
+                llm_text = PROVENANCE + "\nTrusted assignmentId: " + webhook_assignment_id + "\n\n" + llm_text
             if background_control_payload:
                 llm_text += (
                     "\n\n<background-agent-control-context>\n"
@@ -257,6 +262,10 @@ class WebAdminChatRunMixin:
             # Public history and the current user stay clean. The private model
             # context retains trusted runtime-state messages across physical calls
             # and Web turns through the existing anchored sidecar.
+            if webhook_assignment_id and webhook_resume_message_id:
+                from app.context.window import source_of
+                history = [m for m in history if source_of(m).get('message_id') != webhook_resume_message_id
+                           and source_of(m).get('id') != f'message:{webhook_resume_message_id}']
             convo = history + [user_msg]
             task_memory_dao = TaskMemoryDAO(self.db)
             task_memory_epoch = task_memory_runtime_epoch(history)
@@ -289,6 +298,8 @@ class WebAdminChatRunMixin:
                     turn_uuid=root_turn_uuid, payloads=notification_items(payload), history=history,
                 )
                 user_message_id = 0
+            elif webhook_assignment_id and webhook_resume_message_id:
+                user_message_id = webhook_resume_message_id
             elif conversation_uuid:
                 user_message_id = await self._persist_web_transcript_message(
                     messages,
@@ -300,6 +311,7 @@ class WebAdminChatRunMixin:
                     run_root_turn_uuid=root_turn_uuid,
                     op_ids=[user_op_id] if user_op_id else None,
                     tokens=estimate_tokens(visible_user_text),
+                    binding_meta={"source": "webhook", "assignmentId": webhook_assignment_id} if webhook_assignment_id else None,
                 )
             else:
                 user_message_id = await messages.add(
@@ -308,10 +320,11 @@ class WebAdminChatRunMixin:
                     visible_user_text,
                     tokens=estimate_tokens(visible_user_text),
                 )
-            mark_source(user_msg, kind="notification" if task_notification else "human",
+            mark_source(user_msg, kind="webhook" if webhook_assignment_id else "notification" if task_notification else "human",
+                        assignment_id=webhook_assignment_id,
                         source_id=f"message:{user_message_id}", message_id=user_message_id,
                         turn_uuid=root_turn_uuid, run_root_turn_uuid=root_turn_uuid)
-            if not task_notification:
+            if not task_notification and not webhook_resume_message_id:
                 await messages.bump_user_turn(chat_id)
             user_saved = True
             if conversation:
@@ -941,6 +954,23 @@ class WebAdminChatRunMixin:
                 if renderer.live is not None:
                     await renderer.live.publish(event, persist=False)
 
+            runtime_tool_context = ToolRuntimeContext(
+                chat_id=chat_id, session_uuid=session_id, conversation_uuid=conversation_uuid,
+                source="webhook" if webhook_assignment_id else "web", turn_uuid=root_turn_uuid,
+                run_root_turn_uuid=root_turn_uuid,
+                soft_stop_check=(lambda: self.control_actions.consume_soft_stop(chat_id)) if self.control_actions is not None else None,
+                task_notification=_task_notification_cb, conversation_event=_conversation_event_cb,
+                web_confirm=lambda payload: self._web_confirm(conversation_uuid, payload), agent_wait=_agent_wait,
+                webhook_assignment_id=webhook_assignment_id,
+                webhook_owner_id=int((conversation or {}).get("owner_chat_id") or 0),
+                webhook_automatic=bool(webhook_assignment_id),
+            )
+            webhook_service = getattr(self, "webhooks", None)
+            if webhook_service is not None and webhook_service.bridge is not None:
+                await webhook_service.bridge.bind_context(runtime_tool_context, model_config={
+                    "model": model_label, "thinkingLevel": think_level, "fast": run_fast_mode_requested,
+                    "systemSha256": system_prompt_sha256(system), "contextWindow": ctx_window,
+                })
             result = await agent.run(
                 convo, renderer, model=model_id, system=system,
                 max_tokens=max_tokens,
@@ -968,19 +998,7 @@ class WebAdminChatRunMixin:
                     (lambda wait_id: self.control_actions.consume_retry_action(chat_id, wait_id))
                     if self.control_actions is not None else None
                 ),
-                tool_context=ToolRuntimeContext(
-                    chat_id=chat_id,
-                    session_uuid=session_id,
-                    conversation_uuid=conversation_uuid,
-                    source="web",
-                    turn_uuid=root_turn_uuid,
-                    run_root_turn_uuid=root_turn_uuid,
-                    soft_stop_check=(lambda: self.control_actions.consume_soft_stop(chat_id)) if self.control_actions is not None else None,
-                    task_notification=_task_notification_cb,
-                    conversation_event=_conversation_event_cb,
-                    web_confirm=lambda payload: self._web_confirm(conversation_uuid, payload),
-                    agent_wait=_agent_wait,
-                ),
+                tool_context=runtime_tool_context,
             )
             if stats_task is not None:
                 stats_task.cancel()

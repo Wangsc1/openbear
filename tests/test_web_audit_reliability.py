@@ -164,9 +164,9 @@ async def test_login_approval_cannot_reanimate_expired_request(web_env, monkeypa
         await asyncio.wait_for(entered.wait(), 3)
         original = web_env.db.conn._acquire_writer
 
-        async def observed_claim():
+        async def observed_claim(**kwargs):
             attempting.set()
-            return await original()
+            return await original(**kwargs)
 
         monkeypatch.setattr(web_env.db.conn, "_acquire_writer", observed_claim)
         approval = asyncio.create_task(web_env.server.decide_login_request("approve-expiry-race", approved=True, decided_by=123))
@@ -201,9 +201,9 @@ async def test_login_consume_expiring_while_waiting_for_writer_does_not_mint_ses
         await asyncio.wait_for(entered.wait(), 3)
         original = web_env.db.conn._acquire_writer
 
-        async def observed_claim():
+        async def observed_claim(**kwargs):
             attempting.set()
-            return await original()
+            return await original(**kwargs)
 
         monkeypatch.setattr(web_env.db.conn, "_acquire_writer", observed_claim)
         request = SimpleNamespace(cookies={}, remote="", headers={})
@@ -233,16 +233,16 @@ async def test_revocation_wins_race_with_stale_last_seen_refresh(web_env, monkey
         (now_ts() - 3600, _sha256(token)),
     )
     await web_env.db.conn.commit()
-    original = web_env.db.conn.execute
+    original = web_env.db.conn._acquire_writer
     waiting, release = asyncio.Event(), asyncio.Event()
 
-    async def paused_execute(sql, *args, **kwargs):
-        if "UPDATE web_sessions SET last_seen_at=" in sql:
+    async def paused_acquire(**kwargs):
+        if kwargs.get("wait_timeout_s") == 0.1:
             waiting.set()
             await release.wait()
-        return await original(sql, *args, **kwargs)
+        return await original(**kwargs)
 
-    monkeypatch.setattr(web_env.db.conn, "execute", paused_execute)
+    monkeypatch.setattr(web_env.db.conn, "_acquire_writer", paused_acquire)
     request = SimpleNamespace(cookies={"openbear_web_session": token})
     refresh = asyncio.create_task(web_env.server.session_from_request(request))
     try:

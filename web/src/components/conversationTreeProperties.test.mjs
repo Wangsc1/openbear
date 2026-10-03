@@ -4,36 +4,32 @@ import fs from 'node:fs';
 import postcss from 'postcss';
 
 const source = fs.readFileSync(new URL('./ConversationTree.vue', import.meta.url), 'utf8');
+const modelSettings = fs.readFileSync(new URL('./ModelSettings.vue', import.meta.url), 'utf8');
+const conversation = fs.readFileSync(new URL('./ConversationPropertiesDialog.vue', import.meta.url), 'utf8');
 const style = fs.readFileSync(new URL('./conversationTreeProperties.css', import.meta.url), 'utf8');
 
 test('folder prompt editor is not wrapped in a native label that activates Monaco hidden IME input', () => {
   const labels = [...source.matchAll(/<label\b[^>]*>[\s\S]*?<\/label>/g)];
   assert.ok(labels.length > 0);
-  assert.ok(labels.every(([label]) => !label.includes('<MdEditor')));
+  assert.ok(labels.every(([label]) => !label.includes('<MdEditor') && !label.includes('<AdaptiveMdEditor')));
   assert.match(source, /class="property-field" role="group" aria-labelledby="folder-prompt-label"/);
   assert.match(source, /<span id="folder-prompt-label">/);
 });
 
-test('folder properties use scoped readable typography and compact inherited previews', () => {
-  assert.match(style, /\.folder-properties-dialog \.effective-disclosure pre \{[^}]*font-family:inherit;[^}]*font-size:13px;/);
-  assert.match(style, /\.folder-properties-dialog \.el-button \{[^}]*font-size:14px;/);
-  assert.match(style, /\.folder-properties-dialog \.run-choice-value \{[^}]*font-size:14px;/);
+test('folder properties use a compact single-line header, centered tabs and only the requested context controls', () => {
+  assert.match(style, /el-dialog__header \{[^}]*display:grid;[^}]*grid-template-columns:minmax\(0,1fr\) auto minmax\(0,1fr\)/);
+  assert.match(style, /folder-properties-heading h2 \{[^}]*text-overflow:ellipsis;[^}]*white-space:nowrap/);
+  assert.match(source, /<h2 :title="propertiesForm.path">/);
+  assert.match(source, />默认模型<\/button>/);
+  assert.doesNotMatch(source, /effective-disclosure|effective-line|查看当前继承提示词/);
   assert.match(style, /grid-template-columns:70px minmax\(0,1fr\) minmax\(0,1fr\)/);
-  assert.match(style, /\.folder-properties-dialog \.run-field-hint \{[^}]*font-size:13px;/);
-  assert.doesNotMatch(source, /class="run-default-group"|class="run-defaults-head"|class="property-note run-default-note"/);
-  assert.match(source, /class="run-choice-inherit">\{\{ propertiesForm\.temporary \? '默认' : '继承'/);
-  assert.match(source, /<h2>\{\{ propertiesForm\.temporary \? '临时会话属性' : '目录属性' \}\}<\/h2>/);
-  assert.doesNotMatch(style, /font(?:-size)?:\s*(?:9|10|11|12)px/);
   postcss.parse(style).walkRules(rule => {
     assert.ok(rule.selectors.every(selector => /^(html\.dark )?\.folder-properties-(dialog|popover)/.test(selector)), rule.selector);
   });
   assert.match(style, /\.folder-properties-dialog \.el-dialog__body \{[^}]*min-height:0;[^}]*overflow:auto;/);
-  assert.match(style, /\.folder-properties-dialog \.el-dialog__footer \{ flex:none;/);
-  assert.match(source, /<details v-if="!propertiesForm\.temporary" class="effective-disclosure">[\s\S]*查看当前继承提示词/);
   assert.match(source, /class="property-segmented" role="tablist"/);
   assert.match(source, /aria-controls="folder-properties-panel-context"/);
   assert.match(source, /aria-controls="folder-properties-panel-defaults"/);
-  assert.doesNotMatch(source, /<el-tabs|<el-tab-pane/);
 });
 
 test('property sheet owns its macOS styling without changing other Element Plus controls', () => {
@@ -41,7 +37,7 @@ test('property sheet owns its macOS styling without changing other Element Plus 
   assert.match(style, /--fp-surface:var\(--ob-surface-raised\)/);
   assert.match(style, /property-segmented button\[aria-selected="true"\] \{ background:var\(--fp-selected\)/);
   assert.match(style, /folder-properties-popover\.el-popper/);
-  assert.equal((source.match(/popper-class="folder-properties-popover" :show-arrow="false"/g) || []).length, 6);
+  assert.equal((modelSettings.match(/popper-class="folder-properties-popover" :show-arrow="false"/g) || []).length, 2);
   assert.match(source, /function navigatePropertiesTab\(event\)/);
   assert.match(style, /prefers-reduced-motion/);
 });
@@ -56,25 +52,33 @@ test('ordinary workspace input keeps its label and a neutral public example', ()
   assert.match(source, /<label\b[^>]*>\s*<span id="folder-workspace-label">本节点工作目录[\s\S]*?<el-input[^>]+placeholder="例如 \/home\/user\/projects\/my-project"[^>]*\/>\s*<\/label>/);
 });
 
-test('six stable run-default fields expose inheritance and explicit follow values', () => {
-  for (const field of ['mainModel', 'mainThinkingLevel', 'mainFastMode', 'agentModel', 'agentThinkLevel', 'agentFastMode']) {
-    assert.match(source, new RegExp(`data-run-default-field="${field}"`));
-    assert.match(source, new RegExp(`runDefaultSelection\\(propertiesForm\\.runDefaults, '${field}'\\)`));
-  }
-  assert.match(source, /跟随主模型（明确设置）[^\n]+runDefaultOption\(''\)/);
-  assert.match(source, /跟随模型默认[^\n]+runDefaultOption\(''\)/);
-  assert.match(source, /跟随主会话 Fast（明确设置）[^\n]+runDefaultOption\(null\)/);
-  assert.match(source, /label="关闭" :value="runDefaultOption\(false\)"/);
-  assert.match(source, /saveRunDefaults \? \{ runDefaults: sparseRunDefaults\(propertiesForm\.runDefaults\) \} : \{\}/);
+test('folder and conversation share all model rows and the same compression select', () => {
+  assert.match(source, /<ModelSettings[^>]*:model-value="propertiesForm.runDefaults"/);
+  assert.match(conversation, /<ModelSettings[^>]*:model-value="modelSettings"/);
+  assert.match(modelSettings, /data-run-default-field="contextStrategy"/);
+  assert.match(modelSettings, /runDefaultOption\('sliding_window'\)/);
+  assert.match(modelSettings, /runDefaultOption\('model_summary'\)/);
+  assert.match(source, /saveRunDefaults \? \{ runDefaults: sparseRunDefaults\(propertiesForm.runDefaults\) \} : \{\}/);
   assert.match(source, /openbear:folder-properties-changed/);
+  assert.match(conversation, /saveRunConfig\(id,requests\[field\]\)/);
 });
 
-test('capability choices and summaries follow backend normalization without densifying sparse values', () => {
+test('conversation properties precedes the final delete action like folder properties, preserving prompt management', () => {
+  const menu = source.slice(source.indexOf("runMenuAction('new-sibling')"),source.indexOf('<ConversationPromptDialog'));
+  const actions = [...menu.matchAll(/runMenuAction\('([^']+)'\)/g)].map(match=>match[1]);
+  assert.deepEqual(actions.slice(-3), ['archive','conversation-properties','delete-conversation']);
+  assert.match(menu, /runMenuAction\('conversation-properties'\)[\s\S]*?<\/button>\s*<hr\s*\/>\s*<button[^>]*runMenuAction\('delete-conversation'\)/);
+  const folderMenu = source.slice(source.indexOf("runMenuAction('new-conversation')"),source.indexOf("<template v-else-if=\"['system', 'root']"));
+  const folderActions = [...folderMenu.matchAll(/runMenuAction\('([^']+)'\)/g)].map(match=>match[1]);
+  assert.deepEqual(folderActions.slice(-2), ['properties','delete-folder']);
+  assert.ok(actions.includes('refresh-prompt'));
+  assert.match(source, /<ConversationPromptDialog v-model="promptDialog"/);
+  assert.doesNotMatch(conversation, /ConversationPromptDialog|snapshotFrozen|snapshotUpdateRequired/);
+});
+
+test('capability choices preserve backend normalization and sparse defaults', () => {
   assert.match(source, /return levels\.length \? levels : \["off"\]/);
-  assert.doesNotMatch(source, /levels\.includes\("off"\) \? levels : \["off", \.\.\.levels\]/);
   assert.match(source, /normalizedRunDefaults\(\{/);
-  assert.match(source, /selected, applied/);
-  assert.match(source, /→ 实际/);
   assert.match(source, /if \(!propertyModelsLoaded\.value\) return "";/);
 });
 

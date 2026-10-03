@@ -1,5 +1,5 @@
 <script setup>
-import {computed, markRaw, nextTick, onBeforeUnmount, onMounted, provide, ref, watch} from "vue";
+import {computed, markRaw, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRef, toRaw, watch} from "vue";
 import {ElMessage, ElMessageBox} from "element-plus";
 import {
 	ChatLineRound,
@@ -124,6 +124,7 @@ import {
 } from "./runConfigState.js";
 import {createAttachmentDraftStorage, planAttachmentDraftRecord} from "./attachmentDraftStorage.js";
 import {captureTranscriptContentAnchor, transcriptContentAnchorDelta} from "./transcriptContentAnchor.js";
+import {createTimelineReuse} from "./timelineReuse.js";
 
 const DEFAULT_NEW_CONVERSATION_THINKING = "";
 const DRAFT_STORAGE_KEY = "openbear.console.drafts.v1";
@@ -143,7 +144,7 @@ const props = defineProps({
 	// target for cross-family "new conversation" creation.
 	folderId: {type: String, default: ""},
 });
-const emit = defineEmits(["conversation-created", "conversations-refresh"]);
+const emit = defineEmits(["conversation-created", "conversations-refresh", "properties"]);
 
 const loading = ref(false);
 // A replacement state request must finish an outstanding entry scroll instead
@@ -170,9 +171,11 @@ const draft = ref(String(draftByConversation.value[draftKey(props.conversationUu
 let draftEditRevision = 0;
 watch(draft, () => { draftEditRevision += 1; }, {flush: 'sync'});
 const status = ref("就绪");
-const operationsById = ref(new Map());
-const orderedOpIds = ref([]);
-const revisionByOpId = ref(new Map());
+// Operation payloads are immutable snapshots. Mutations inside a frame batch
+// become visible at flushProjectedMessages, not once per Map.set/token delta.
+const operationsById = shallowRef(new Map());
+const orderedOpIds = shallowRef([]);
+const revisionByOpId = shallowRef(new Map());
 const lastFrameSeq = ref(0);
 const lastStats = ref(null);
 const chatState = ref(null);
@@ -284,6 +287,7 @@ let localDefaultsFolderId = null;
 let localFolderDefaults = {};
 let localDefaultsOverrides = {};
 let localDefaultsLoading = null;
+let localDefaultsSaveTail = Promise.resolve();
 let optionsLoadPromise = null;
 let agentAutoOpenBoundaryConversation = "";
 let agentAutoOpenPendingConversation = "";
@@ -381,7 +385,8 @@ const contextUsage = computed(() => resolveContextUsage(
 const lastContextTokens = computed(() => contextUsage.value.known ? Number(contextUsage.value.tokens || 0) : 0);
 const modelCallRows = computed(() => Array.isArray(chatState.value?.modelCalls) ? chatState.value.modelCalls : []);
 const toolCallRows = computed(() => Array.isArray(chatState.value?.toolCalls) ? chatState.value.toolCalls : []);
-const turns = computed(() => withTransientIdleThinking(attachTurnStats(buildTurns(displayMessages.value), modelCallRows.value, toolCallRows.value)));
+const reuseTurns = createTimelineReuse();
+const turns = computed(() => reuseTurns(withTransientIdleThinking(attachTurnStats(buildTurns(displayMessages.value), modelCallRows.value, toolCallRows.value))));
 const activeTurn = computed(() => turns.value[Math.min(Math.max(0, activeTurnIndex.value), Math.max(0, turns.value.length - 1))] || null);
 const activeConversationUuid = computed(() => props.conversationUuid || chatState.value?.conversationUuid || "");
 const messageVisibility = createMessageVisibility({
@@ -406,6 +411,13 @@ const runConfigSaves = createRunConfigSaveQueue({
 	isCurrent: (uuid, generation) => Boolean(componentMounted && generation === runConfigInteractionGeneration && !isLocalConversation.value && String(props.conversationUuid || "") === uuid),
 	apply: (runConfig) => {
 		runConfigOverride.value = runConfig;
+	},
+	onStaleSave: (uuid) => {
+		// A save can commit after we leave and return. Never apply its old-visit
+		// response, but refresh the current visit so it does not stay stale.
+		if (componentMounted && !isLocalConversation.value && String(props.conversationUuid || '') === uuid) {
+			void load({conversationUuid: uuid, scrollMode: 'preserve', manageLoading: false, fresh: true});
+		}
 	},
 });
 const displayedRunConfig = computed(() => runConfigForDisplay(
@@ -638,7 +650,34 @@ function discardConversationDraft(conversationUuid) {
 		adjustComposerHeight();
 	}
 }
-defineExpose({discardConversationDraft, focusPendingInteraction, captureMobileViewportAnchor, restoreMobileViewportAnchor});
+async function savePropertyRunConfig(uuid, request) {
+	if (uuid !== activeConversationUuid.value || isLocalConversation.value) return request();
+	const finishMutation = beginModelMutation();
+	try { return (await runConfigSaves.enqueue(uuid, request)).response; }
+	finally { finishMutation(); }
+}
+let propertyPersistence = null;
+async function persistForProperties() {
+	if (!isLocalConversation.value) return activeConversationUuid.value;
+	if (propertyPersistence) return propertyPersistence;
+	propertyPersistence = (async () => {
+		const sourceUuid = String(props.conversationUuid || '');
+		await ensureLocalRunDefaults();
+		if (props.conversationUuid !== sourceUuid || outboundSends.current) throw new Error('草稿状态已变化，请重试');
+		const created = await Api.createConversation({title:'新会话',runConfig:completeLocalRunConfig(),folderId:props.folderId || ''});
+		const uuid = created.conversation?.conversationUuid || created.state?.conversationUuid;
+		if (!uuid) throw new Error('conversation_create_failed');
+		migrateAttachmentDraft(sourceUuid, uuid);
+		if (props.conversationUuid === sourceUuid) {
+			localToServerTransitionUuid.value = uuid;
+			chatState.value = {...(chatState.value || {}), conversationUuid:uuid};
+			emit('conversation-created',uuid);
+		} else emit('conversations-refresh');
+		await nextTick(); return uuid;
+	})().finally(() => { propertyPersistence = null; });
+	return propertyPersistence;
+}
+defineExpose({discardConversationDraft, focusPendingInteraction, captureMobileViewportAnchor, restoreMobileViewportAnchor, savePropertyRunConfig, persistForProperties});
 
 function primaryModelInfo() {
 	const preferred = currentPrimaryModelKey.value || primaryModelKey.value;
@@ -741,9 +780,20 @@ async function ensureLocalRunDefaults() {
 	if (!loaded) throw new Error("无法读取会话默认配置，请检查连接后重试");
 }
 
-async function patchLocalRunDefaults(patch) {
+function patchLocalRunDefaults(patch) {
 	const expectedUuid = String(props.conversationUuid || "");
 	const folderId = String(props.folderId || "");
+	const task = localDefaultsSaveTail.then(() => {
+		if (props.conversationUuid !== expectedUuid || String(props.folderId || '') !== folderId || !isLocalConversation.value) return null;
+		return saveLocalRunDefaults(patch, expectedUuid, folderId);
+	});
+	// Like persisted conversations, drafts must send mutations in click order.
+	// A failed request must not prevent the next explicit choice from saving.
+	localDefaultsSaveTail = task.catch(() => {});
+	return task;
+}
+
+async function saveLocalRunDefaults(patch, expectedUuid, folderId) {
 	await ensureLocalRunDefaults();
 	if (props.conversationUuid !== expectedUuid || String(props.folderId || "") !== folderId || !isLocalConversation.value) return null;
 	const requestSeq = ++defaultsRequestSeq;
@@ -2104,15 +2154,17 @@ function orderedOperationsList() {
 // message list itself stays reactive for optimistic `push` and whole-list
 // replacement.
 function withRawTimeline(list) {
-	return list.map((message) => (
-		Array.isArray(message?.localTimeline)
-			? {...message, localTimeline: markRaw(message.localTimeline.map((event) => markRaw(event)))}
-			: message
-	));
+	for (const message of list) {
+		if (!Array.isArray(message?.localTimeline)) continue;
+		markRaw(message.localTimeline);
+		for (const event of message.localTimeline) markRaw(event);
+	}
+	return list;
 }
 
+const reuseProjectedMessages = createTimelineReuse();
 function projectOperationMessages(operations = orderedOperationsList()) {
-	return withRawTimeline(projectOperationMessagesFromOperations(operations, operationProjectionOptions()));
+	return withRawTimeline(reuseProjectedMessages(projectOperationMessagesFromOperations(operations, operationProjectionOptions())));
 }
 
 function clearActiveRun() {
@@ -2121,7 +2173,7 @@ function clearActiveRun() {
 }
 
 function replaceOperationSnapshots(operations = [], {frameSeq = null} = {}) {
-	const ops = normalizeOperations(operations);
+	const ops = normalizeOperations(operations).map(op => markRaw(toRaw(op)));
 	const byId = new Map();
 	const revisions = new Map();
 	stateStatsByOpId.clear();
@@ -4209,6 +4261,7 @@ onBeforeUnmount(() => {
 		<div class="console-main min-w-0 flex flex-1 flex-col">
 			<ConsoleHeader
 				:title="conversationTitle"
+				@properties="emit('properties')"
 				:title-identity="activeConversationUuid"
 				:conversation-path="props.conversationPath"
 				:running="running"

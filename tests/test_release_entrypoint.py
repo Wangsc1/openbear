@@ -1,0 +1,296 @@
+"""The controller is tested with real temporary Git/state and mocked externals."""
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+from collections import Counter
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from release_support import candidate, runner  # noqa: E402
+from release_support.common import (  # noqa: E402
+    Commands,
+    ReleaseError,
+    State,
+    atomic_json,
+    load,
+    sha,
+)
+from release_support.github import SafeRedirect  # noqa: E402
+
+
+def test_stage_receipts_reuse_only_identical_inputs_and_preserve_other_successes(tmp_path):
+    state = State(tmp_path, {"stages": {}})
+    calls = Counter()
+
+    def work(stage):
+        calls[stage] += 1
+        return {"ok": True, "value": stage}
+
+    state.execute("A", {"zip": "one"}, lambda: work("A"))
+    with pytest.raises(ReleaseError):
+        state.execute("B", {"zip": "one"}, lambda: (_ for _ in ()).throw(ReleaseError("broken B")))
+    restored = State(tmp_path, load(tmp_path / "state.json"))
+    restored.execute("A", {"zip": "one"}, lambda: work("A"))
+    restored.execute("B", {"zip": "one"}, lambda: work("B"))
+    assert calls == {"A": 1, "B": 1}
+    restored.execute("A", {"zip": "two"}, lambda: work("A"))
+    assert calls["A"] == 2
+    assert restored.value["stages"]["B"]["status"] == "passed"
+
+
+def test_command_children_do_not_inherit_tokens_or_leak_them_to_logs(tmp_path, monkeypatch):
+    secret = "temporary-secret-for-command-test"
+    monkeypatch.setenv("GH_TOKEN", secret)
+    monkeypatch.setenv("GITHUB_TOKEN", secret)
+    command = Commands(tmp_path, secret)
+    output = command([sys.executable, "-c", "import os; print(os.getenv('GH_TOKEN'));print(os.getenv('GITHUB_TOKEN'));print('  leading-space')"], "test")
+    assert output.splitlines() == ["None", "None", "  leading-space"]
+    assert secret not in "".join(path.read_text() for path in (tmp_path / "logs").iterdir())
+    assert command([sys.executable, "-c", "print(' M app/main.py')"], "status") == " M app/main.py"
+
+
+def test_download_redirect_strips_auth_and_rejects_plaintext():
+    import urllib.request
+    redirect = SafeRedirect()
+    request = urllib.request.Request("https://api.github.com/a", headers={"Authorization": "Bearer private"})
+    redirected = redirect.redirect_request(request, None, 302, "", {}, "https://release-assets.githubusercontent.com/a")
+    assert not redirected.has_header("Authorization")
+    with pytest.raises(ReleaseError, match="non-HTTPS"):
+        redirect.redirect_request(request, None, 302, "", {}, "http://example.com/a")
+
+
+@pytest.fixture
+def git_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Fixture"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "fixture@example.invalid"], cwd=repo, check=True)
+    for rel, body in {
+        "app/__init__.py": '__version__ = "1.0.0"\n', "app/main.py": "VALUE = 1\n",
+        "pyproject.toml": '[project]\nname = "openbear"\nversion = "1.0.0"\n',
+        "uv.lock": '[[package]]\nname = "openbear"\nversion = "1.0.0"\n',
+        "web/package.json": '{"version":"1.0.0"}',
+        "web/package-lock.json": '{"version":"1.0.0","packages":{"":{"version":"1.0.0"}}}',
+        ".gitignore": ".release-runs/\n", "README.md": "fixture\n",
+    }.items():
+        target = repo / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body)
+    (repo / "scripts").mkdir()
+    shutil.copy2(ROOT / "scripts/bump_version.py", repo / "scripts/bump_version.py")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "fixture base"], cwd=repo, check=True, capture_output=True)
+    return repo
+
+
+def new_state(repo):
+    directory = repo / ".release-runs/1.0.1-123456789abc"
+    directory.mkdir(parents=True)
+    state = State(directory, {"version": "1.0.1", "oldVersion": "1.0.0", "files": ["app/main.py"],
+                             "python": sys.executable, "stages": {}})
+    return directory, state, Commands(directory)
+
+
+def test_candidate_version_sync_happens_locally_before_export(git_repo):
+    directory, state, command = new_state(git_repo)
+    (git_repo / "app/main.py").write_text("VALUE = 2\n")
+    first = candidate.freeze(git_repo, directory, state, command)
+    assert candidate.version(git_repo) == "1.0.1"
+    assert first["files"]["app/main.py"] == sha(b"VALUE = 2\n")
+    assert candidate.freeze(git_repo, directory, state, command) == first
+    assert subprocess.check_output(["git", "status", "--porcelain"], cwd=git_repo) == b""
+
+
+def test_candidate_refuses_unreviewed_files_and_unrelated_staging(git_repo):
+    directory, state, command = new_state(git_repo)
+    (git_repo / "README.md").write_text("unreviewed")
+    with pytest.raises(ReleaseError, match="Unreviewed"):
+        candidate.freeze(git_repo, directory, state, command)
+    assert candidate.version(git_repo) == "1.0.0"
+
+
+def test_uncertain_local_commit_is_reconciled_without_second_commit(git_repo):
+    directory, state, command = new_state(git_repo)
+    (git_repo / "app/main.py").write_text("VALUE = 2\n")
+
+    def lose_commit_response(args, label, **kwargs):
+        result = command(args, label, **kwargs)
+        if "commit" in args:
+            raise ReleaseError("lost commit response")
+        return result
+
+    with pytest.raises(ReleaseError, match="lost commit response"):
+        candidate.freeze(git_repo, directory, state, lose_commit_response)
+    committed = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=git_repo, text=True).strip()
+    restored = State(directory, load(directory / "state.json"))
+    result = candidate.freeze(git_repo, directory, restored, command)
+    assert result["localCommit"] == committed
+    assert "commitIntent" not in restored.value
+
+
+def test_changed_candidate_invalidates_validation_but_preserves_old_evidence(git_repo):
+    directory, state, command = new_state(git_repo)
+    first = candidate.freeze(git_repo, directory, state, command)
+    state.value["stages"]["py311"] = {"status": "passed"}
+    (directory / "assets").mkdir()
+    (directory / "assets/old.zip").write_bytes(b"original")
+    (git_repo / "app/main.py").write_text("VALUE = 3\n")
+    second = candidate.freeze(git_repo, directory, state, command)
+    assert first["localCommit"] != second["localCommit"]
+    assert state.value["stages"] == {}
+    assert (directory / "superseded" / first["localCommit"] / "assets/old.zip").read_bytes() == b"original"
+
+
+@pytest.mark.parametrize("path", ["data/openbear.db", "../secret", "/absolute", "web/node_modules/x", "web/dist/index.html", ".env", "app/__pycache__/x.pyc"])
+def test_runtime_and_private_paths_never_become_public_candidate(path):
+    assert not candidate.valid_path(path)
+
+
+def test_matrix_collection_and_skip_contract():
+    good = {"ok": True, "testCases": [{"id": "tests.test_one::test_ok", "status": "passed"}]}
+    values = {name: good for name in runner.TEST_STAGES}
+    assert runner.matrix_contract(values)["ok"]
+    values = {**values, "py313": {"ok": True, "testCases": [{"id": "unexpected", "status": "skipped", "skipReason": "not installed"}]}}
+    with pytest.raises(ReleaseError, match="Unexpected conditional skip"):
+        runner.matrix_contract(values)
+
+
+class MemoryCommands:
+    def __call__(self, *_args, **_kwargs):
+        return ""
+
+    def cancel_all(self):
+        pass
+
+    def recover_children(self):
+        pass
+
+    def redact(self, value):
+        return value
+
+
+def test_whole_pipeline_B_failure_resumes_without_repeating_tests_build_or_A(tmp_path, monkeypatch):
+    directory = tmp_path / "run"
+    directory.mkdir()
+    value = {"runId": "1.0.1-123456789abc", "version": "1.0.1", "previousVersion": "1.0.0",
+             "repository": "fixture/repo", "createdAt": 0, "files": [], "python": sys.executable,
+             "images": {"311": "p311", "312": "p312", "313": "p313", "systemd": "systemd"},
+             "previous": {"id": 1}, "previousSourceCommit": "a" * 40, "stages": {}, "notes": "notes\n",
+             "candidate": {"localCommit": "local", "sourceFingerprint": "one", "publicCommit": "public", "files": {"uv.lock": "lock", "web/package-lock.json": "node"}}}
+    calls = Counter()
+
+    def freeze(*_args):
+        return value["candidate"]
+
+    def export(*_args):
+        calls["source"] += 1
+        (directory / "source/.git").mkdir(parents=True)
+        for rel, text in [("uv.lock", "lock"), ("web/package-lock.json", "node")]:
+            path = directory / "source" / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+            value["candidate"]["files"][rel] = sha(text.encode())
+        return {"ok": True}
+
+    monkeypatch.setattr(candidate, "freeze", freeze)
+    monkeypatch.setattr(candidate, "export", export)
+    monkeypatch.setattr(candidate, "assert_local", lambda *_: None)
+
+    class TestRunner(runner.Runner):
+        def preflight(self, approved):
+            assert approved
+
+        def classify_scope(self):
+            return {"kind": "both", "frontendChanged": True, "backendChanged": True,
+                    "frontendFingerprint": "front", "backendFingerprint": "back"}
+
+        def previous_assets(self):
+            calls["previous"] += 1
+            p = directory / "previous-assets"
+            p.mkdir(exist_ok=True)
+            (p / "old.zip").write_bytes(b"old")
+            return {"ok": True, "assets": {"old.zip": {"bytes": 3, "sha256": sha(b"old")}}}
+
+        def build_stage(self, stage):
+            calls[stage] += 1
+            if stage == "env":
+                atomic_json(directory / "environment.json", {"nodeImage": "node", "nodeKey": "node-deps", "pythonImages": {v: "py" + v for v in ("311", "312", "313")}})
+            if stage == "build":
+                (directory / "build/dist").mkdir(parents=True)
+                (directory / "build/dist/index.html").write_text("built")
+            if stage == "package":
+                (directory / "assets").mkdir()
+                (directory / "assets/only.zip").write_bytes(b"zip")
+                return {"ok": True, "assets": {"only.zip": {"bytes": 3, "sha256": sha(b"zip")}}}
+            if stage in runner.TEST_STAGES:
+                return {"ok": True, "testCases": [{"id": "test_x", "status": "passed"}]}
+            return {"ok": True}
+
+        def acceptance(self, case, approved):
+            calls[case] += 1
+            if case == "B" and calls[case] == 1:
+                raise ReleaseError("B fixture failure")
+            return {"ok": True}
+
+    def publisher(*_):
+        calls["publish"] += 1
+        return {"ok": True, "url": "https://example.invalid/release"}
+
+    monkeypatch.setattr(runner, "publish", publisher)
+    obj = TestRunner(tmp_path, directory, value, github=SimpleNamespace(token="fixture"), command=MemoryCommands())
+    with pytest.raises(ReleaseError, match="B fixture failure"):
+        obj.run(approved=True)
+    assert calls["publish"] == 0
+    resumed = TestRunner(tmp_path, directory, load(directory / "state.json"), github=SimpleNamespace(token="fixture"), command=MemoryCommands())
+    resumed.run(approved=True)
+    assert resumed.value["completed"]
+    assert calls["B"] == 2 and calls["publish"] == 1
+    for stage in (*runner.TEST_STAGES, "build", "package", "smoke", "A"):
+        assert calls[stage] == 1, (stage, calls)
+
+
+def test_one_python_environment_correction_reuses_unaffected_stages(tmp_path):
+    obj = runner.Runner(tmp_path, tmp_path / "run", {
+        "repository": "fixture/repo", "candidate": {"sourceFingerprint": "same-source"}, "stages": {},
+    }, github=SimpleNamespace(token="fixture"), command=MemoryCommands())
+    calls = Counter()
+
+    def stage(name):
+        calls[name] += 1
+        return {"ok": True, "testCases": [{"id": "test_x", "status": "passed"}]}
+
+    obj.build_stage = stage
+    env = {"nodeImage": "node", "nodeKey": "deps", "pythonImages": {v: "py" + v for v in ("311", "312", "313")}, "systemdImage": "systemd"}
+    obj.run_tests(env)
+    build_identity = runner.execution_environment(env, "build")
+    env["pythonImages"]["311"] = "corrected-py311"
+    obj.run_tests(env)
+    assert calls == {"py311": 2, "py312": 1, "py313": 1, "frontend": 1}
+    assert runner.execution_environment(env, "build") == build_identity
+    env["systemdImage"] = "corrected-systemd"
+    obj.run_tests(env)
+    assert calls == {"py311": 2, "py312": 1, "py313": 1, "frontend": 1}
+
+
+def test_success_cleanup_removes_package_copies_but_keeps_evidence(tmp_path):
+    directory = tmp_path / "run"
+    attempt = directory / "results/package/attempts/owned"
+    for name in ("package", "previous", "assets"):
+        (attempt / name).mkdir(parents=True)
+        (attempt / name / "file").write_text("temporary copy")
+    (attempt / "result.json").write_text("evidence")
+    obj = runner.Runner(tmp_path, directory, {"repository": "fixture/repo", "published": True},
+                        github=SimpleNamespace(token="fixture"), command=MemoryCommands())
+    obj.finish_cleanup()
+    assert obj.value["completed"]
+    assert sorted(p.name for p in attempt.iterdir()) == ["result.json"]

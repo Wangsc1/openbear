@@ -50,7 +50,7 @@ function harness(t, {phone=true, storedView='recent', blockedStorage=false}={}) 
   });
   scope.run(()=>vm.runInContext(descriptor.scriptSetup.content.replace(/^import[\s\S]*?;\n/gm,'')+`
     globalThis.s={sidebarView,isDirectoryView,sidebarScroll,sidebarScrollKey,switchSidebarView,sidebarTabKeydown,showRecentActivity,revealInFolders,revealDraft,locatingConversation,
-      activeConversationRow,recentClock,recentConversationRows,recentUnreadCount,recentWaitingCount,recentRunningCount,recentLabel,displayRows,visibleRows,query,initialized,loading,
+      activeConversationRow,recentClock,recentConversationRows,recentUnreadRows,recentUnreadCount,recentWaitingCount,recentRunningCount,recentLabel,displayRows,visibleRows,query,initialized,loading,
       activityItems,recentItems,activityReadBusy,titleGenerating,referenceCatalog,rootFolders,stateFor,expanded,selectedFolderId,selectedTargetLabel,emit,menu,listRef,runMenuAction,
       activateRow,toggleRow,dragStart,dropIntent,dragOver,drop,clearDrag,rootDropTarget,drag,moveInFlight,rowId,rowLabel,rowLoading,nodePath,indentation,isExpanded,running,isTitleGenerating,liveConversationTitle,
       loadChildren,searchHasMore,searchRows,searchLoading,runSearch,locateAndOpen,openMenu,openRootMenu,openMoreMenu,rowKeydown,moreMenuKeydown,clearDropTarget,closeOverview,enterOverview,leaveOverview,markActivityRead,openActivityConversation};
@@ -188,7 +188,9 @@ for(const phone of [true,false]) for(const mode of ['recent','folders']) test(`$
   const states=[
     [[],[0,0,0]],
     [[conversation('job',{running:true,activityState:'running'})],[0,0,1]],
+    [[conversation('job',{running:true,activityState:'running',activityUnread:true,activityReadVersion:0})],[0,0,1]],
     [[conversation('job',{running:true,activityPending:[{action:'confirm'}]})],[1,0,0]],
+    [[conversation('job',{running:true,activityState:'waiting',activityPending:[{action:'confirm'}],activityUnread:true,activityReadVersion:0})],[1,0,0]],
     [[conversation('job',{activityUnread:true,activityReadVersion:0})],[0,1,0]],
     [[],[0,0,0]],
   ];
@@ -208,6 +210,41 @@ for(const phone of [true,false]) for(const mode of ['recent','folders']) test(`$
     }
     assert.equal(x.s.sidebarView.value,mode);assert.equal(x.props.activeConversationUuid,'c');
   }
+});
+
+for(const phone of [true,false]) for(const mode of ['recent','folders']) test(`${phone?'phone':'desktop'} ${mode} read-all only acknowledges counted unread rows and retains in-progress results`,async t=>{
+  const x=harness(t,{phone});await x.s.switchSidebarView(mode);
+  x.s.titleGenerating.value=new Set(['naming']);
+  let items=[
+    conversation('done',{activityVersion:4,activityReadVersion:3}),
+    conversation('working',{running:true,activityState:'running',activityVersion:20,activityReadVersion:18}),
+    conversation('waiting',{running:true,activityState:'waiting',activityPending:[{action:'confirm'}],activityReadVersion:0}),
+    conversation('naming',{activityReadVersion:0}),
+  ];
+  const apply=async()=>{
+    x.ctx.statusPacket={items:items.filter(row=>row.running),activityItems:items,recentItems:items};
+    x.run('applyStatus(statusPacket)');await settle();
+  };
+  const counts=()=>[x.s.recentWaitingCount.value,x.s.recentUnreadCount.value,x.s.recentRunningCount.value];
+  const clickReadAll=async()=>{await (await x.render()).nodes.find(n=>classes(n,'recent-read-all')).props.onClick();};
+  const requests=()=>JSON.parse(JSON.stringify(x.reads.at(-1)));
+  await apply();
+  assert.deepEqual(counts(),[1,1,1]);
+  await clickReadAll();assert.deepEqual(requests(),[{conversationUuid:'done',version:4}]);
+  for(const id of ['working','waiting','naming']){
+    assert.equal(x.s.recentConversationRows.value.find(row=>row.conversationUuid===id).activityUnread,true,'hiding a marker must not consume the result');
+  }
+  // A server read receipt clears only the completed conversation.
+  items=items.map(row=>row.conversationUuid==='done'?{...row,activityReadVersion:4}:row);
+  await apply();assert.deepEqual(counts(),[1,0,1]);
+  assert.ok(!(await x.render()).nodes.some(n=>classes(n,'recent-read-all')));
+  // When the parent run finishes, its new completion becomes visible as unread.
+  items=items.map(row=>row.conversationUuid==='working'?{...row,running:false,activityState:'completed',activityVersion:21}:row);
+  await apply();assert.deepEqual(counts(),[1,1,0]);
+  await clickReadAll();assert.deepEqual(requests(),[{conversationUuid:'working',version:21}]);
+  items=items.map(row=>row.conversationUuid==='working'?{...row,activityReadVersion:21}:row);
+  await apply();assert.deepEqual(counts(),[1,0,0]);
+  assert.ok(!(await x.render()).nodes.some(n=>classes(n,'recent-read-all')));
 });
 
 test('status geometry keeps breakpoint heights and spreads counts across the available width',()=>{

@@ -43,7 +43,7 @@ async def claim_paused_notifications(db: DB, conversation_uuid: str) -> list[dic
     """Only the foreground real-user turn may call this; never a recovery scan."""
     async with db.write_transaction(label="user-claims-paused-notifications") as conn:
         cur = await conn.execute(
-            "SELECT notification_uuid,payload_json FROM web_task_notifications WHERE conversation_uuid=? AND state='paused' ORDER BY id",
+            "SELECT notification_uuid,payload_json FROM web_task_notifications WHERE conversation_uuid=? AND state='paused' AND kind!='webhook-result' ORDER BY id",
             (conversation_uuid,),
         )
         result = []
@@ -54,7 +54,7 @@ async def claim_paused_notifications(db: DB, conversation_uuid: str) -> list[dic
             result.append(payload)
         if result:
             await conn.execute(
-                "UPDATE web_task_notifications SET state='processing', claim_token='user-turn', claimed_at=?, updated_at=? WHERE conversation_uuid=? AND state='paused'",
+                "UPDATE web_task_notifications SET state='processing', claim_token='user-turn', claimed_at=?, updated_at=? WHERE conversation_uuid=? AND state='paused' AND kind!='webhook-result'",
                 (now_ts(), now_ts(), conversation_uuid),
             )
         return result

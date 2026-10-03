@@ -12,7 +12,7 @@ const editor = parse(fs.readFileSync(new URL('AdaptiveMdEditor.vue', import.meta
 const summary = parse(fs.readFileSync(new URL('MobileAdminSummary.vue', import.meta.url), 'utf8')).descriptor;
 const walk = nodes => (nodes || []).flatMap(n => [n, ...walk(Array.isArray(n.children) ? n.children : [])]);
 function runtime(phone = true, flow = false) {
-  const props = Vue.reactive({ modelValue: '原始内容\n[[ runtimeInfo.host ]]\n@mem/test', mobileFlow: flow });
+  const props = Vue.reactive({ modelValue: '原始内容\n[[ runtimeInfo.host ]]\n@mem/test', mobileFlow: flow, readOnly: false });
   const isPhone = Vue.ref(phone), events = [], cleanup = [];
   const CodeEditor = { name:'CodeEditor', props:['modelValue'], render: () => Vue.h('div') };
   const context = vm.createContext({ ...Vue, ResizeObserver: undefined, resizePhoneTextarea,
@@ -26,7 +26,7 @@ function runtime(phone = true, flow = false) {
   const names = jsParse(script, {sourceType:'module'}).program.body.flatMap(n => n.type === 'VariableDeclaration' ? n.declarations.map(d => d.id.name) : []);
   const attrs = { 'completion-mode':'template', square:true, 'ref-data':{mem:[{key:'test'}]} };
   context.attributeBag = attrs;
-  const bindings = () => Vue.proxyRefs(vm.runInContext(`({${names.join(',')}, mobileFlow: props.mobileFlow, $attrs: attributeBag})`, context));
+  const bindings = () => Vue.proxyRefs(vm.runInContext(`({${names.join(',')}, mobileFlow: props.mobileFlow, readOnly: props.readOnly, $attrs: attributeBag})`, context));
   return {props, isPhone, CodeEditor, events, cleanup, attrs, bindings, run: code => vm.runInContext(code, context)};
 }
 async function render(r) {
@@ -77,6 +77,43 @@ test('phone defaults to native text, keeps exact draft across code mode/rotation
   assert.equal(view.nodes.some(n => n.type === 'button'), false);
   assert.equal(view.nodes.find(n => n.type === r.CodeEditor).props.modelValue, draft + '尾部');
   r.cleanup.forEach(fn => fn());
+});
+
+test('inherited content is readonly in native and code mode; override restores editing', async () => {
+  const r = runtime(); r.props.readOnly = true;
+  let view = await render(r);
+  let input = view.nodes.find(n => n.type === 'textarea');
+  assert.equal(input.props.readonly, true);
+  input.props['onUpdate:modelValue']('blocked');
+  assert.equal(r.events.length, 0);
+  r.run('advanced.value = true');
+  view = await render(r);
+  const code = view.nodes.find(n => n.type === r.CodeEditor);
+  assert.equal(code.props['read-only'], true);
+  code.props['onUpdate:modelValue']('blocked');
+  assert.equal(r.events.length, 0);
+  r.props.readOnly = false; r.run('advanced.value = false');
+  view = await render(r); input = view.nodes.find(n => n.type === 'textarea');
+  assert.equal(input.props.readonly, false);
+  input.props['onUpdate:modelValue']('override');
+  assert.equal(r.props.modelValue, 'override');
+});
+
+test('Monaco receives readonly on creation and updates it without losing parent text', async () => {
+  const source = parse(fs.readFileSync(new URL('MdEditor.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content;
+  const props = Vue.reactive({modelValue:'inherited',readOnly:true,language:'markdown'});
+  const mounts=[],cleanups=[],events=[],updates=[]; let content,change,created;
+  const instance={getValue:()=>content,setValue:v=>{content=v;change?.();},updateOptions:v=>updates.push({...v}),onDidFocusEditorWidget(){},onDidChangeModelContent:fn=>{change=fn;},getPosition:()=>null,dispose(){}};
+  const ctx=vm.createContext({...Vue,defineProps:()=>props,defineEmits:()=> (...args)=>events.push(args),onMounted:fn=>mounts.push(fn),onBeforeUnmount:fn=>cleanups.push(fn),
+    window:{__mdCompletionRegistered:true},document:{documentElement:{}},getComputedStyle:()=>({getPropertyValue:()=>''}),editorTheme:()=>({}),isDarkTheme:()=>false,subscribeTheme:()=>()=>{},bindMobileEditorFontSize:()=>()=>{},
+    monaco:{editor:{defineTheme(){},create:(_el,options)=>{created=options;content=options.value;return instance;}}}});
+  const scope=Vue.effectScope(); scope.run(()=>vm.runInContext(source.replace(/^import .*;\n/gm,''),ctx));
+  mounts.forEach(fn=>fn()); assert.equal(created.readOnly,true);
+  props.modelValue='updated inherited'; await Vue.nextTick(); assert.equal(content,'updated inherited'); assert.equal(events.length,0);
+  props.readOnly=false; await Vue.nextTick(); assert.equal(updates.at(-1).readOnly,false);
+  instance.setValue('override'); assert.deepEqual(events.at(-1),['update:modelValue','override']);
+  props.readOnly=true; await Vue.nextTick(); assert.equal(updates.at(-1).readOnly,true);
+  cleanups.forEach(fn=>fn()); scope.stop();
 });
 
 test('textarea uses Vue composition-aware v-model and does not intercept touch/wheel scrolling', () => {

@@ -660,7 +660,11 @@ class UIConfig(BaseModel):
     model_config = {"populate_by_name": True, "extra": "ignore"}
 
 
+from app.webhooks.contracts import WebhooksConfig
+
+
 class Config(BaseModel):
+    webhooks: WebhooksConfig = Field(default_factory=WebhooksConfig)
     telegram: TelegramConfig
     models: ModelsConfig
     memory: MemoryConfig

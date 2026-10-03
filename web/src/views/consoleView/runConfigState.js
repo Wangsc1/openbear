@@ -56,6 +56,8 @@ export function createRunConfigSaveQueue(options = {}) {
       if (applied) {
         options.apply?.(runConfig, response);
         appliedVersion += 1;
+      } else {
+        options.onStaleSave?.(uuid);
       }
       return {response, runConfig, applied};
     });

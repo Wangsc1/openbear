@@ -32,6 +32,7 @@ class SettingSpec:
     default_value: str = ""
     # API/config values stay in storage units; editors apply this display-only scale.
     display_scale: int = 1
+    nullable: bool = False
 
     def display_value(self, value):
         return value / self.display_scale if value is not None and self.display_scale != 1 else value
@@ -53,6 +54,8 @@ class SettingSpec:
 
     def parse(self, raw: str) -> bool | int | float | str | list[str]:
         text = (raw or "").strip()
+        if self.nullable and text.lower() in {"", "null"}:
+            return None
         if self.kind == "bool":
             key = text.lower()
             if key in {"1", "true", "on", "yes", "y", "开", "开启", "启用", "是"}:
@@ -506,14 +509,15 @@ SPECS: dict[str, SettingSpec] = {
     ),
     "tools.bashSpoolMaxBytes": _s(
         "tools.bashSpoolMaxBytes",
-        "Bash 落盘上限",
-        "单次 Bash 完整原始输出落盘允许的最大字节数，超过会终止命令防止打满磁盘。",
+        "Bash 输出文件大小上限",
+        "单次 Bash 完整输出文件最多占用多少MB；超过时终止命令，防止打满磁盘。",
         "int",
         "tools",
         "下一轮生效",
         min_value=1_000_000,
         max_value=1_000_000_000,
-        unit="字节",
+        unit="MB",
+        display_scale=1024 * 1024,
     ),
     "tools.fileReadLimitLines": _s(
         "tools.fileReadLimitLines",
@@ -528,25 +532,27 @@ SPECS: dict[str, SettingSpec] = {
     ),
     "tools.fileReadOutputBytes": _s(
         "tools.fileReadOutputBytes",
-        "Read 输出字节上限",
-        "Read 单次回灌文本的最大字节数，超过会提示继续 offset 分段读取。",
+        "Read 返回内容大小上限",
+        "Read 每次返回的文本最多多少MB；超过时提示使用offset继续分段读取。",
         "int",
         "tools",
         "下一轮生效",
         min_value=10_000,
         max_value=10_000_000,
-        unit="字节",
+        unit="MB",
+        display_scale=1024 * 1024,
     ),
     "tools.fileReadMaxLineBytes": _s(
         "tools.fileReadMaxLineBytes",
-        "Read 单行字节上限",
-        "Read 遇到超长单行时停止并提示，避免单行大文件撑爆内存。",
+        "Read 单行大小上限",
+        "Read 读取的每行内容最多多少MB；遇到超长单行时停止并提示，避免占满内存。",
         "int",
         "tools",
         "下一轮生效",
         min_value=1000,
         max_value=10_000_000,
-        unit="字节",
+        unit="MB",
+        display_scale=1024 * 1024,
     ),
     "tools.fileStateMaxEntries": _s(
         "tools.fileStateMaxEntries",
@@ -769,10 +775,13 @@ SPECS: dict[str, SettingSpec] = {
 }
 
 SPECS.update(_browser_specs(_s))
+from app.webhooks.settings import build_specs as _webhook_specs, GROUP_TITLES as _WEBHOOK_GROUPS
+SPECS.update(_webhook_specs(_s))
 
 # GROUPS 是设置路径唯一归属清单；Web 二级导航和 Telegram 设置入口都从这里读取。
 # 每个 SPECS 项必须恰好出现一次，测试会阻止“后端有定义、前端看不见”的漂移。
 GROUPS: dict[str, tuple[str, list[str]]] = {
+    **{key: (title, [p for p, spec in SPECS.items() if spec.group == key]) for key, title in _WEBHOOK_GROUPS.items()},
     **{key: (title, [p for p, spec in SPECS.items() if spec.group == key]) for key, title in (
         ("browser_connection", "浏览器连接"),
         ("browser_limits", "等待时间与用量"),
@@ -949,6 +958,7 @@ WEB_DOMAINS: dict[str, tuple[str, str, list[str]]] = {
         "管理台监听、登录会话、长任务通知与安全策略",
         ["web", "web_notifications"],
     ),
+    "webhooks": ("外部触发", "消息接收、排队、脚本与数据保留", list(_WEBHOOK_GROUPS)),
     "interface": ("界面显示", "回答内容和运行统计的默认呈现方式", ["interface"]),
 }
 

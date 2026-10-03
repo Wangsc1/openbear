@@ -517,6 +517,9 @@ class AgentTools(AgentContinuationTools):
                 total_time_ms_sum=duration_ms,
                 output_tokens_sum=usage.output_tokens,
             )
+            from app.webhooks.observability import ledger_cost
+            call_cost = await ledger_cost(connection,str(detail.get("attemptId") or ""),cost,
+                known=detail.get("costKnown",detail.get("providerCostUsd") is not None or bool(detail.get("usageReported") and cost>0)))
             model_call_id = await accounting.add_model_call(
                 chat_id,
                 commit=False,
@@ -529,7 +532,7 @@ class AgentTools(AgentContinuationTools):
                 call_kind=str(detail.get("callKind") or "agent_request"),
                 usage=usage,
                 last_usage=usage,
-                cost_usd=cost,
+                cost_usd=call_cost,
                 total_time_ms=duration_ms,
                 peak_tps=max(0.0, float(detail.get("tps") or 0.0)),
                 min_tps=max(0.0, float(detail.get("tps") or 0.0)),

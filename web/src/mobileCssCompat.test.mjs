@@ -72,7 +72,7 @@ test('all CSS color-mix and dvh sites retain modern values and add ordered, lega
       assert.match(result.css, /--el-mask-color:\s*rgb\(var\(--ob-bg-rgb\) \/ 0\.82\)/);
     }
   }
-  assert.equal(occurrences, 108, 'all 108 stylesheet color mixes are accounted for (the 109th is the heatmap inline style)');
+  assert.equal(occurrences, 109, 'all 109 stylesheet color mixes, including the Webhook overview header, are accounted for (the 110th is the heatmap inline style)');
   assert.ok(mixes >= 105, `covered ${mixes} source CSS color-mix declarations`);
   assert.ok(heights >= 55, `covered ${heights} source CSS dvh declarations`);
 });

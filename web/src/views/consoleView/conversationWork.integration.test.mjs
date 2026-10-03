@@ -4,13 +4,14 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import {register} from 'node:module';
 import {compileScript, compileStyle, compileTemplate, parse} from '@vue/compiler-sfc';
-import {createRenderer, h, nextTick, reactive, ref} from 'vue';
+import {createRenderer, h, nextTick, reactive, ref, shallowRef} from 'vue';
 import {conversationTimelineEntries} from './conversationTimeline.js';
+import {createTimelineReuse} from './timelineReuse.js';
 import {deriveOperationRunState, projectOperationMessages, reduceOperationFrame, withTransientIdleThinking} from '../../timelineProjection.js';
 import {contextMeter, conversationWorkChunks, isInlineProcess, lastAnswerIndex, reasoningDuration, workDurationLabel, WORK_MOTION} from './conversationWork.js';
 
 // Execute the real Vue components in memory, without a browser/layout engine.
-const files = ['ConversationWorkBlock.vue', 'ConversationProcessEvent.vue', 'ConversationRetryEvent.vue', 'WorkDisclosure.vue', 'ContextUsageMeter.vue', 'ConsoleToolEvent.vue', 'TurnList.vue', 'TurnEvent.vue', 'ModelOutputProgress.vue'];
+const files = ['ConversationWorkBlock.vue', 'ConversationProcessEvent.vue', 'ConversationRetryEvent.vue', 'WorkDisclosure.vue', 'ContextUsageMeter.vue', 'ConsoleToolEvent.vue', 'TurnList.vue', 'TurnEvent.vue', 'ModelOutputProgress.vue', 'MessageVisibilityAction.vue'];
 const sources = Object.fromEntries(files.map(f => [f, fs.readFileSync(new URL(f, import.meta.url), 'utf8')]));
 const descriptors = Object.fromEntries(files.map(f => [f, parse(sources[f], {filename: f}).descriptor]));
 const compiled = Object.fromEntries(files.map(f => [f, compileScript(descriptors[f], {id: f, inlineTemplate: true}).content]));
@@ -25,7 +26,7 @@ register(`data:text/javascript,${encodeURIComponent(`
   }
 `)}`, {parentURL: import.meta.url, data: compiled});
 const components = Object.fromEntries(await Promise.all(files.map(async f => [f, (await import(new URL(f, import.meta.url))).default])));
-const {MESSAGE_VISIBILITY} = await import('./messageVisibility.js');
+const {MESSAGE_VISIBILITY, createMessageVisibility} = await import('./messageVisibility.js');
 const {Api} = await import('../../api.js');
 const originalWindow = globalThis.window;
 globalThis.window = {addEventListener() {}, removeEventListener() {}, setTimeout, clearTimeout, matchMedia: () => ({matches:false})};
@@ -53,20 +54,70 @@ const walk = n => [n, ...n.children.flatMap(walk)];
 const hasClass = (n, cls) => String(n.props.class || '').split(/\s+/).includes(cls);
 const find = (n, cls) => walk(n).find(n => hasClass(n, cls));
 const text = n => [n.text, n.props.innerHTML || '', ...n.children.map(text)].join('');
-function mount(t, file, props, slots, provides = []) {
+function mount(t, file, props, slots, provides = [], configure = () => {}) {
   const root = node('root');
   const app = renderer.createApp({render: () => h(components[file], props, slots)});
   for (const [key, value] of provides) app.provide(key, value);
-  app.component('ElTooltip', {setup: (_, {slots}) => () => slots.default?.()});
+  app.component('ElTooltip', {inheritAttrs:false, setup: (_, {slots}) => () => slots.default?.()});
   app.component('ElIcon', {setup: (_, {slots}) => () => slots.default?.()});
   app.component('ElImage', {render: () => null});
   app.component('ElPopover', {inheritAttrs: false, props: ['visible'], setup: (p, {slots}) => () => [slots.reference?.(), ...(p.visible ? slots.default?.() || [] : [])]});
+  configure(app);
   app.mount(root); t.after(() => app.unmount()); return root;
 }
 const answer = (id, content, extra = {}) => ({kind:'answer', id, message:{content, live:false}, ...extra});
 const tool = (id = 'tool') => ({kind:'tool', id, calls:[{id:'call',name:'Read',arguments:'{"path":"/tmp/example.txt"}'}], result:{role:'tool',name:'Read',content:'COMPLETE-OUTPUT-END'}, operation:{opId:id,opType:'tool',status:'completed'}});
 const reasoning = {kind:'answer', id:'thought', reasoningActive:false, message:{reasoning:'完整思考正文-END',content:''}};
 const rowSlot = {default: ({entry}) => h('p', {'data-id':entry.event.id}, entry.event.message?.content || entry.event.message?.reasoning || entry.event.id)};
+
+test('loading older history keeps real per-row visibility menus linear, not one full-turn scan per row', async t => {
+  let reads=0;
+  class CountedMap extends Map { get(key) { reads++; return super.get(key); } }
+  const recent=Array.from({length:80},(_,i)=>tool(`recent-${i}`));
+  const operations=shallowRef(new CountedMap(recent.map(e=>[e.id,e.operation])));
+  const visibility=createMessageVisibility({conversationUuid:ref('history-perf'),operations,api:{}});
+  const props=reactive({turns:[{id:'recent-turn',events:recent}],running:true,detailKey:()=>'',isDetailOpen:()=>false,activeToolResultIndex:()=>0});
+  const root=mount(t,'TurnList.vue',props,null,[[MESSAGE_VISIBILITY,visibility]],app=>{
+    // Element Plus popover content is persistent. Include its real menu slot,
+    // rather than replacing all of these children with null in a fast fixture.
+    app.component('ElPopover',{inheritAttrs:false, setup:(_,{slots})=>()=>[slots.reference?.(),slots.default?.()]});
+  });
+  let all=[...recent];
+  for(let page=0;page<3;page++) {
+    const old=Array.from({length:334},(_,i)=>tool(`old-${page}-${i}`));
+    all=[...old,...all]; reads=0;
+    operations.value=new CountedMap(all.map(e=>[e.id,e.operation]));
+    props.turns=[{id:`old-turn-${page}`,events:old},...props.turns];
+    await nextTick(); await nextTick();
+    assert.equal(walk(root).filter(n=>hasClass(n,'conversation-process')).length,all.length);
+    t.diagnostic(`page ${page+1}, ${all.length} rows, operation lookups: ${reads}`);
+    assert.ok(reads<all.length*12,`history prepend made ${reads} lookups; full-turn targets must be shared by all row menus`);
+  }
+});
+
+test('334-row real timeline updates only the changed process component and preserves an open old detail', async t => {
+  const reuse = createTimelineReuse();
+  const events = Array.from({length:333}, (_, i) => tool(`tool-${i}`));
+  events.push({...reasoning,id:'live-thought',reasoningActive:true,message:{content:'',reasoning:'live',live:true}});
+  const props = reactive({turns:reuse([{id:'long',events}]),running:true,detailKey:()=>'',isDetailOpen:()=>false,activeToolResultIndex:()=>0});
+  const updates=[];
+  const root=mount(t,'TurnList.vue',props,null,[],app=>app.mixin({updated(){
+    if(this.$options.__name==='ConversationProcessEvent') updates.push(this.$props.event.id);
+  }}));
+  const rows=walk(root).filter(n=>hasClass(n,'conversation-process'));
+  assert.equal(rows.length,334);
+  find(rows[80],'process-summary').props.onClick(); await nextTick(); await nextTick();
+  assert.equal(find(rows[80],'process-summary').props['aria-expanded'],true);
+  updates.length=0;
+  props.turns=reuse([{id:'long',events:events.map((event,i)=>i===333
+    ? {...event,message:{...event.message,reasoning:'live new text'}} : {...event})}]);
+  await nextTick(); await nextTick();
+  assert.deepEqual(updates,['live-thought'],'unchanged rows must not execute component updates on each stream paint');
+  const nextRows=walk(root).filter(n=>hasClass(n,'conversation-process'));
+  assert.equal(nextRows[80],rows[80]);
+  assert.equal(find(nextRows[80],'process-summary').props['aria-expanded'],true);
+  assert.match(text(nextRows[80]),/COMPLETE-OUTPUT-END/);
+});
 
 for (const file of files) test(`${file}: script, template and theme CSS compile`, () => {
   assert.deepEqual(compileTemplate({source:descriptors[file].template.content,filename:file,id:file}).errors, []);

@@ -2210,17 +2210,17 @@ class WebAdminConversationsMixin:
             # failure cannot strand a notification forever without stealing a
             # legitimately long model turn from its live worker.
             if reset_processing:
-                claim_where = "state='processing'"
+                claim_where = "state='processing' AND kind!='webhook-result'"
                 claim_params: tuple[Any, ...] = (ts,)
             else:
-                claim_where = "state='processing' AND claimed_at>0 AND claimed_at<=?"
+                claim_where = "state='processing' AND kind!='webhook-result' AND claimed_at>0 AND claimed_at<=?"
                 claim_params = (ts, ts - 900)
             await self.db.conn.execute(
                 f"UPDATE web_task_notifications SET state='pending', claim_token='', claimed_at=0, next_attempt_at=0, updated_at=? WHERE {claim_where}",
                 claim_params,
             )
             await self.db.conn.commit()
-        where = "n.state='pending' AND COALESCE(n.next_attempt_at,0)<=?"
+        where = "n.state='pending' AND n.kind!='webhook-result' AND COALESCE(n.next_attempt_at,0)<=?"
         params: list[Any] = [ts]
         if conversation_uuid:
             where += " AND n.conversation_uuid=?"

@@ -21,15 +21,46 @@ export function transcriptContentAnchorDelta(anchor, turn, viewport) {
 	return rect ? rect.top - viewport.top - anchor.viewportOffset : null;
 }
 
+// Locate a row by its outer box before touching text. Reading text geometry
+// inside every offscreen row both scales with the whole turn and defeats native
+// content-visibility by forcing skipped subtrees to lay out.
+export function visibleTranscriptAnchorRoot(turn, viewport) {
+	const rows = turn?.querySelectorAll?.('.timed-row');
+	if (!rows?.length) return turn;
+	const targetY = viewport.top + Math.min(80, viewport.height * 0.12);
+	const boxes = new Map();
+	const box = index => {
+		if (!boxes.has(index)) boxes.set(index, rows[index].getBoundingClientRect());
+		return boxes.get(index);
+	};
+	let low = 0, high = rows.length;
+	while (low < high) {
+		const mid = (low + high) >>> 1;
+		if (box(mid).bottom <= targetY) low = mid + 1;
+		else high = mid;
+	}
+	let nearest = null, distance = Infinity;
+	for (const index of [low - 1, low]) {
+		if (index < 0 || index >= rows.length) continue;
+		const rect = box(index);
+		if (rect.height <= 0 || rect.bottom <= viewport.top || rect.top >= viewport.bottom) continue;
+		const delta = Math.max(rect.top - targetY, targetY - rect.bottom, 0);
+		if (delta < distance) { nearest = rows[index]; distance = delta; }
+	}
+	return nearest;
+}
+
 export function captureTranscriptContentAnchor(turn, viewport, previous = null) {
 	// During a multi-frame width animation keep the exact same character, not
 	// the newly wrapped line's first character on each frame (which would drift).
-	const previousDelta = transcriptContentAnchorDelta(previous, turn, viewport);
+	const root = visibleTranscriptAnchorRoot(turn, viewport);
+	if (!root) return null;
+	const previousDelta = transcriptContentAnchorDelta(previous, root, viewport);
 	if (previousDelta !== null && Math.abs(previousDelta) < 1) return previous;
 	const doc = turn?.ownerDocument;
 	if (!doc?.createTreeWalker || !doc.createRange) return null;
 	const targetY = viewport.top + Math.min(80, viewport.height * 0.12);
-	const walker = doc.createTreeWalker(turn, 4); // NodeFilter.SHOW_TEXT
+	const walker = doc.createTreeWalker(root, 4); // NodeFilter.SHOW_TEXT
 	let nearest = null;
 	for (let node = walker.nextNode(); node; node = walker.nextNode()) {
 		if (!String(node.textContent || "").trim()) continue;

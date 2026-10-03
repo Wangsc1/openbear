@@ -746,7 +746,7 @@ def web_event_operation_specs(event: dict[str, Any]) -> list[dict[str, Any]]:
 
     if typ == "accepted":
         task_notification = bool(event.get("taskNotification"))
-        source = "task_notification" if task_notification else ("telegram" if event.get("source") == "telegram" else "user")
+        source = "task_notification" if task_notification else (event.get("source") if event.get("source") in {"telegram", "webhook"} else "user")
         payload = {
             "turnId": turn_uuid,
             "runId": execution_run_uuid,
@@ -773,13 +773,14 @@ def web_event_operation_specs(event: dict[str, Any]) -> list[dict[str, Any]]:
                 "role": "user",
                 "text": str(event.get("text") or event.get("content") or ""),
                 "attachments": event.get("attachments") if isinstance(event.get("attachments"), list) else [],
+                **({"source": "webhook", "eventTriggered": True, "eventCard": event.get("eventCard"), "assignmentId": event.get("assignmentId")} if event.get("source") == "webhook" else {}),
                 **({"references": event["references"], "referenceBundleId": str(event.get("referenceBundleId") or "")} if event.get("references") else {}),
                 "queued": bool(event.get("queued", False)),
                 "interruption": bool(event.get("interruption") or event.get("steeringInjected")),
                 "status": str(event.get("status") or ("插话已交给主会话" if event.get("steeringInjected") else "")),
                 "createdAtMs": ts,
             },
-            status="completed", source="telegram" if event.get("source") == "telegram" else "user",
+            status="completed", source=event.get("source") if event.get("source") in {"telegram", "webhook"} else "user",
         ))
         return specs
 

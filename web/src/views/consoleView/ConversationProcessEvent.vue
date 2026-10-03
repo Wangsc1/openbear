@@ -98,6 +98,15 @@ const vReasoningScroll = {
 
 <style scoped>
 .conversation-process { min-width: 0; color: var(--work-muted); font-size: 14px; line-height: 1.65; }
+/* Native viewport rendering keeps DOM, find-in-page, selection and component
+   state intact. Only settled, collapsed single-line rows have a known height:
+   never guess a placeholder for a growing answer, open/closing detail or active control.
+   Browsers without support simply retain the original rendering path. */
+.conversation-process:not(.is-open):not(.is-running):not(:has(.work-disclosure)) {
+	content-visibility: auto;
+	contain-intrinsic-block-size: auto 24px;
+	overflow-clip-margin: 8px;
+}
 .process-summary { display: flex; align-items: center; gap: 8px; max-width: 100%; min-width: 0; min-height: 24px; margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .process-summary:focus-visible { outline: 2px solid var(--bear-accent, var(--ob-focus)); outline-offset: 4px; border-radius: 3px; }
 .process-icon { width: 16px; height: 16px; flex: none; align-self: center; color: var(--work-faint); }
@@ -132,7 +141,11 @@ const vReasoningScroll = {
 .process-tool-detail :deep(.tool-payload-code) { border: 0; border-radius: 0; background: transparent; }
 .process-tool-detail :deep(.tool-payload-code pre) { padding: 2px 0; font-size: 12px; line-height: 1.65; }
 .process-tool-detail :deep(.tool-payload-code code.hljs) { color: var(--work-detail-text); font-size: 12px; line-height: 1.65; }
-@media (hover: none) { .process-chevron { opacity: .6; } .process-summary { min-height: 32px; } }
+@media (hover: none) {
+	.process-chevron { opacity: .6; }
+	.process-summary { min-height: 32px; }
+	.conversation-process:not(.is-open):not(.is-running):not(:has(.work-disclosure)) { contain-intrinsic-block-size: auto 32px; }
+}
 @media (prefers-reduced-motion: reduce) {
 	.process-chevron { transition: none; }
 }

@@ -25,6 +25,28 @@ def test_browser_units_preserve_storage_and_telegram_input():
             spec.parse_display(invalid)
 
 
+@pytest.mark.parametrize('path', [
+    'tools.bashSpoolMaxBytes', 'tools.fileReadOutputBytes', 'tools.fileReadMaxLineBytes',
+    'webhooks.ingress.maxBodyBytes', 'webhooks.queue.maxBytes',
+    'webhooks.scripts.maxStdoutBytes', 'webhooks.scripts.maxStderrBytes',
+    'webhooks.batching.maxBatchBytes', 'webhooks.telemetry.maxBusinessRecordBytes',
+])
+def test_capacity_settings_use_mb_without_changing_storage(path):
+    from app.admin.settings import parse_setting_value, serialize_spec
+    spec = get_spec(path)
+    payload = serialize_spec(spec)
+    assert payload['unit'] == 'MB' and payload['displayScale'] == 1024 * 1024
+    assert spec.parse_display('1.5') == 1572864
+    assert spec.display_value(1572864) == 1.5
+    assert parse_setting_value(path, 1572864) == 1572864
+
+
+def test_webhooks_navigation_follows_web_and_security():
+    from app.admin.settings import settings_specs_payload
+    keys = [item['key'] for item in settings_specs_payload()['domains']]
+    assert keys.index('webhooks') == keys.index('web') + 1
+
+
 def test_bool_setting_parse_chinese_values():
     spec = get_spec("rath.enabled")
     assert spec is not None
@@ -101,12 +123,12 @@ def test_agent_and_tool_sections_are_available():
         "Bash 默认超时",
         "Bash 最大超时",
         "Bash 输出回灌上限",
-        "Bash 落盘上限",
+        "Bash 输出文件大小上限",
     ]
     assert [s.title for s in group_specs("files")] == [
         "Read 默认行数上限",
-        "Read 输出字节上限",
-        "Read 单行字节上限",
+        "Read 返回内容大小上限",
+        "Read 单行大小上限",
         "Read 状态缓存上限",
     ]
     assert get_spec("agent.retryJitterRatio") is None

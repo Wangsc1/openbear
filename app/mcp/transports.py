@@ -74,6 +74,7 @@ class StdioJSONRPCTransport(MCPTransport):
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
+        self._close_task: asyncio.Task[None] | None = None
         self._stderr_tail = ""
         self._closed = False
         self.fatal_error = ""
@@ -142,7 +143,7 @@ class StdioJSONRPCTransport(MCPTransport):
         finally:
             if not self._closed and not self.fatal_error:
                 self._fail("stdio reader stopped (EOF)")
-            if self.fatal_error and self.proc and self.proc.returncode is None:
+            if not self._closed and self.fatal_error and self.proc and self.proc.returncode is None:
                 await self._terminate_process(self.proc)
 
     def _fail(self, reason: str) -> None:
@@ -271,27 +272,63 @@ class StdioJSONRPCTransport(MCPTransport):
         return text[-800:]
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        # _closed rejects new requests; it does not mean cleanup has finished.
+        # All callers join the same cleanup, and a failed cleanup can be retried.
+        task = self._close_task
+        if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
+            self._closed = True
+            task = self._close_task = asyncio.create_task(
+                self._close_resources(), name=f"mcp-stdio-{self.server_key}-close",
+            )
+        cancelled = None
+        try:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError as exc:
+                    if task.cancelled():
+                        raise
+                    # Even repeated caller cancellation must not orphan the peer.
+                    # Report cancellation only after the bounded cleanup finishes.
+                    cancelled = exc
+            task.result()
+        finally:
+            if cancelled is not None:
+                raise cancelled
+
+    async def _close_resources(self) -> None:
         proc = self.proc
         for fut in list(self._pending.values()):
             if not fut.done():
                 fut.cancel()
         self._pending.clear()
-        if proc is not None:
-            with contextlib.suppress(Exception):
-                await self.notify("notifications/cancelled", {"reason": "client_shutdown"})
-            with contextlib.suppress(Exception):
-                if proc.stdin is not None:
-                    proc.stdin.close()
-            await self._terminate_process(proc)
-            processes.unregister(proc.pid)
-        for task in (self._reader_task, self._stderr_task):
-            if task is not None:
+        try:
+            if proc is not None:
+                with contextlib.suppress(Exception):
+                    # Includes both the write-lock queue and pipe drain. A peer
+                    # that stopped reading must not prevent its own termination.
+                    async with asyncio.timeout(0.25):
+                        await self.notify("notifications/cancelled", {"reason": "client_shutdown"})
+                with contextlib.suppress(Exception):
+                    if proc.stdin is not None:
+                        proc.stdin.close()
+                await self._terminate_process(proc)
+        finally:
+            if proc is not None:
+                # Process has no public close for its stdout/stderr transports.
+                # Force-close all pipes, including buffered stdin, so inherited
+                # or backpressured pipes cannot keep the final wait alive.
+                proc._transport.close()
+            tasks = [task for task in (self._reader_task, self._stderr_task) if task is not None]
+            for task in tasks:
                 task.cancel()
-                with contextlib.suppress(Exception, asyncio.CancelledError):
-                    await task
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if proc is not None:
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=1.0)
+                finally:
+                    if proc.returncode is not None:
+                        processes.unregister(proc.pid)
 
     async def _terminate_process(self, proc: asyncio.subprocess.Process) -> None:
         if proc.returncode is not None:

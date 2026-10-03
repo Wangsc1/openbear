@@ -75,6 +75,7 @@ from app.web_console.statistics_api import WebAdminStatisticsMixin
 from app.web_console.task_memory_api import WebAdminTaskMemoryMixin
 from app.web_console.update_api import WebAdminUpdateMixin
 from app.web_console.uploads import WebAdminUploadsMixin
+from app.web_console.webhooks_api import WebhookPropertiesMixin
 from app.web_task_telegram import WebTaskTelegramNotifier
 from app.web_push import BrowserPush
 from app.web_console.push_api import WebAdminPushMixin
@@ -82,6 +83,7 @@ from app.web_telegram_replies import WebTelegramReplies
 
 
 class WebAdminServer(
+    WebhookPropertiesMixin,
     WebAdminPushMixin,
     WebAdminAppMixin,
     WebAdminRealtimeMixin,

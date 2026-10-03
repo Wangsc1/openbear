@@ -174,6 +174,17 @@ class ToolRuntimeContext:
     agent_wait: Callable[[dict[str, Any]], Awaitable[str]] | None = None
     execution_id: str = ""
     run_id: str = ""
+    # Host-injected external-event authority; never model arguments.
+    webhook_assignment_id: str = ""
+    webhook_owner_id: int = 0
+    webhook_start_cursor: int | None = None
+    webhook_automatic: bool = False
+    receipt_repair: bool = False
+    receipt_repair_calls: int = 0
+    receipt_repair_started: float = 0.0
+    execution_started: Callable[[Any], Awaitable[None]] | None = None
+    finish_policy: Callable[[str], Awaitable[dict[str, Any]]] | None = None
+    terminal_policy: Callable[[str], Awaitable[None]] | None = None
     # Last dispatch result, including cancellation when the await is interrupted.
     tool_outcome: ToolOutcome | None = None
 
@@ -280,6 +291,10 @@ class ToolRegistry:
         if session:
             execution_context.execution_id = session.tool_action_id
             execution_context.run_id = session.run_id
+        if execution_context.receipt_repair and name not in {"Webhook", "History"}:
+            outcome = ToolOutcome("error: receipt_repair_read_only: business execution is forbidden", "failed", "not_started")
+            execution_context.tool_outcome = outcome
+            return outcome
         tool = self._tools.get(name)
         if tool is None:
             outcome = ToolOutcome(f"error: 未知工具: {name}", "failed", "not_started")

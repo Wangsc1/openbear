@@ -21,6 +21,7 @@ AGENT_DELEGATION_TOOL_NAMES = frozenset({
     "Process",
     "TaskMemory",
     "Browser",
+    "Webhook",  # Explicit grant; action/assignment checks remain in its dispatcher.
 })
 
 # EditBatch is a distinct model-visible tool contract, but it does not grant a

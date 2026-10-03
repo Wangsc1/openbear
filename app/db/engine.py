@@ -69,6 +69,12 @@ class DB:
         await reader.execute("PRAGMA query_only=ON")
         await reader.execute("PRAGMA busy_timeout=5000")
         self._conn = SQLiteConnectionRouter(reader=reader, writer=writer)
+        from app.webhooks.schema import migrate as migrate_webhooks
+        try:
+            await migrate_webhooks(self)
+        except BaseException:
+            await self.close()
+            raise
         log.info("数据库已连接", 路径=self._path, 写入模式="single-writer")
 
     async def _table_exists(self, table: str) -> bool:
@@ -408,9 +414,16 @@ class DB:
         return self._conn
 
     @asynccontextmanager
-    async def write_transaction(self, *, label: str = "write") -> AsyncIterator[aiosqlite.Connection]:
-        """Run one atomic mutation unit on the global SQLite writer."""
-        async with self._router().transaction(label=label) as conn:
+    async def write_transaction(self, *, label: str = "write",
+                                wait_timeout_s: float | None = None) -> AsyncIterator[aiosqlite.Connection]:
+        """Run one atomic mutation unit; optionally bound writer acquisition."""
+        async with self._router().transaction(label=label, wait_timeout_s=wait_timeout_s) as conn:
+            yield conn
+
+    @asynccontextmanager
+    async def webhook_transaction(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Webhook integrity on the existing writer; legacy FK mode is restored."""
+        async with self._router().transaction(label="webhook", foreign_keys=True) as conn:
             yield conn
 
     @asynccontextmanager

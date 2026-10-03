@@ -1,5 +1,7 @@
 <script setup>
 import {computed} from "vue";
+import {MoreFilled} from '@element-plus/icons-vue';
+const emit = defineEmits(['properties']);
 import AnimatedConversationTitle from "../../components/AnimatedConversationTitle.vue";
 import {conversationPathText, fmtElapsedClockMs, headerDurationParts} from "./display.js";
 import {vElapsed} from "./elapsedDirective.js";
@@ -34,6 +36,10 @@ const durationParts = computed(() => headerDurationParts(props.durationMs));
 					<h1 class="header-title block max-w-full truncate" :title="props.title">
 						<AnimatedConversationTitle :text="props.title" :identity="props.titleIdentity" />
 					</h1>
+					<el-dropdown trigger="click" @command="emit('properties')">
+						<button type="button" class="header-properties-menu" aria-label="会话菜单" aria-haspopup="menu"><el-icon><MoreFilled /></el-icon></button>
+						<template #dropdown><el-dropdown-menu><el-dropdown-item command="properties">会话属性</el-dropdown-item></el-dropdown-menu></template>
+					</el-dropdown>
 				</div>
 			</div>
 		</div>
@@ -72,6 +78,10 @@ const durationParts = computed(() => headerDurationParts(props.durationMs));
 </template>
 
 <style scoped>
+.header-properties-menu {display:grid;place-items:center;min-width:28px;min-height:28px;border:0;border-radius:6px;background:transparent;color:var(--ob-chat-muted);}
+.header-properties-menu:hover {background:var(--ob-hover);}
+.header-properties-menu:focus-visible {outline:2px solid var(--ob-focus);}
+@media(max-width:760px){.header-properties-menu {min-width:44px;min-height:44px;}}
 .header-mobile-navigation,
 .header-mobile-actions,
 .header-mobile-running { display: none; }

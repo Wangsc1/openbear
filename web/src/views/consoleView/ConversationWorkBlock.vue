@@ -11,6 +11,7 @@ const props = defineProps({
 });
 const resultIndex = computed(() => lastAnswerIndex(props.turn.events));
 const chunks = computed(() => conversationWorkChunks(props.entries, resultIndex.value));
+const entryIndices = computed(() => new Map(props.entries.map((entry, index) => [entry, index])));
 const firstWork = computed(() => chunks.value.find(chunk => chunk.kind === 'work')?.key);
 const open = ref(props.running || resultIndex.value < 0);
 watch(() => props.running, running => {
@@ -30,12 +31,12 @@ function entryKey(entry) { return `${entry.event.id || entry.event.eventKey || e
 				</button>
 				<WorkDisclosure :open="props.running || open">
 					<div class="work-stack">
-						<template v-for="entry in chunk.entries" :key="entryKey(entry)"><slot :entry="entry" :conversation-index="props.entries.indexOf(entry)" :work="true"/></template>
+						<template v-for="entry in chunk.entries" :key="entryKey(entry)"><slot :entry="entry" :conversation-index="entryIndices.get(entry)" :work="true"/></template>
 					</div>
 				</WorkDisclosure>
 			</template>
 			<div v-else class="work-exposed-stack">
-				<template v-for="entry in chunk.entries" :key="entryKey(entry)"><slot :entry="entry" :conversation-index="props.entries.indexOf(entry)" :work="false"/></template>
+				<template v-for="entry in chunk.entries" :key="entryKey(entry)"><slot :entry="entry" :conversation-index="entryIndices.get(entry)" :work="false"/></template>
 			</div>
 		</template>
 	</div>

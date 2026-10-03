@@ -76,10 +76,25 @@ export function createMessageVisibility({conversationUuid, operations, api, befo
   const hide = values => mutate({opIds: [...new Set(values.map(visibilityOperationId))], hidden: true});
   // Use the projected round, not the whole conversation; interruption rows are
   // user_message operations even though they live inside turn.events.
-  const assistantTargets = turn => (Array.isArray(turn?.events) ? turn.events : []).filter(value => {
-    const op = operations.value.get(visibilityOperationId(value));
-    return canTarget(value) && op.opType !== 'user_message' && !isHidden(value);
-  });
+  // Every row's persistent menu asks the same whole-turn question. Share one
+  // reactive derivation per immutable event list, rather than scanning an N-row
+  // turn N times after history loads or a stream frame changes its last event.
+  // The computed still tracks visibility and operation eligibility changes;
+  // this is not an ID-only cache that could leave hidden/internal rows stale.
+  const assistantTargetsByEvents = new WeakMap();
+  const noEvents = [];
+  const assistantTargets = turn => {
+    const events = Array.isArray(turn?.events) ? turn.events : noEvents;
+    let targets = assistantTargetsByEvents.get(events);
+    if (!targets) {
+      targets = computed(() => events.filter(value => {
+        const op = operations.value.get(visibilityOperationId(value));
+        return canTarget(value) && op.opType !== 'user_message' && !isHidden(value);
+      }));
+      assistantTargetsByEvents.set(events, targets);
+    }
+    return targets.value;
+  };
   function hideAssistantTurn(turn) {
     const targets = assistantTargets(turn);
     return targets.length ? hide(targets) : Promise.resolve(false);

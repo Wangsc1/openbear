@@ -13,7 +13,7 @@ class WebAdminOperationsMixin:
         *, op_type: str, internal: int, lifecycle: str, status: str,
         payload: dict[str, Any], created_at_ms: int,
     ) -> int:
-        if internal or payload.get("internal") or payload.get("hidden"):
+        if internal or payload.get("internal") or payload.get("hidden") or payload.get("eventTriggered"):
             return 0
         text = str(payload.get("text") or "")
         if op_type == "user_message":
@@ -150,6 +150,15 @@ class WebAdminOperationsMixin:
         if existing is None and skip_if_missing:
             return None
         patch_payload = dict(payload or {})
+        # Event-owned replies must not bump the human recent-conversation list.
+        # Real human messages/corrections in that conversation remain eligible.
+        if op_type == "assistant_message" and existing is None:
+            event_cur = await conn.execute(
+                "SELECT 1 FROM webhook_assignments WHERE conversation_uuid=? AND root_turn_uuid=? AND origin_kind='webhook' LIMIT 1",
+                (conv_uuid, str(run_root_turn_uuid or turn_uuid or "")),
+            )
+            if await event_cur.fetchone():
+                patch_payload["eventTriggered"] = True
         if existing is not None and op_type == "agent":
             existing_payload = operation_json_loads_dict(str(existing["payload_json"] or "{}"))
             for field in ("rootToolCallId", "rootToolName", "rootArguments"):
@@ -432,6 +441,7 @@ class WebAdminOperationsMixin:
                       AND COALESCE(internal,0)=0
                       AND COALESCE(json_extract(payload_json,'$.internal'),0)=0
                       AND COALESCE(json_extract(payload_json,'$.hidden'),0)=0
+                      AND COALESCE(json_extract(payload_json,'$.eventTriggered'),0)=0
                       AND ((op_type='user_message' AND
                             (LENGTH(TRIM(COALESCE(json_extract(payload_json,'$.text'),'')))>0
                              OR COALESCE(json_array_length(payload_json,'$.attachments'),0)>0))
@@ -1041,10 +1051,11 @@ class WebAdminOperationsMixin:
             """,
             (conv_uuid, conv_uuid, int(limit or 10000)),
         )
-        return [
+        from app.webhooks.presentation import enrich_operations
+        return await enrich_operations(self.db.conn, [
             operation_public(dict(row), include_tool_details=include_tool_details)
             for row in await cur.fetchall()
-        ]
+        ])
 
     async def _web_operations_page(
         self,
@@ -1248,6 +1259,8 @@ class WebAdminOperationsMixin:
             # merged in the browser. It is transport metadata only.
             public["operationOrder"] = int(row.get("id") or 0)
             operations.append(public)
+        from app.webhooks.presentation import enrich_operations
+        await enrich_operations(self.db.conn, operations)
         return operations, {
             "hasMoreBefore": has_more,
             "nextBeforeDisplaySeq": page_boundary if has_more else None,
@@ -1348,6 +1361,15 @@ class WebAdminOperationsMixin:
             payload["opType"] = frames[-1].get("opType")
             payload["revision"] = frames[-1].get("revision")
             payload["displaySeq"] = frames[-1].get("displaySeq")
+        webhook_service = getattr(self, "webhooks", None)
+        if webhook_service is not None:
+            from app.webhooks.notifications import owns_event
+            root = str(payload.get("rootTurnUuid") or payload.get("turnUuid") or payload.get("runUuid") or "")
+            if await owns_event(webhook_service, conv_uuid, root):
+                # Public conversation frames remain immediate; the completed processing
+                # chain is delivered through its own stable kind on the existing outbox.
+                # Real UserInteraction notifications use the independent interaction path.
+                return payload
         notifier = getattr(self, "web_task_telegram", None)
         if notifier is not None:
             try:

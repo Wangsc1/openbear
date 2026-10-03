@@ -1,6 +1,7 @@
 # ruff: noqa: F401,F403,F405
 from __future__ import annotations
 
+from app.db.connection_router import SQLiteWriterTimeout
 from app.mcp.audit import record_audit
 from app.web_console.core import *
 from app.web_console.live_stream import *
@@ -19,6 +20,10 @@ class WebAdminAuthMixin:
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler):
         path = request.path
+        from app.webhooks.http import PUBLIC_ROUTES
+        if request.match_info.route.name in PUBLIC_ROUTES:
+            # Only these exact registered handlers perform scoped endpoint/capability auth.
+            return await handler(request)
         if path == "/login" or path.startswith("/api/auth/login/"):
             login_url = self._https_login_url(request)
             if login_url:
@@ -603,31 +608,46 @@ class WebAdminAuthMixin:
         if not token:
             return None
         token_hash = _sha256(token)
-        cur = await self.db.conn.execute(
-            """
-            SELECT chat_id, expires_at, revoked_at, last_seen_at FROM web_sessions
-            WHERE session_token_hash=?
-            """,
-            (token_hash,),
-        )
-        row = await cur.fetchone()
-        if not row or int(row["revoked_at"] or 0) > 0:
-            return None
-        if int(row["expires_at"] or 0) <= now_ts():
-            return None
-        ts = now_ts()
-        last_seen = int(row["last_seen_at"] or 0) if "last_seen_at" in row.keys() else 0
-        if ts - last_seen >= 300:
-            changed = await self.db.conn.execute(
-                "UPDATE web_sessions SET last_seen_at=? "
-                "WHERE session_token_hash=? AND revoked_at=0 AND expires_at>?",
-                (ts, token_hash, ts),
+
+        async def read_session():
+            cur = await self.db.conn.execute(
+                "SELECT chat_id, expires_at, revoked_at, last_seen_at FROM web_sessions "
+                "WHERE session_token_hash=?", (token_hash,),
             )
-            await self.db.conn.commit()
-            # The cookie may have been revoked while the stale read waited to
-            # refresh last_seen. Do not authorize from that earlier snapshot.
-            if changed.rowcount != 1:
-                return None
+            try:
+                return await cur.fetchone()
+            finally:
+                # A refresh timeout must re-read a current committed snapshot,
+                # not keep this cursor's old WAL snapshot alive.
+                await cur.close()
+
+        row = await read_session()
+        if not row or int(row["revoked_at"] or 0) > 0 or int(row["expires_at"] or 0) <= now_ts():
+            return None
+        last_seen = int(row["last_seen_at"] or 0)
+        if now_ts() - last_seen >= 300:
+            try:
+                # last_seen is activity bookkeeping, not a condition for access.
+                # Bound acquisition only: cancellation must not abandon queued SQL
+                # or roll back another task's transaction.
+                async with self.db.write_transaction(label="web-session-touch", wait_timeout_s=0.1) as conn:
+                    ts = now_ts()
+                    changed = await conn.execute(
+                        "UPDATE web_sessions SET last_seen_at=? "
+                        "WHERE session_token_hash=? AND revoked_at=0 AND expires_at>?",
+                        (ts, token_hash, ts),
+                    )
+                    try:
+                        if changed.rowcount != 1:
+                            return None
+                    finally:
+                        await changed.close()
+            except SQLiteWriterTimeout:
+                # Revocation/expiry may have changed during the brief wait.
+                # Never authorize from the initial stale row after skipping touch.
+                row = await read_session()
+        if not row or int(row["revoked_at"] or 0) > 0 or int(row["expires_at"] or 0) <= now_ts():
+            return None
         return WebSession(chat_id=int(row["chat_id"] or 0), expires_at=int(row["expires_at"] or 0))
 
     async def revoke_session(self, token: str) -> None:

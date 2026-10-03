@@ -196,6 +196,81 @@ test("temporary property changes do not refresh a project draft", async () => {
   assert.deepEqual(h.config(), paid);
 });
 
+test('a delayed model save followed by thinking keeps both choices without a refresh', async () => {
+  const h = harness({folderId: ''});
+  await h.run('loadLocalRunDefaults()');
+  const gate = deferred();
+  let persisted = {...cheap, revision: 1};
+  h.state.Api.updateConversationDefaults = async patch => {
+    if (patch.mainModel) await gate.promise;
+    persisted = {...persisted, ...patch, revision: persisted.revision + 1};
+    return {defaults: {...persisted}};
+  };
+  const model = h.run("patchLocalRunDefaults({mainModel:'paid'})");
+  await flush();
+  const thinking = h.run("patchLocalRunDefaults({mainThinkingLevel:'medium'})");
+  await flush();
+  gate.resolve();
+  await Promise.all([model, thinking]);
+  assert.equal(h.config().mainModel, 'paid');
+  assert.equal(h.config().mainThinkingLevel, 'medium');
+  assert.equal(h.config().mainModel, persisted.mainModel);
+});
+
+test('rapid model choices persist in click order even when the first request is delayed', async () => {
+  const h = harness({folderId: ''});
+  await h.run('loadLocalRunDefaults()');
+  const gate = deferred();
+  let persisted = {...cheap, revision: 1};
+  h.state.Api.updateConversationDefaults = async patch => {
+    if (patch.mainModel === 'paid') await gate.promise;
+    persisted = {...persisted, ...patch, revision: persisted.revision + 1};
+    return {defaults: {...persisted}};
+  };
+  const first = h.run("patchLocalRunDefaults({mainModel:'paid'})");
+  await flush();
+  const latest = h.run("patchLocalRunDefaults({mainModel:'cheap'})");
+  await flush();
+  gate.resolve();
+  await Promise.all([first, latest]);
+  assert.equal(persisted.mainModel, 'cheap');
+  assert.equal(h.config().mainModel, persisted.mainModel);
+});
+
+test('a failed draft save does not block the next selection', async () => {
+  const h = harness({folderId: ''});
+  await h.run('loadLocalRunDefaults()');
+  const update = h.state.Api.updateConversationDefaults;
+  h.state.Api.updateConversationDefaults = async patch => {
+    if (patch.mainModel === 'paid') throw new Error('save_failed');
+    return update(patch);
+  };
+  const failed = h.run("patchLocalRunDefaults({mainModel:'paid'})");
+  const next = h.run("patchLocalRunDefaults({mainThinkingLevel:'medium'})");
+  await assert.rejects(failed, /save_failed/);
+  await next;
+  assert.equal(h.config().mainModel, 'cheap');
+  assert.equal(h.config().mainThinkingLevel, 'medium');
+});
+
+test('queued draft saves never retarget another folder after navigation', async () => {
+  const h = harness({folderId: ''});
+  await h.run('loadLocalRunDefaults()');
+  const gate = deferred(); const updates = [];
+  h.state.Api.updateConversationDefaults = async patch => {
+    updates.push(patch); await gate.promise;
+    return {defaults: {...cheap, ...patch, revision: 1}};
+  };
+  const first = h.run("patchLocalRunDefaults({mainModel:'paid'})");
+  await flush();
+  const queued = h.run("patchLocalRunDefaults({mainThinkingLevel:'medium'})");
+  h.state.props.folderId = 'project';
+  await h.run('loadLocalRunDefaults()');
+  gate.resolve(); await Promise.all([first, queued]);
+  assert.equal(updates.length, 1);
+  assert.deepEqual(h.config(), paid);
+});
+
 test("existing conversations ignore directory defaults refresh events", async () => {
   const h = harness();
   h.state.props.conversationUuid = "existing-conversation";

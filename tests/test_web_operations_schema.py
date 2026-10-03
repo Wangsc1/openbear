@@ -7,6 +7,7 @@ import aiosqlite
 import pytest
 
 from app.db.engine import DB
+from app.db.schema_migrations import WEB_OPERATION_HISTORY_MIGRATION
 from app.web_console.operation_store import WebAdminOperationsMixin
 from app.web_operations import (
     frame_public,
@@ -569,9 +570,12 @@ async def test_web_operation_snapshot_frame_migration_repairs_revision_drift_onc
     await db.conn.commit()
     await db.close()
 
-    # This fixture represents a pre-marker database, not newly written data.
+    # Re-run only the legacy history repair; keep unrelated migration signatures.
     with sqlite3.connect(db_path) as legacy:
-        legacy.execute("DROP TABLE schema_data_migrations")
+        legacy.execute(
+            "DELETE FROM schema_data_migrations WHERE name=?",
+            (WEB_OPERATION_HISTORY_MIGRATION,),
+        )
     repaired = DB(str(db_path))
     await repaired.connect()
     try:
@@ -631,9 +635,12 @@ async def test_web_operation_terminal_time_backfill_survives_frame_retention(tmp
     await db.conn.commit()
     await db.close()
 
-    # Legacy installs have no completed one-time history migration marker.
+    # Model a missing history marker without invalidating the installed Webhook schema.
     with sqlite3.connect(db_path) as legacy:
-        legacy.execute("DROP TABLE schema_data_migrations")
+        legacy.execute(
+            "DELETE FROM schema_data_migrations WHERE name=?",
+            (WEB_OPERATION_HISTORY_MIGRATION,),
+        )
     migrated = DB(str(db_path))
     await migrated.connect()
     cur = await migrated.conn.execute(

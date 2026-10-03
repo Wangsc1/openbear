@@ -121,6 +121,13 @@ class WebAdminMemoryMixin:
                         int(row["owner_chat_id"] or 0), str(row["folder_uuid"] or "")
                     )
         workspace, prompt = values or (str(getattr(self, "workspace_dir", "") or ""), "")
+        if conv_uuid:
+            cur = await self.db.conn.execute("SELECT value FROM app_state WHERE key=?", ("conversation_context:" + conv_uuid,))
+            local = await cur.fetchone()
+            if local:
+                context_properties = json.loads(local["value"])
+                if context_properties.get("contextMode") == "override":
+                    prompt = context_properties.get("contextText", "")
         params = self._prompt_template_params(
             available_agents=await self._available_agents_for_prompt(),
             current_model=model,

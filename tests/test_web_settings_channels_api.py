@@ -192,13 +192,28 @@ async def test_browser_settings_use_existing_http_save_and_validation(admin_env)
     assert "defaultMode" not in saved["browser"]
 
 
+async def test_webhook_capacity_settings_mb_contract_and_storage(admin_env):
+    response = await admin_env.client.get('/api/settings/specs', cookies=admin_env.cookie)
+    specs = (await response.json())['specs']
+    path = 'webhooks.scripts.maxStdoutBytes'
+    assert specs[path]['unit'] == 'MB' and specs[path]['displayScale'] == 1048576
+    response = await admin_env.client.patch('/api/settings/' + path, cookies=admin_env.cookie, json={'value': 1572864})
+    assert response.status == 200
+    assert (await response.json())['value'] == 1572864
+    assert json.loads(admin_env.cfg_path.read_text())['webhooks']['scripts']['maxStdoutBytes'] == 1572864
+    current = await admin_env.client.get('/api/settings', cookies=admin_env.cookie)
+    assert (await current.json())['values'][path] / specs[path]['displayScale'] == 1.5
+    response = await admin_env.client.patch('/api/settings/webhooks.retention.payloadDays', cookies=admin_env.cookie, json={'value': None})
+    assert response.status == 200 and (await response.json())['value'] is None
+
+
 async def test_web_settings_specs_get_and_patch_masks_sensitive_values(admin_env):
     specs = await admin_env.client.get("/api/settings/specs", cookies=admin_env.cookie)
     assert specs.status == 200
     specs_data = await specs.json()
     assert "memory" in [g["key"] for g in specs_data["groups"]]
     assert [domain["key"] for domain in specs_data["domains"]] == [
-        "agent", "tools", "browser", "memory", "media", "web", "interface",
+        "agent", "tools", "browser", "memory", "media", "web", "webhooks", "interface",
     ]
     agent_sections = next(domain for domain in specs_data["domains"] if domain["key"] == "agent")["sections"]
     assert [section["key"] for section in agent_sections] == [

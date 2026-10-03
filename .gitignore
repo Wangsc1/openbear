@@ -29,6 +29,8 @@ htmlcov/
 
 # ─── 工作区与本地分析 ────────────────────────────────────────
 workspace/
+.release-runs/
+.release-environment.json
 /evals/agent_delegation/reports/
 .serena/
 .cloakbrowser/

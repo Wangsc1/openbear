@@ -70,6 +70,10 @@ def _is_locked_error(exc: BaseException) -> bool:
     return "database is locked" in text or "database table is locked" in text
 
 
+class SQLiteWriterTimeout(TimeoutError):
+    """The application writer is busy; no SQLite operation was queued."""
+
+
 class SQLiteConnectionRouter:
     """Duck-typed subset of ``aiosqlite.Connection`` used by OpenBear.
 
@@ -84,6 +88,7 @@ class SQLiteConnectionRouter:
         reader: aiosqlite.Connection,
         writer: aiosqlite.Connection,
         lock_retries: int = 2,
+        writer_wait_timeout_s: float = 30.0,
     ) -> None:
         self._reader = reader
         self._writer = writer
@@ -91,6 +96,7 @@ class SQLiteConnectionRouter:
         self._owner: asyncio.Task[Any] | None = None
         self._owner_callback: Callable[[asyncio.Task[Any]], None] | None = None
         self._lock_retries = max(0, int(lock_retries))
+        self._writer_wait_timeout_s = max(0.001, float(writer_wait_timeout_s))
         self._closed = False
         self._transaction_depth = 0
         # Notifications only wake consumers; callbacks must not perform database
@@ -116,11 +122,27 @@ class SQLiteConnectionRouter:
             raise RuntimeError("SQLite writer operation requires an asyncio task")
         return task
 
-    async def _acquire_writer(self) -> tuple[asyncio.Task[Any], bool]:
+    async def _acquire_writer(self, *, wait_timeout_s: float | None = None) -> tuple[asyncio.Task[Any], bool]:
         task = self._current_task()
         if self._owner is task:
             return task, False
-        await self._writer_lock.acquire()
+        timeout = self._writer_wait_timeout_s if wait_timeout_s is None else max(0.001, float(wait_timeout_s))
+        try:
+            # asyncio.timeout preserves task identity: wait_for would acquire
+            # in a child task and break transaction ownership/reentrancy.
+            async with asyncio.timeout(timeout):
+                await self._writer_lock.acquire()
+        except TimeoutError as exc:
+            owner = self._owner
+            owner_name = owner.get_name() if owner is not None else "unknown"
+            if wait_timeout_s is None:
+                frames = owner.get_stack(limit=1) if owner is not None else []
+                location = f"{frames[-1].f_code.co_filename}:{frames[-1].f_lineno}" if frames else "unknown"
+                log.error("SQLite 写锁等待超时", 等待任务=task.get_name(), 持锁任务=owner_name,
+                          持锁位置=location, 等待秒=timeout)
+            # A waiting caller must never commit/rollback/release another
+            # task's transaction. Short optional writes can safely skip it.
+            raise SQLiteWriterTimeout(f"SQLite writer wait timed out after {timeout:g}s (owner={owner_name})") from exc
         if self._closed:
             self._writer_lock.release()
             raise RuntimeError("数据库已关闭")
@@ -334,11 +356,27 @@ class SQLiteConnectionRouter:
             self._release_writer(owner)
 
     @asynccontextmanager
-    async def transaction(self, *, label: str = "transaction") -> AsyncIterator[aiosqlite.Connection]:
-        owner, acquired = await self._acquire_writer()
+    async def transaction(self, *, label: str = "transaction", foreign_keys: bool = False,
+                          wait_timeout_s: float | None = None) -> AsyncIterator[aiosqlite.Connection]:
+        owner, acquired = await self._acquire_writer(wait_timeout_s=wait_timeout_s)
         nested = bool(self._writer.in_transaction)
         savepoint = f"openbear_{uuid.uuid4().hex}"
+        previous_fk: int | None = None
+        begun = False
         try:
+            if foreign_keys:
+                cursor = await self._writer.execute("PRAGMA foreign_keys")
+                previous_fk = int((await cursor.fetchone())[0])
+                await cursor.close()
+                if nested and not previous_fk:
+                    raise RuntimeError("Webhook transaction cannot nest inside an FK-disabled transaction")
+                if not nested:
+                    await self._writer.execute("PRAGMA foreign_keys=ON")
+                    cursor = await self._writer.execute("PRAGMA foreign_keys")
+                    active_fk = int((await cursor.fetchone())[0])
+                    await cursor.close()
+                    if active_fk != 1:
+                        raise RuntimeError("Webhook foreign key enforcement unavailable")
             if nested:
                 await self._writer.execute(f"SAVEPOINT {savepoint}")
             else:
@@ -346,6 +384,7 @@ class SQLiteConnectionRouter:
                     lambda: self._writer.execute("BEGIN IMMEDIATE"),
                     label=f"{label}:begin",
                 )
+            begun = True
             self._transaction_depth += 1
             try:
                 yield self._writer
@@ -358,15 +397,19 @@ class SQLiteConnectionRouter:
                 self._notify_commit()
         except BaseException:
             with contextlib.suppress(BaseException):
-                if nested:
+                if nested and begun:
                     await self._drain_cleanup(self._writer.execute(f"ROLLBACK TO {savepoint}"))
                     await self._drain_cleanup(self._writer.execute(f"RELEASE {savepoint}"))
-                else:
+                elif not nested:
                     await self._drain_cleanup(self._writer.rollback())
             raise
         finally:
-            if acquired:
-                self._release_writer(owner)
+            try:
+                if foreign_keys and not nested and previous_fk is not None:
+                    await self._drain_cleanup(self._writer.execute(f"PRAGMA foreign_keys={previous_fk}"))
+            finally:
+                if acquired:
+                    self._release_writer(owner)
 
     async def close(self) -> None:
         if self._closed:

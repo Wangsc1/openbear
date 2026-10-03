@@ -9049,6 +9049,7 @@ async def test_interaction_sensitive_pending_does_not_enter_debug_logs(web_env, 
     monkeypatch.setattr(core, "_WEB_WS_AUDIT_LOG_DIR", tmp_path / "ws")
     core._log_web_frontend_event(record)
     core._log_web_ws_audit(record)
+    assert await asyncio.to_thread(core._WEB_DEBUG_LOG_WRITER.flush, 2)
     logs = list(tmp_path.rglob("*.jsonl"))
     assert logs
     assert all(secret not in path.read_text() for path in logs)

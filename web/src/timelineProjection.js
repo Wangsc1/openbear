@@ -48,6 +48,9 @@ function answerEventsCompatible(prev, next) {
   if (prevTurn && nextTurn && prevTurn !== nextTurn) return false;
   const prevKey = answerDisplayEventKey(prev);
   const nextKey = answerDisplayEventKey(next);
+  // Durable identities decide compatibility without repeatedly normalizing
+  // every older answer's text while a long turn is being projected.
+  if (prevKey && nextKey) return prevKey === nextKey;
   const prevText = prev.message?.content || "";
   const nextText = next.message?.content || "";
   const prevDedupe = answerDedupeKey(prevText);
@@ -95,21 +98,27 @@ function mergeAnswerEvent(events, next) {
 
 function finishActiveReasoning(turn, boundaryAtMs = 0) {
   if (!turn || !Array.isArray(turn.events)) return;
-  turn.events = turn.events.map((item) => {
-    if (item?.kind !== "answer" || !item.message?.reasoning) return item;
+  for (let index = 0; index < turn.events.length; index++) {
+    const item = turn.events[index];
+    if (item?.kind !== "answer" || !item.message?.reasoning) continue;
+    // Once a boundary has closed this reasoning, later boundaries cannot
+    // change it. Preserve out-of-order earlier timestamps by taking the slow
+    // path for them, rather than assuming creation times are monotonic.
+    if (item.reasoningEndedAtMs > 0 && boundaryAtMs >= item.reasoningEndedAtMs
+      && !item.reasoningActive && !item.message.live) continue;
     // Reasoning operations can keep receiving snapshots until the whole model
     // response ends. The next visible phase's creation time is a stable cutoff,
     // even on reload or after a later terminal snapshot replaces updatedAtMs.
     const start = eventStartedAtMs(item);
     const ends = [item.reasoningEndedAtMs, item.operation?.terminalAtMs, item.terminalAtMs, boundaryAtMs]
       .map(Number).filter(value => value > 0 && value >= start);
-    return {
+    turn.events[index] = {
       ...item,
       ...(ends.length ? {reasoningEndedAtMs: Math.min(...ends)} : {}),
       reasoningActive: false,
       message: { ...(item.message || {}), live: false },
     };
-  });
+  }
 }
 
 const OP_ACTIVE_LIFECYCLES = new Set(["active", "paused"]);
@@ -983,6 +992,8 @@ export function projectOperationMessages(operations = [], options = {}) {
         turnUuid: String(turn.turnUuid || op.runRootTurnId || op.turnUuid || ""),
         deleteTraceable: Array.isArray(op.transcriptMessageIds) && op.transcriptMessageIds.some((id) => Number(id) > 0),
         role: "user",
+        source: String(op.source || payload.source || "user"),
+        eventCard: payload.eventCard || null,
         content: String(payload.text || payload.content || ""),
         ...(payload.referenceBundleId ? {referenceBundleId: payload.referenceBundleId, references: payload.references || []} : {}),
         attachments: Array.isArray(payload.attachments) ? payload.attachments : [],

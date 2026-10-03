@@ -494,7 +494,11 @@ class AgentExecutor(AgentTaskContext):
     async def _run_task_session(self, body):
         session = RunSession(self._get_window_runtime(), task_uuid=self.task_uuid,
             root_turn_uuid=self.run_root_turn_uuid, chat_id=self.chat_id)
-        return await session.run(body, classify=lambda output:
+        async def bound_body():
+            from app.webhooks.runtime_bridge import bind_agent
+            self._webhook_context = await bind_agent(self.dao.db, session, self.conversation_uuid, self.run_root_turn_uuid, self.task_uuid)
+            return await body()
+        return await session.run(bound_body, classify=lambda output:
             "needs_control" if output.get("status") == "needs_openbear_control" else
             "completed" if output.get("artifactUuid") and output.get("summary") is not None else "failed")
 
@@ -1641,7 +1645,8 @@ class AgentExecutor(AgentTaskContext):
             "protocol": call.get("protocol", ""), "thinkLevel": "off", "callKind": "context_compaction",
             "durationMs": int(call.get("totalTimeMs") or 0), "status": call.get("status", "ok"),
             "errorType": call.get("errorType", ""), "taskUuid": self.task_uuid,
-            "attemptId": call.get("attemptId", ""), "usageReported": call.get("usageReported")}
+            "attemptId": call.get("attemptId", ""), "usageReported": call.get("usageReported"),
+            "costKnown": call.get("providerCostUsd") is not None or bool(call.get("usageReported") and resolved and resolved[1].cost)}
         if self.on_model_call:
             await self.on_model_call(detail)
         await self.dao.update_task(self.task_uuid, model_call_delta=1,
@@ -2050,6 +2055,7 @@ class AgentExecutor(AgentTaskContext):
                 "taskUuid": self.task_uuid, "serviceTier": outcome.response.service_tier,
                 "providerCostUsd": outcome.response.provider_cost_usd, "attemptId": outcome.attempt_id,
                 "usageReported": outcome.usage_reported, "promptUsageReported": outcome.prompt_usage_reported,
+                "costKnown": outcome.response.provider_cost_usd is not None or bool(outcome.usage_reported and (self.base_cost or self.fast_cost)),
             }
             async with self.dao._db.write_transaction(label="agent-attempt-accounting"):
                 await self.dao.update_task(self.task_uuid, model_call_delta=1,
@@ -2461,6 +2467,7 @@ class AgentExecutor(AgentTaskContext):
                 tool_call_id=tool_call_id,
                 task_notification=self.task_notification,
                 conversation_event=self.conversation_event,
+                **getattr(self, '_webhook_context', {}),
             )),
         )
         self._last_tool_outcome = media_context.tool_outcome

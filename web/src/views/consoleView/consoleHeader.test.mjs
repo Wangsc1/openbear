@@ -21,7 +21,7 @@ vm.runInContext(between(display, 'export function fmtLiveElapsedMs(', 'export fu
 function headerState(overrides = {}) {
   const props = reactive({title:'测试会话',titleIdentity:'chat',conversationPath:'OpenBear',running:false,runStartedAt:0,status:'就绪',tokensText:'128.4K',tokensDetail:'输入、输出及缓存明细',cachePercentText:'80.0%',durationMs:229000,costText:'$0.0832',...overrides});
   const script = header.scriptSetup.content.replace(/^import .*;\n/gm, '');
-  const ctx = vm.createContext({computed,defineProps:()=>props,...helpers});
+  const ctx = vm.createContext({computed,defineProps:()=>props,defineEmits:()=>()=>{},...helpers});
   vm.runInContext(script, ctx);
   return proxyRefs(vm.runInContext('({props,pathText,tokenValue,tokenUnit,durationParts,fmtElapsedClockMs})', ctx));
 }
@@ -97,7 +97,7 @@ test('header path reads current conversation, follows cached rename/move and dra
   const recentItems = ref([{kind:'conversation',conversationUuid:'chat',folderId:'a',path:'工程 / OpenBear'}]);
   const props = reactive({draftConversation:{conversationUuid:'local:new',folderId:'a'}});
   const ctx = vm.createContext({ref,computed,rootFolders,recentItems,activityItems:ref([]),branchState:reactive({}),allFolders:ref([]),props,
-    defineExpose: value=>{ctx.exposed=value;},openRootMenu(){},revealDraft(){},forgetConversation(){}});
+    defineExpose: value=>{ctx.exposed=value;},openRootMenu(){},showProperties(){},revealDraft(){},forgetConversation(){}});
   vm.runInContext(between(tree,'function everyKnownNode()', 'function emitRows()') + between(tree,'function folderPath(', 'function invalidateBranch('), ctx);
   vm.runInContext(between(tree,'defineExpose({', 'const activityItems'),ctx);
   ctx.conversationTreeRef = ref(ctx.exposed); ctx.activeConversationUuid = ref('chat');

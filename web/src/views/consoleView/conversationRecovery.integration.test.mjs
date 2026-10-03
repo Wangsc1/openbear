@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {markRaw, toRaw} from 'vue';
 import {applyOperationFrame,deriveOperationRunState,projectOperationMessages,isRootRunTerminalFrame,isTerminalOperationFrame,normalizeOperations,shouldApplyOperationFrame} from '../../timelineProjection.js';
 import {mergeOperationSnapshots} from './timelinePagination.js';
 import {createOperationFrameBuffer} from './operationFrameBuffer.js';
@@ -19,7 +20,7 @@ function harness(){
   const props={conversationUuid:'A'};
   const snapshot=deferred(),stateReadStarted=deferred();
   const context=vm.createContext({
-    Map,props,console:{warn(){}},applyOperationFrame,normalizeOperations,mergeOperationSnapshots,shouldApplyOperationFrame,
+    Map,props,markRaw,toRaw,console:{warn(){}},applyOperationFrame,normalizeOperations,mergeOperationSnapshots,shouldApplyOperationFrame,
     deriveOperationRunState,projectOperationMessages,
     stateStatsByOpId:new Map(),chatState:{value:null},searchWindowActive:{value:false},
     mergeLedgerUsageIntoState(){},operationScrollImpact:()=> 'none',mergeScrollImpact:()=> 'none',

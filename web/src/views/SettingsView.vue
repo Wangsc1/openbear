@@ -1,11 +1,13 @@
 <script setup>
-import { computed, defineAsyncComponent, nextTick, onMounted, reactive, ref } from "vue";
-import { ElMessage } from "element-plus";
+import { computed, defineAsyncComponent, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { Api, apiError } from "../api";
 import ModelOrderPicker from "../components/ModelOrderPicker.vue";
 import DeviceNotifications from "../pwa/DeviceNotifications.vue";
 import { settingDisplayValue, settingStorageValue, settingRangeLabel } from "./settingsDisplay.js";
 
+const webhookEnvironment = ref(null);
+const webhookSettingFailures = reactive({});
 const MdEditor = defineAsyncComponent(() => import("../components/AdaptiveMdEditor.vue"));
 
 function builtinPrompt(spec) {
@@ -21,6 +23,10 @@ const masked = ref({});
 const usingBuiltin = ref({});
 const draft = reactive({});
 const activeDomain = ref("agent");
+watch(() => activeDomain.value, async domain => {
+  if (domain !== 'webhooks') return;
+  try { webhookEnvironment.value = await Api.webhookEnvironment(); } catch { webhookEnvironment.value = null; }
+});
 const query = ref("");
 const revision = ref(0);
 const editingPath = ref("");
@@ -61,6 +67,7 @@ const domainIcons = {
   media: "▣",
   web: "◎",
   interface: "◐",
+  webhooks: '⇄',
 };
 
 function okOrThrow(data) { if (data?.ok === false) throw new Error(data.error || "操作失败"); return data; }
@@ -141,7 +148,7 @@ function displayedValue(spec) {
     return selected.map((item) => optionLabel(spec, item)).join("、");
   }
   if (isPromptEditorSpec(spec) && (value === undefined || value === null || value === "")) return builtinPrompt(spec);
-  if (value === undefined || value === null || value === "") return "未设置";
+  if (value === undefined || value === null || value === "") return spec.path.startsWith('webhooks.') ? (spec.path.includes('retention.') ? '不自动清理' : '使用服务器默认') : "未设置";
   if (hasOptions(spec)) return optionLabel(spec, value);
   return `${settingDisplayValue(spec, value)}${spec.unit || ""}`;
 }
@@ -150,15 +157,19 @@ function isDirty(spec) {
   if (isPromptEditorSpec(spec)) {
     return String(draft[spec.path] || "") !== String(values.value[spec.path] || builtinPrompt(spec));
   }
-  const original = spec.displayScale > 1 ? normalizeDraftValue(spec, values.value[spec.path]) : values.value[spec.path];
+  const original = spec.displayScale > 1 || spec.path.startsWith('webhooks.') ? normalizeDraftValue(spec, values.value[spec.path]) : values.value[spec.path];
   return JSON.stringify(draft[spec.path]) !== JSON.stringify(original);
 }
 function inputPlaceholder(spec) {
   if (spec.sensitive) return "留空不修改，输入新值后保存";
+  if (spec.nullable) return spec.path.includes('retention.') ? '留空不自动清理' : '留空使用默认值';
   if (spec.displayScale > 1) return `输入数字（${spec.unit}）`;
   if (spec.kind === "int") return "整数";
   if (spec.kind === "float") return "数字";
   return "输入文本";
+}
+function interpreterPath(spec) {
+  return webhookEnvironment.value?.runtimes?.find(item => item.runtime === (spec.path.includes('python') ? 'python' : 'node'))?.path || values.value[spec.path] || '未找到解释器';
 }
 function effectTagType(effect) {
   if (effect === "立即生效") return "success";
@@ -207,6 +218,7 @@ async function beginEdit(spec) {
 }
 function reset(spec, options = {}) {
   if (!spec) return;
+  delete webhookSettingFailures[spec.path];
   draft[spec.path] = normalizeDraftValue(spec, values.value[spec.path]);
   if (!options.keepOpen && editingPath.value === spec.path) editingPath.value = "";
 }
@@ -220,7 +232,9 @@ async function save(spec, overrideValue = undefined) {
   saving[spec.path] = true;
   try {
     const input = overrideValue === undefined ? draft[spec.path] : overrideValue;
-    const data = await Api.updateSetting(spec.path, settingStorageValue(spec, input));
+    delete webhookSettingFailures[spec.path];
+    const emptyWebhook = spec.path.startsWith('webhooks.') && (input == null || (typeof input === 'string' && !input.trim()));
+    const data = await Api.updateSetting(spec.path, emptyWebhook ? null : settingStorageValue(spec, input));
     okOrThrow(data);
     const fresh = await Api.settings();
     okOrThrow(fresh);
@@ -228,13 +242,15 @@ async function save(spec, overrideValue = undefined) {
     masked.value = fresh.masked || {};
     usingBuiltin.value = fresh.usingBuiltin || {};
     revision.value = fresh.revision || data.revision || revision.value;
-    hydrateDraft();
+    if (spec.path.startsWith('webhooks.')) draft[spec.path] = normalizeDraftValue(spec, values.value[spec.path]);
+    else hydrateDraft();
     if (editingPath.value === spec.path) editingPath.value = "";
     if (isPromptEditorSpec(spec)) editingPromptPath.value = "";
     ElMessage.success(`${spec.title} 已保存`);
     return true;
   } catch (error) {
-    draft[spec.path] = normalizeDraftValue(spec, values.value[spec.path]);
+    if (spec.path.startsWith('webhooks.') && spec.kind !== 'bool') webhookSettingFailures[spec.path] = apiError(error);
+    else draft[spec.path] = normalizeDraftValue(spec, values.value[spec.path]);
     ElMessage.error(apiError(error));
     return false;
   } finally {
@@ -243,7 +259,7 @@ async function save(spec, overrideValue = undefined) {
 }
 function handleEditorBlur(spec) {
   window.setTimeout(() => {
-    if (editingPath.value !== spec.path || saving[spec.path]) return;
+    if (editingPath.value !== spec.path || saving[spec.path] || webhookSettingFailures[spec.path]) return;
     reset(spec);
   }, 80);
 }
@@ -263,6 +279,10 @@ async function selectOption(spec, value) {
 }
 async function toggleBool(spec) {
   if (!spec || saving[spec.path]) return;
+  if (spec.path === 'webhooks.enabled' && draft[spec.path]) {
+    try { await ElMessageBox.confirm('关闭后拒绝新事件，全部尚未开始阶段暂停；当前阶段可收尾，但不启动下一阶段，匹配事件不自动唤醒。历史与配置仍可查看。', '关闭外部触发服务？', {confirmButtonText:'关闭服务',cancelButtonText:'保持开启',type:'warning',closeOnClickModal:false,autofocus:false}); }
+    catch { return; }
+  }
   draft[spec.path] = !Boolean(draft[spec.path]);
   await save(spec);
 }
@@ -479,7 +499,8 @@ onMounted(load);
                   </div>
 
                   <div class="setting-control min-w-0">
-                    <template v-if="spec.kind === 'bool'">
+                    <template v-if="['webhooks.scripts.pythonPath','webhooks.scripts.nodePath'].includes(spec.path)"><span class="value-pill value-pill--readonly" :title="interpreterPath(spec)"><span class="value-pill__label">{{ interpreterPath(spec) }}</span></span></template>
+                    <template v-else-if="spec.kind === 'bool'">
                       <div class="flex items-center justify-end gap-3">
                         <span class="setting-state-text">{{ draft[spec.path] ? '开启' : '关闭' }}</span>
                         <button
@@ -538,7 +559,7 @@ onMounted(load);
                         <span class="value-pill__label">{{ displayedValue(spec) }}</span>
                         <span class="value-pill__edit">✎</span>
                       </button>
-                      <div v-else class="space-y-1.5">
+                      <div v-else class="setting-editor space-y-1.5">
                         <div class="editor-bar">
                           <el-input
                             v-if="isLongText(spec)"
@@ -569,6 +590,7 @@ onMounted(load);
                           <button type="button" class="mac-icon-action mac-icon-action--primary" :class="saving[spec.path] ? 'is-loading' : ''" :disabled="!isDirty(spec) || saving[spec.path]" title="保存" @mousedown.prevent @click="save(spec)">{{ saving[spec.path] ? '…' : '✓' }}</button>
                           <button type="button" class="mac-icon-action" :disabled="saving[spec.path]" title="撤销" @mousedown.prevent @click="reset(spec)">↩</button>
                         </div>
+                        <div v-if="webhookSettingFailures[spec.path]" role="alert" class="editor-hint">{{ webhookSettingFailures[spec.path] }}（草稿已保留）</div>
                         <div class="editor-hint">
                           <template v-if="spec.sensitive">留空保存不修改 · 失焦或 Esc 还原</template>
                           <template v-else>Enter 保存 · 失焦或 Esc 还原</template>
@@ -582,7 +604,7 @@ onMounted(load);
                   <code>{{ spec.path }}</code>
                   <span class="settings-effect" :class="`is-${effectTagType(spec.effect)}`">{{ spec.effect }}</span>
                   <span v-if="spec.unit">单位 {{ spec.unit }}</span>
-                  <span v-if="spec.min !== null || spec.max !== null">范围 {{ settingRangeLabel(spec) }}</span>
+                  <span v-if="spec.min != null || spec.max != null">{{ settingRangeLabel(spec) }}</span>
                 </div>
               </template>
             </article>
@@ -1011,12 +1033,13 @@ onMounted(load);
 .settings-empty p { font-size: 10px; }
 .setting-control {
   display: flex;
+  min-width: 0;
+  max-width: 100%;
   justify-content: flex-end;
 }
-.setting-control {
-  display: flex;
-  justify-content: flex-end;
-}
+.setting-editor { min-width: 0; width: 100%; max-width: 360px; }
+.value-pill--readonly { cursor: default; }
+.value-pill--readonly:hover { transform: none; }
 .settings-prompt-card {
   display: block;
 }
@@ -1066,6 +1089,7 @@ onMounted(load);
   letter-spacing: 0.01em;
 }
 .value-pill {
+  box-sizing: border-box;
   display: inline-flex;
   align-items: center;
   justify-content: space-between;

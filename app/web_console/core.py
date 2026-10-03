@@ -48,7 +48,7 @@ from app.db.engine import DB, now_ts
 from app.interaction_data import redact_interaction_log
 from app.llm.base import Message
 from app.llm.events import Usage
-from app.logging import get_logger
+from app.logging import BackgroundLogWriter, get_logger
 from app.media.attachments import (
     InboundMedia,
     build_llm_content,
@@ -161,6 +161,8 @@ _WEB_SESSION_KEY = web.RequestKey("web_session", WebSession)
 _WEB_FRONTEND_EVENT_LOG_DIR = Path(os.environ.get("OPENBEAR_WEB_FRONTEND_EVENT_LOG_DIR") or "logs/web-frontend-events")
 _WEB_WS_AUDIT_LOG_DIR = Path(os.environ.get("OPENBEAR_WEB_WS_AUDIT_LOG_DIR") or "logs/web-ws-audit")
 _WEB_DEBUG_FILE_LOGS_ENABLED = os.environ.get("OPENBEAR_WEB_DEBUG_FILE_LOGS") == "1"
+# Separate from stdout: a slow debug filesystem must not stall service logs.
+_WEB_DEBUG_LOG_WRITER = BackgroundLogWriter("openbear-log-web-debug", capacity=128)
 
 
 def _log_web_frontend_event(record: dict[str, Any]) -> None:
@@ -172,23 +174,27 @@ def _log_web_frontend_event(record: dict[str, Any]) -> None:
     """
     if not _WEB_DEBUG_FILE_LOGS_ENABLED:
         return
-    try:
-        record = redact_interaction_log(record)
-        ts_ms = int(time.time() * 1000)
-        payload = {
-            "tsMs": ts_ms,
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts_ms / 1000)) + f".{ts_ms % 1000:03d}Z",
-            "pid": os.getpid(),
-            **record,
-        }
-        _WEB_FRONTEND_EVENT_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        path = _WEB_FRONTEND_EVENT_LOG_DIR / f"{time.strftime('%Y-%m-%d', time.gmtime(ts_ms / 1000))}.jsonl"
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":")))
-            fh.write("\n")
-    except Exception:
-        # Never let debug logging affect production event delivery.
-        pass
+    _WEB_DEBUG_LOG_WRITER.submit(
+        _write_web_frontend_event, record, _WEB_FRONTEND_EVENT_LOG_DIR,
+        int(time.time() * 1000), os.getpid(),
+    )
+
+
+def _write_web_frontend_event(record: dict[str, Any], log_dir: Path, ts_ms: int, pid: int) -> None:
+    # Redaction/serialization and every filesystem operation run on the writer.
+    # BackgroundLogWriter contains failures without recursively logging them.
+    record = redact_interaction_log(record)
+    payload = {
+        "tsMs": ts_ms,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts_ms / 1000)) + f".{ts_ms % 1000:03d}Z",
+        "pid": pid,
+        **record,
+    }
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / f"{time.strftime('%Y-%m-%d', time.gmtime(ts_ms / 1000))}.jsonl"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":")))
+        fh.write("\n")
 
 
 def _log_web_ws_audit(record: dict[str, Any]) -> None:
@@ -200,29 +206,32 @@ def _log_web_ws_audit(record: dict[str, Any]) -> None:
     """
     if not _WEB_DEBUG_FILE_LOGS_ENABLED:
         return
-    try:
-        record = redact_interaction_log(record)
-        ts_ms = int(time.time() * 1000)
-        day = time.strftime("%Y-%m-%d", time.gmtime(ts_ms / 1000))
-        payload = {
-            "tsMs": ts_ms,
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts_ms / 1000)) + f".{ts_ms % 1000:03d}Z",
-            "pid": os.getpid(),
-            **record,
-        }
-        line = json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":")) + "\n"
-        _WEB_WS_AUDIT_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        (_WEB_WS_AUDIT_LOG_DIR / "by-day").mkdir(parents=True, exist_ok=True)
-        with (_WEB_WS_AUDIT_LOG_DIR / "by-day" / f"{day}.jsonl").open("a", encoding="utf-8") as fh:
+    _WEB_DEBUG_LOG_WRITER.submit(
+        _write_web_ws_audit, record, _WEB_WS_AUDIT_LOG_DIR,
+        int(time.time() * 1000), os.getpid(),
+    )
+
+
+def _write_web_ws_audit(record: dict[str, Any], log_dir: Path, ts_ms: int, pid: int) -> None:
+    record = redact_interaction_log(record)
+    day = time.strftime("%Y-%m-%d", time.gmtime(ts_ms / 1000))
+    payload = {
+        "tsMs": ts_ms,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts_ms / 1000)) + f".{ts_ms % 1000:03d}Z",
+        "pid": pid,
+        **record,
+    }
+    line = json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":")) + "\n"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "by-day").mkdir(parents=True, exist_ok=True)
+    with (log_dir / "by-day" / f"{day}.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(line)
+    conv = str(record.get("conversationUuid") or "").strip()
+    if conv:
+        conv_dir = log_dir / "by-conversation" / re.sub(r"[^A-Za-z0-9_.-]+", "_", conv)
+        conv_dir.mkdir(parents=True, exist_ok=True)
+        with (conv_dir / f"{day}.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(line)
-        conv = str(record.get("conversationUuid") or "").strip()
-        if conv:
-            conv_dir = _WEB_WS_AUDIT_LOG_DIR / "by-conversation" / re.sub(r"[^A-Za-z0-9_.-]+", "_", conv)
-            conv_dir.mkdir(parents=True, exist_ok=True)
-            with (conv_dir / f"{day}.jsonl").open("a", encoding="utf-8") as fh:
-                fh.write(line)
-    except Exception:
-        pass
 
 
 def _sha256(value: str) -> str:

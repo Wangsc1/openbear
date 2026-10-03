@@ -47,7 +47,7 @@ function harness(overrides = {}, tab = "main") {
   });
   vm.runInContext(script, context);
   vm.runInContext(`runConfigTab.value = ${JSON.stringify(tab)}`, context);
-  const bindings = proxyRefs(vm.runInContext(`({props, emit, runConfigTab, isAgentTab, contextDetailText, contextMeterStyle,
+  const bindings = proxyRefs(vm.runInContext(`({props, emit, runConfigTab, isAgentTab, contextDetailText, contextMeterStyle, contextPercentNumber, runConfigContextRingClass,
     runConfigModelText, runConfigMetaText, runConfigMetaParts, runConfigStrategyText, runConfigThinkingBadge, runConfigStatusLabel, menuSelectedModel, menuThinkingLevels, menuSupportsThinking, menuThinkingLevel, menuDefaultThinking,
     agentFastTriState, fmtTokens, modelLabel, modelTags, modelFeatures, rolloverTriggerForModel, compactThinkingLabel, selectMenuModel, selectMenuThinking,
     activeModelDetail, modelDetailId, showModelFeature, clearModelDetail, runConfigPopoverVisible,
@@ -72,6 +72,24 @@ function harness(overrides = {}, tab = "main") {
   }};
 }
 const hasClass = (node, name) => String(node.props?.class || "").split(/\s+/).includes(name);
+
+test('desktop context adds the existing-style ring before its numbers without changing other chip content', async () => {
+  for (const [percent, fill, tone] of [['58.8%', '58.8', ''], ['90.0%', '90', 'is-warning'], ['120.0%', '100', 'is-danger'], ['—', '0', 'is-unknown']]) {
+    const label = `160K / 272K（${percent}）`;
+    const h = harness({currentFast: true, contextDisplay: label, contextPercentDisplay: percent});
+    const html = await h.renderChip();
+    assert.equal((html.match(/class="run-config-context-ring(?:\s|")/g) || []).length, 1);
+    assert.match(html, new RegExp(`stroke-dasharray="${fill} 100"`));
+    if (tone) assert.ok(html.includes(`run-config-context-ring ${tone}`));
+    assert.ok(html.indexOf('data-icon="zap"') < html.indexOf('class="run-config-context-ring'));
+    assert.ok(html.indexOf('class="run-config-context-ring') < html.indexOf(label));
+    assert.ok(html.includes('GPT-6 Astra') && html.includes('极高') && html.includes('滑窗压缩'));
+    assert.ok(!(await h.render()).html.includes('run-config-context-ring'), 'the picker popover is unchanged');
+  }
+  assert.match(source, /\.run-config-context-ring\s*\{[^}]*display:\s*inline-block\s*;/,
+    'the inline usage ring must override Tailwind SVG display:block or it splits the chip into clipped lines');
+  assert.match(source, /@media \(max-width: 760px\)[\s\S]*?\.run-config-chip-meta \{ display: none; \}/);
+});
 
 test("model rows display readable numerical attributes and feature badges, omitting protocol details", async () => {
   const h = harness();
@@ -198,7 +216,8 @@ test('collapsed model button exposes the shared compression mode without losing 
   const button = html.match(/^<button[^>]*>/)[0];
   assert.match(button, /aria-label="运行配置"/);
   assert.match(button, /aria-description="上下文压缩：滑动窗口，思考强度：极高，Fast 模式已开启"/);
-  assert.match(html, /class="run-config-chip-meta"><!--\[--><span class="run-config-meta-part"><!--\[-->极高<!--\]--><\/span><span class="run-config-meta-part run-config-meta-fast" title="Fast 模式"><span data-icon="zap"><\/span><\/span><span class="run-config-meta-part"><!--\[-->216K \/ 300K<!--\]--><\/span><!--\]--><\/span>/);
+  const withoutRing = html.replace(/<!--[\s\S]*?-->/g, '').replace(/<svg class="run-config-context-ring[^"]*"[\s\S]*?<\/svg>/, '');
+  assert.match(withoutRing, /class="run-config-chip-meta"><span class="run-config-meta-part">极高<\/span><span class="run-config-meta-part run-config-meta-fast" title="Fast 模式"><span data-icon="zap"><\/span><\/span><span class="run-config-meta-part">216K \/ 300K<\/span><\/span>/);
   assert.equal((html.match(/class="run-config-chip-meta"[\s\S]*?<\/span><\/span>/)?.[0].match(/Fast(?! 模式)/g) || []).length, 0, 'desktop metadata uses the icon instead of Fast text');
   assert.equal(h.bindings.runConfigMetaText, '极高 · Fast · 216K / 300K');
   assert.match(html, /class="run-config-chip-status" aria-hidden="true"/);

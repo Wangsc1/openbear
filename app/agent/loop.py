@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import inspect
 import json
@@ -659,11 +660,28 @@ class Agent:
                 # 放在每轮请求模型之前，模型下一轮即可见老大的补充指导/改目标。
                 await _inject_steers(_drain_steers(), cut=open_rendered)
 
+                if tool_context is not None and tool_context.receipt_repair:
+                    if not tool_context.receipt_repair_started:
+                        tool_context.receipt_repair_started = time.monotonic()
+                    if tool_context.receipt_repair_calls >= 2 or time.monotonic() - tool_context.receipt_repair_started >= 60:
+                        result.halted_reason = 'receipt_repair_incomplete'
+                        return RuntimeDecision.complete(result)
+                    tool_context.receipt_repair_calls += 1
                 round_no += 1
                 result.rounds = round_no
                 await renderer.on_status("正在思考 …")
 
             async def call_model(host_self):
+                if tool_context is not None and tool_context.receipt_repair:
+                    try:
+                        async with asyncio.timeout(max(.001, 60 - (time.monotonic() - tool_context.receipt_repair_started))):
+                            return await host_self._call_model()
+                    except TimeoutError:
+                        result.halted_reason = 'receipt_repair_incomplete'
+                        return RuntimeDecision.complete(result)
+                return await host_self._call_model()
+
+            async def _call_model(host_self):
                 nonlocal convo, full_text, reasoning_text, signature, pending, finish, encrypted_reasoning_text
                 nonlocal native_output_items, native_round_replayable, open_rendered, emergency_overflow_tries
                 full_text = reasoning_text = signature = finish = ""
@@ -747,11 +765,15 @@ class Agent:
                     elif new_output and event.kind in {"reasoning", "encrypted_reasoning"} and display_reasoning:
                         await renderer.on_delta(display_text, display_reasoning)
 
-                async def settle(outcome):
+                async def after_settle(outcome):
+                    # Clearing progress publishes a Web event. Never acquire its
+                    # presentation lock while holding the accounting writer.
                     nonlocal tool_input_active
                     if tool_input_active and input_progress is not None:
                         await input_progress(None)
                         tool_input_active = False
+
+                async def settle(outcome):
                     response = outcome.response
                     usage = response.usage
                     result.usage.merge(usage)
@@ -824,6 +846,7 @@ class Agent:
                         prepare, settle, on_event=observe, on_retry=retry_state,
                         recover_overflow=recover, cancel_check=retry_cancel_check,
                         control_check=retry_control_check, on_start=started,
+                        after_settle=after_settle,
                     )
                 except RetryCancelledError:
                     await finish_bridge_preview()
@@ -1274,6 +1297,18 @@ class Agent:
                 elif finish and finish not in ("stop", "tool_calls", ""):
                     log.info("未知 finish_reason", 轮次=round_no, finish_reason=finish)
 
+                finish_policy = getattr(tool_context, "finish_policy", None) if tool_context is not None else None
+                if finish_policy is not None:
+                    decision = await finish_policy(full_text)
+                    if decision.get("action") in {"repair", "continue"}:
+                        if full_text or reasoning_text:
+                            await _persist_assistant(content=full_text, reasoning=reasoning_text, signature=signature, tool_calls=[], native_output_items=list(native_output_items or []))
+                            convo.append({"role": "assistant", "content": full_text})
+                        if decision.get("action") == "repair":
+                            tool_context.receipt_repair = True
+                            tool_schemas[:] = [s for s in tool_schemas if s.get("function", {}).get("name", s.get("name")) in {"Webhook", "History"}]
+                        convo.append({"role": "user", "content": decision["message"], "_openbear_source": {"kind": "runtime"}})
+                        return RuntimeDecision.continue_()
                 result.text = full_text
                 # 实时落库普通字段；完整 model-visible context 只进私有 checkpoint。
                 if full_text or reasoning_text or native_output_items:
@@ -1324,6 +1359,31 @@ class Agent:
                 log.info("Agent完成", 轮次=round_no, 工具=result.tools_used or "无",
                          回复长度=len(full_text), Token=result.usage.total_tokens)
                 return RuntimeDecision.complete(result)
-        return await session.run(lambda: ExecutionRuntime().run(ControllerHost()),
-            classify=lambda value: "cancelled" if value.halted_reason in {"soft_stop", "retry_cancelled"}
-            else "failed" if value.model_fail else "completed")
+        async def run_host():
+            started = getattr(tool_context, "execution_started", None) if tool_context is not None else None
+            if started is not None:
+                initial = await started(session)
+                if isinstance(initial, dict):
+                    if initial.get('skipModel'):
+                        return result
+                    if initial.get('material') is not None:
+                        for message in reversed(convo):
+                            if source_of(message).get('assignment_id') == tool_context.webhook_assignment_id:
+                                message['content'] = initial['material']
+                                break
+            return await ExecutionRuntime().run(ControllerHost())
+
+        terminal_reason = "failed"
+        try:
+            value = await session.run(run_host,
+                classify=lambda value: "cancelled" if value.halted_reason in {"soft_stop", "retry_cancelled"}
+                else "failed" if value.model_fail else "completed")
+            terminal_reason = "protocol_incomplete" if value.halted_reason == 'receipt_repair_incomplete' else "cancelled" if value.halted_reason else "failed" if value.model_fail else "completed"
+            return value
+        except asyncio.CancelledError:
+            terminal_reason = "cancelled"
+            raise
+        finally:
+            terminal_policy = getattr(tool_context, "terminal_policy", None) if tool_context is not None else None
+            if terminal_policy is not None:
+                await asyncio.shield(terminal_policy(terminal_reason))

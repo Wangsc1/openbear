@@ -13,7 +13,7 @@ function between(text, start, end) {
   assert.ok(from >= 0 && to > from, `${start}..${end}`);
   return text.slice(from, to);
 }
-const actual = between(source, 'async function showProperties(row) {', 'async function loadAllFolders()')
+const actual = between(source, 'async function showProperties(row, initialTab = \'context\') {', 'async function loadAllFolders()')
   + '\n' + between(display, 'export function modelThinkingLevels(', 'export function thinkingLabel(').replaceAll('export function', 'function');
 const clone = value => JSON.parse(JSON.stringify(value));
 const ref = value => ({value});
@@ -34,6 +34,7 @@ function harness({local = {}, inherited = {}, getProperties, failOptions = false
     ...defaults, ref, computed: getter => ({get value() {return getter();}}), watch: () => {}, nextTick: async () => {},
     thinkingLabel: value => value, apiError: error => error.message,
     propertiesDialog:ref(false), propertiesLoading:ref(false), propertiesSaving:ref(false), propertiesTab:ref('context'),
+    webhookEditor:ref(null), webhookVisited:ref(false), webhookFocused:ref(false),
     propertyModelOptions:ref([]), propertiesRunDefaultsBaseline:ref({}), propertiesForm:{},
     impactState:{}, impactDialog:ref(false),
     ElMessage:{warning: text => warnings.push(text), error: text => errors.push(text), success: () => {}},

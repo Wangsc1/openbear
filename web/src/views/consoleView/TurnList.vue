@@ -11,6 +11,7 @@ import {
 	eventUpdatedAtMs as projectedEventUpdatedAtMs,
 } from "../../timelineProjection.js";
 import ConsoleMarkdown from "./ConsoleMarkdown.vue";
+import WebhookMessageCard from './WebhookMessageCard.vue';
 import ReplyMarkdownShare from "./ReplyMarkdownShare.vue";
 import {replyMarkdownText} from "./replyMarkdownShare.js";
 import TurnEvent from "./TurnEvent.vue";
@@ -198,18 +199,26 @@ function durationMsForEvent(event) {
 	return start && end > start ? end - start : 0;
 }
 
-function formatHoverTime(ms) {
+// A stream paint visits many row labels. Cache the exact existing formatting,
+// rather than constructing thousands of locale formatters for unchanged times.
+const timeLabels = new Map();
+function formattedTimes(ms) {
 	const value = Number(ms || 0);
-	if (!value) return "";
-	const d = new Date(value);
-	return d.toLocaleTimeString("zh-CN", {hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit"});
+	if (!value) return {short: '', full: ''};
+	let labels = timeLabels.get(value);
+	if (!labels) {
+		const date = new Date(value);
+		labels = {
+			short: date.toLocaleTimeString('zh-CN', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'}),
+			full: date.toLocaleString('zh-CN', {hour12: false}),
+		};
+		timeLabels.set(value, labels);
+		if (timeLabels.size > 2048) timeLabels.delete(timeLabels.keys().next().value);
+	}
+	return labels;
 }
-
-function formatFullTime(ms) {
-	const value = Number(ms || 0);
-	if (!value) return "";
-	return new Date(value).toLocaleString("zh-CN", {hour12: false});
-}
+function formatHoverTime(ms) { return formattedTimes(ms).short; }
+function formatFullTime(ms) { return formattedTimes(ms).full; }
 
 function formatDuration(ms) {
 	const value = Number(ms || 0);
@@ -308,10 +317,11 @@ async function copyMessage(content, key) {
 <template>
 	<template v-for="(turn, turnIndex) in props.turns" :key="turn.id">
 	<section v-if="(turn.user && !turn.user.syntheticPlaceholder && !visibility.isHidden(turn.user)) || hasAssistantContent(turn) || assistantMetaVisible(turn, turnIndex)" class="turn-block" :data-turn-index="turnIndex">
-		<div v-if="turn.user && !turn.user.syntheticPlaceholder && !visibility.isHidden(turn.user)" class="timed-row timed-row-user visibility-hover-surface" :data-search-op-id="turn.user.opId || turn.user.id" :class="visibilitySelectionClasses(turn.user, visibility)" @click.capture="selectVisibilityRow($event, turn.user, visibility)">
+		<div v-if="turn.user && !turn.user.syntheticPlaceholder && !visibility.isHidden(turn.user)" class="timed-row timed-row-user visibility-hover-surface" :data-search-op-id="turn.user.opId || turn.user.id" :class="[visibilitySelectionClasses(turn.user, visibility), {'timed-row-event': turn.user.source === 'webhook'}]" @click.capture="selectVisibilityRow($event, turn.user, visibility)">
 			<div class="user-row">
 				<div class="user-message-group">
-					<article class="message-user">
+					<WebhookMessageCard v-if="turn.user.source === 'webhook'" :message="turn.user"/>
+					<article v-else class="message-user">
 						<ConsoleMarkdown v-if="turn.user.content" :text="turn.user.content" :reference-bundle-id="turn.user.referenceBundleId || ''" :references="turn.user.references || []"/>
 						<div v-if="userAttachments(turn).length" class="user-attachments" :class="{ 'with-text': turn.user.content }">
 							<template v-for="item in userAttachments(turn)" :key="item.id || item.artifactUuid || attachmentName(item)">
@@ -331,7 +341,7 @@ async function copyMessage(content, key) {
 						</template>
 					</div>
 				</article>
-				<div class="user-message-meta">
+				<div v-if="turn.user.source !== 'webhook'" class="user-message-meta">
 					<MessageVisibilityAction :target="turn.user" desktop-placement="footer" :turn="turn" mobile-selection-only/>
 					<el-tooltip v-if="turn.user.content" content="复制消息" placement="bottom" :show-after="350">
 						<button type="button" class="message-icon-action" aria-label="复制消息"
@@ -483,6 +493,10 @@ async function copyMessage(content, key) {
 	flex-direction: column;
 	align-items: flex-end;
 }
+
+.timed-row-event .user-row { justify-content: flex-start; }
+.timed-row-event .user-message-group { align-items: flex-start; width: min(100%, 520px); max-width: 100%; }
+.timed-row-event .user-message-meta { justify-content: flex-start; }
 
 .user-message-meta {
 	display: flex;

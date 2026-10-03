@@ -330,11 +330,14 @@ class ModelCallDriver:
         retry_scope: str = "model_call", task_uuid: str = "",
         accumulate_reasoning: bool = True,
         on_start: StartCallback | None = None,
+        after_settle: SettleCallback | None = None,
     ) -> LogicalResponse:
         """Retry provider failures only, never preparation, controls or accounting.
 
         ``recover_overflow`` owns its own bounded rotation policy. A successful
         rotation discards stale partial/native state without spending normal retries.
+        ``settle`` is atomic accounting only; presentation belongs in
+        ``after_settle``, outside the writer transaction (including cancellation).
         """
         logical = AgentResult()
         attempts = retries = normal_retries = 0
@@ -345,6 +348,8 @@ class ModelCallDriver:
 
         async def settled(outcome):
             nonlocal last_retry_state
+            if after_settle is not None:
+                await _invoke(after_settle, outcome)
             if last_retry_state is not None and on_retry is not None:
                 await _invoke(on_retry, {**last_retry_state, "active": False, "cancelable": False,
                     "retryAtMs": 0, "terminal": True,

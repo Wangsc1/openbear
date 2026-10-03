@@ -4,9 +4,9 @@ import { useAdminPhone } from '../adminViewport.js';
 import { resizePhoneTextarea } from './phoneTextarea.js';
 
 defineOptions({ inheritAttrs: false });
-const props = defineProps({ modelValue: { type: String, default: '' }, mobileFlow: Boolean });
+const props = defineProps({ modelValue: { type: String, default: '' }, mobileFlow: Boolean, readOnly: { type: Boolean, default: false } });
 const emit = defineEmits(['update:modelValue']);
-const model = computed({ get: () => props.modelValue, set: value => emit('update:modelValue', value) });
+const model = computed({ get: () => props.modelValue, set: value => { if (!props.readOnly) emit('update:modelValue', value); } });
 const isAdminPhone = useAdminPhone();
 const advanced = ref(false);
 const nativeInput = ref(null);
@@ -38,8 +38,8 @@ onBeforeUnmount(() => observer?.disconnect());
       <button type="button" :aria-pressed="!advanced" @click="advanced = false">文本</button>
       <button type="button" :aria-pressed="advanced" title="切换 Monaco，使用代码补全" @click="advanced = true">代码补全</button>
     </div>
-    <textarea v-if="isAdminPhone && !advanced" ref="nativeInput" v-model="model" class="phone-native-editor" aria-label="正文编辑" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" @input="resize" />
-    <div v-else class="adaptive-code-editor"><MdEditor v-bind="$attrs" v-model="model" /></div>
+    <textarea v-if="isAdminPhone && !advanced" ref="nativeInput" v-model="model" :readonly="readOnly" class="phone-native-editor" aria-label="正文编辑" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" @input="resize" />
+    <div v-else class="adaptive-code-editor"><MdEditor v-bind="$attrs" v-model="model" :read-only="readOnly" /></div>
   </div>
 </template>
 

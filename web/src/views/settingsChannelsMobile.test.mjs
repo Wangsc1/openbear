@@ -80,7 +80,7 @@ test('settings merges navigation only after its lazy header is ready, preserving
   assert.equal(classes('logs', true)['is-settings'], false);
   const outlet = appNodes.find(n => n.tag === 'component' && n.props.some(p => p.name === 'bind' && p.arg?.content === 'is' && p.exp?.content === 'activeView'));
   const Forwarder = {render() {return Vue.h('div', this.$slots['mobile-navigation']?.());}};
-  const scope = Vue.reactive({active:'settings', activeView:Vue.markRaw(Forwarder), sidebarOpen:false, settingsSection:'channels', pageHeaderReady:false, handleSettingsSectionChanged(){}});
+  const scope = Vue.reactive({active:'settings', activeView:Vue.markRaw(Forwarder), sidebarOpen:false, settingsSection:'channels', pageHeaderReady:false, handleSettingsSectionChanged(){}, openWebhookProperties(){}, selectNav(){}});
   const compiled = Vue.compile(outlet.loc.source.replace(/\s+v-else(?=\s)/, ''));
   let tree;
   const rerender = async () => {

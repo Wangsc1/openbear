@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRef, watch } from "vue";
 import ConsoleView from "./views/consoleView/ConsoleView.vue";
 import {createAttachmentDraftStorage} from "./views/consoleView/attachmentDraftStorage.js";
 import { defineLazyView } from "./lazyView.js";
@@ -8,6 +8,7 @@ import {installPushNavigation, installPushPresence} from "./pwa/pushClient.js";
 import LoginView from "./views/LoginView.vue";
 import BearLogoPreview from "./components/BearLogoPreview.vue";
 import ConversationTree from "./components/ConversationTree.vue";
+import ConversationPropertiesDialog from "./components/ConversationPropertiesDialog.vue";
 import MobileSidebarResources from "./components/MobileSidebarResources.vue";
 import "./components/sidebarResources.css";
 import {activityInteractionTarget} from "./conversationActivity.js";
@@ -51,6 +52,7 @@ const SkillsView = defineLazyView(() => import("./views/SkillsView.vue"), "Skill
 const McpView = defineLazyView(() => import("./views/McpView.vue"), "MCP 管理");
 const SettingsHubView = defineLazyView(() => import("./views/SettingsHubView.vue"), "设置");
 const StatisticsView = defineLazyView(() => import("./views/StatisticsView.vue"), "数据统计");
+const WebhooksView = defineLazyView(() => import('./views/WebhooksView.vue'), '触发器总览');
 
 const nav = [
   { key: "memory", label: "记忆管理", shortLabel: "记忆", icon: "Collection", component: MemoryView },
@@ -60,6 +62,7 @@ const nav = [
   { key: "mcp", label: "MCP 管理", shortLabel: "MCP", icon: "Connection", component: McpView },
   { key: "settings", label: "设置", shortLabel: "设置", icon: "Setting", component: SettingsHubView },
   { key: "statistics", label: "数据统计", shortLabel: "统计", icon: "DataAnalysis", component: StatisticsView, headerOnly: true },
+  { key: 'webhooks', label: '触发器总览', shortLabel: '触发器', icon: 'Connection', component: WebhooksView, headerOnly: true },
 ];
 const pageToPath = {
   console: "/chat",
@@ -70,6 +73,7 @@ const pageToPath = {
   mcp: "/mcp",
   settings: "/settings",
   statistics: "/statistics",
+  webhooks: '/webhooks',
 };
 const pathToPage = {
   "/": "console",
@@ -81,6 +85,7 @@ const pathToPage = {
   "/mcp": "mcp",
   "/settings": "settings",
   "/statistics": "statistics",
+  '/webhooks': 'webhooks',
 };
 
 const desktopNav = computed(() => nav.filter((n) => n.key !== "settings" && !n.headerOnly));
@@ -151,6 +156,30 @@ const conversationsLoading = ref(false);
 const conversationListRef = ref(null);
 const conversationTreeRef = ref(null);
 const consoleViewRef = ref(null);
+const conversationPropertiesOpen = ref(false);
+const conversationPropertiesRow = ref(null);
+const conversationPropertiesTab = ref('context');
+const conversationPropertiesRef = ref(null);
+provide('openbear:property-run-config', (uuid, request) => {
+  if (active.value === 'console' && activeConversationUuid.value === uuid && consoleViewRef.value?.savePropertyRunConfig) return consoleViewRef.value.savePropertyRunConfig(uuid, request);
+  return request();
+});
+async function openConversationProperties(row, tab = 'context') {
+  if (conversationPropertiesOpen.value && !await conversationPropertiesRef.value?.canLeave()) return;
+  conversationPropertiesRow.value = {...row}; conversationPropertiesTab.value = tab; conversationPropertiesOpen.value = true;
+}
+async function openWebhookProperties(endpoint) {
+  if (endpoint.scope.type === 'folder') await conversationTreeRef.value?.showProperties({kind:'folder',folderId:endpoint.scope.id,name:endpoint.name}, 'trigger');
+  else await openConversationProperties({conversationUuid:endpoint.scope.id,title:endpoint.name}, 'trigger');
+}
+async function persistPropertyConversation() {
+  try {
+    const source = conversationPropertiesRow.value?.conversationUuid;
+    if (!source?.startsWith('local:') || source !== activeConversationUuid.value || !consoleViewRef.value?.persistForProperties) throw new Error('请先打开此草稿会话，再保存为真实会话');
+    const uuid = await consoleViewRef.value.persistForProperties();
+    if (uuid) conversationPropertiesRow.value = {...conversationPropertiesRow.value,conversationUuid:uuid,local:false};
+  } catch (error) { ElMessage.error(apiError(error)); }
+}
 const attachmentDrafts = createAttachmentDraftStorage();
 const deletingConversations = new Set();
 const activeConversationUuid = ref("");
@@ -1114,6 +1143,7 @@ onBeforeUnmount(() => {
           @refresh-list="handleConsoleRefreshList"
           @delete-conversation="deleteConversation"
           @folder-removed="handleTreeFolderRemoved"
+          @conversation-properties="openConversationProperties"
         />
         <!-- legacy flat-list implementation retained below only as source compatibility; hidden and not mounted -->
         <div v-if="false">
@@ -1358,6 +1388,7 @@ onBeforeUnmount(() => {
         :folder-id="isLocalConversation(activeConversationUuid) ? draftFolderId : selectedFolderId"
         @conversation-created="handleConsoleConversationCreated"
         @conversations-refresh="handleConsoleRefreshList"
+        @properties="openConversationProperties({conversationUuid:activeConversationUuid,title:activeConversationTitle})"
       >
         <template #mobile-navigation>
           <button
@@ -1388,6 +1419,7 @@ onBeforeUnmount(() => {
         :section="settingsSection"
         :navigation-obscured="sidebarOpen"
         @section-changed="handleSettingsSectionChanged"
+        @open-webhook-properties="openWebhookProperties"
         @mobile-header-ready="pageHeaderReady = $event"
       >
         <template #mobile-navigation>
@@ -1403,6 +1435,8 @@ onBeforeUnmount(() => {
         </template>
       </component>
     </main>
+
+    <ConversationPropertiesDialog ref="conversationPropertiesRef" v-model="conversationPropertiesOpen" :conversation="conversationPropertiesRow" :initial-tab="conversationPropertiesTab" @persist="persistPropertyConversation" />
 
     <el-dialog
       v-model="versionDialogOpen"

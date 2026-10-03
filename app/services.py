@@ -45,6 +45,10 @@ from app.tools.history import register_history_tools
 from app.tools.mcp import register_mcp_tools
 from app.tools.memory import register_memory_tools
 from app.tools.openbear_control import register_openbear_control_tool
+from app.tools.webhook import register_webhook_tool
+from app.webhooks.service import WebhookService
+from app.webhooks.runtime_bridge import RuntimeBridge
+from app.webhooks.worker import Worker
 from app.tools.skills import filter_skills, load_skills, render_skills_block
 from app.tools.task_memory import register_task_memory_tool
 from app.tools.user_interaction import UserInteractionManager, register_user_interaction_tools
@@ -120,6 +124,11 @@ class Services:
         self.web_admin.mcp = self.mcp
         self.update = UpdateService(self)
         self.web_admin.update_service = self.update
+        self.webhooks = WebhookService(self.db, config=lambda: self.config.webhooks,
+            pepper=("openbear:webhooks:v1:" + config.telegram.bot_token).encode(), host=self.web_admin)
+        self.web_admin.webhooks = self.webhooks
+        self.webhook_bridge = RuntimeBridge(self.webhooks, self.web_admin)
+        self.webhook_worker = Worker(self.webhooks)
 
         # 工具注册
         self.file_state = FileStateStore(config.tools.file_state_max_entries)
@@ -145,6 +154,7 @@ class Services:
         register_agent_history_tool(self.tools, self.db)
         register_user_interaction_tools(self.tools, self.interactions)
         register_openbear_control_tool(self.tools, self)
+        register_webhook_tool(self.tools, self.webhooks)
         register_browser_tool(self.tools, self.browser)
         register_agent_tools(
             self.tools,
@@ -228,6 +238,7 @@ class Services:
             registered_mcp_tools = len(self.mcp.available_tools())
             log.info("MCP 工具已注册", 数量=registered_mcp_tools)
         await self.web_admin.start()
+        await self.webhook_worker.start()
         await self.update.start()
         log.info("服务已启动", 工具数=len(self.tools.names()), skills=len(self.skills),
                  主力模型=self.selection.current)
@@ -550,8 +561,9 @@ class Services:
                 "UPDATE web_conversations SET status='idle', current_status='已中断（服务重启）' WHERE status IN ('running','stopping')"
             )
             count = int(cur.rowcount or 0)
-            if count:
-                await self.db.conn.commit()
+            # Even a zero-row UPDATE opens a SQLite write transaction. Release
+            # it before startup enters Webhook's FK-enabled transaction scope.
+            await self.db.conn.commit()
             return count
 
         now_ms_value = int(time.time() * 1000)
@@ -668,6 +680,7 @@ class Services:
         register_agent_history_tool(self.tools, self.db)
         register_user_interaction_tools(self.tools, self.interactions)
         register_openbear_control_tool(self.tools, self)
+        register_webhook_tool(self.tools, self.webhooks)
         register_browser_tool(self.tools, self.browser)
         register_agent_tools(
             self.tools,
@@ -969,6 +982,7 @@ class Services:
                  工具数=len(self.tools.names()), skills=len(self.skills), MCP热重载=mcp_changed)
 
     async def shutdown(self) -> None:
+        await self.webhook_worker.close()
         if self._browser_validation_task:
             self._browser_validation_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

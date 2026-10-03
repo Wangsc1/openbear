@@ -1,11 +1,18 @@
 // Presentation units only: configuration and settings API retain storage values.
 export function settingRangeLabel(spec) {
-  if (!(spec.displayScale > 1)) return `${spec.min ?? "—"} ～ ${spec.max ?? "—"}`;
   const label = value => {
-    if (value == null) return "—";
-    if (spec.unit === "MB" && value < spec.displayScale) return `${value / 1024} KB`;
-    return `${settingDisplayValue(spec, value)} ${spec.unit}`;
+    const display = settingDisplayValue(spec, value);
+    if (spec.unit === 'MB') {
+      const concise = Number(Number(display).toPrecision(6));
+      return `${concise !== display ? '约 ' : ''}${concise.toLocaleString('zh-CN', {useGrouping:false, maximumSignificantDigits:6})} MB`;
+    }
+    return `${display}${spec.unit ? ` ${spec.unit}` : ''}`;
   };
+  if (spec.min == null && spec.max == null) return '';
+  // One byte is the smallest positive stored size, not a useful MB input hint.
+  if (spec.unit === 'MB' && spec.min === 1) return spec.max == null ? '大于 0 MB' : `大于 0 MB，最多 ${label(spec.max)}`;
+  if (spec.max == null) return `至少 ${label(spec.min)}`;
+  if (spec.min == null) return `最多 ${label(spec.max)}`;
   return `${label(spec.min)} ～ ${label(spec.max)}`;
 }
 export function settingDisplayValue(spec, value) {

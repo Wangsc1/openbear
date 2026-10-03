@@ -636,6 +636,9 @@ class WebAdminChatHandlersMixin:
         conv_uuid = str(row.get("conversation_uuid") or "")
         stop_at_ms = int(time.time() * 1000)
         if conv_uuid:
+            webhooks = getattr(self, 'webhooks', None)
+            if webhooks is not None:
+                await webhooks.stop_conversation(int(row['owner_chat_id']), conv_uuid, requested_by)
             # Set this before cancellation can enter _run_web_turn's handler;
             # otherwise both paths may publish their own terminal stop frame.
             self._web_stop_markers[conv_uuid] = stop_at_ms
@@ -2034,6 +2037,9 @@ class WebAdminChatHandlersMixin:
             }
 
         if conv_uuid:
+            webhooks = getattr(self, 'webhooks', None)
+            if webhooks is not None:
+                await webhooks.accept_human_conversation(int(row['owner_chat_id']), conv_uuid)
             self._web_stop_markers.pop(conv_uuid, None)
             self._web_stopped_task_uuids.pop(conv_uuid, None)
         attachments_public = await self._web_media_attachments_public(row, media or [], turn_uuid=turn_uuid, op_id=f"msg:{user_message_uuid}")

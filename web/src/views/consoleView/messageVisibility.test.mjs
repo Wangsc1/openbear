@@ -12,6 +12,24 @@ function harness(api = {}, options = {}) {
   return {value, scope, conversationUuid, operations, errors, anchors, state};
 }
 
+test('whole-turn targets are shared across row menus and invalidate on hide, restore, eligibility and history replacement', () => {
+  const h=harness(), v=h.value, events=[{id:'u'},{id:'a'},{id:'t'}], turn={events};
+  try {
+    const initial=v.assistantTargets(turn);
+    assert.deepEqual(initial.map(e=>e.id),['a','t']);
+    assert.equal(v.assistantTargets({events}),initial);
+    v.apply(h.state(1,['a']),false);
+    assert.deepEqual(v.assistantTargets(turn).map(e=>e.id),['t']);
+    v.apply(h.state(2,[]),false);
+    assert.deepEqual(v.assistantTargets(turn).map(e=>e.id),['a','t']);
+    h.operations.value.set('t',{opId:'t',opType:'tool',internal:true});
+    assert.deepEqual(v.assistantTargets(turn).map(e=>e.id),['a']);
+    h.operations.value=new Map([['t',{opId:'t',opType:'tool'}]]);
+    assert.deepEqual(v.assistantTargets(turn).map(e=>e.id),['t']);
+    assert.deepEqual(v.assistantTargets({events:[{id:'a'}]}),[]);
+  } finally { h.scope.stop(); }
+});
+
 test('long-press preview and highlight identify one message, then clear with the menu', () => {
   const h = harness(), v = h.value, target = {id: 'a', message: {content: '这里是第二条回复。\n请保留第一条。'}};
   try {

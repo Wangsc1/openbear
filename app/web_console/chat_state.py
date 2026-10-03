@@ -898,6 +898,9 @@ class WebAdminChatStateMixin:
                 total_time_ms_sum=total_time_ms,
                 output_tokens_sum=output_tokens,
             )
+            from app.webhooks.observability import ledger_cost
+            call_cost = await ledger_cost(connection,str(call.get("attemptId") or ""),cost,
+                known=call.get("providerCostUsd") is not None or bool(call.get("usageReported") and (model_cost or cost>0)))
             await accounting.add_model_call(
                 chat_id,
                 commit=False,
@@ -910,7 +913,7 @@ class WebAdminChatStateMixin:
                 call_kind=call_kind,
                 usage=usage,
                 last_usage=usage,
-                cost_usd=cost,
+                cost_usd=call_cost,
                 connect_ms=connect_ms,
                 first_token_ms=first_token_ms,
                 total_time_ms=total_time_ms,

@@ -16,6 +16,7 @@ const attachmentTemplate = ast.find(node => node.type === 1 && node.props.some(p
 const editorTemplate = ast.find(node => node.type === 1 && node.tag === 'ReferenceEditor');
 const sendTemplate = ast.find(node => node.type === 1 && node.props.some(prop => prop.name === 'class' && prop.value?.content === 'send-button'));
 async function render(template, bindings) {
+  bindings = {stopButtonShape: 'square', ...bindings};
   let tree; const slotTrees = [];
   const compiled = compile(template.loc.source), app = createSSRApp({ render() { tree = compiled.call(this, bindings, []); return tree; } });
   for (const name of ['Close', 'Document', 'Promotion', 'Layers', 'Coins', 'Clock3', 'ArrowDown']) app.component(name, { render: () => h('svg') });

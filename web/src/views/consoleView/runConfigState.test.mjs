@@ -104,6 +104,32 @@ test("the actual model selector marks its HTTP save pending until commit", async
   assert.match(messages[0][1], /source-b\/gpt-5\.6-sol/);
 });
 
+test('a save finishing after leave-and-return refreshes the current visit instead of leaving the old model visible', async () => {
+  const gate = deferred();
+  const refreshes = [];
+  let serverModel = 'openai/original';
+  const context = vm.createContext({
+    createRunConfigSaveQueue, runConfigInteractionGeneration: 0, componentMounted: true,
+    isLocalConversation: {value: false}, props: {conversationUuid: 'conv-a'}, runConfigOverride: {value: null},
+    load: async options => { refreshes.push(options); context.visibleModel = serverModel; },
+    visibleModel: serverModel,
+  });
+  vm.runInContext(sourceBetween('const runConfigSaves = createRunConfigSaveQueue(', 'const displayedRunConfig = computed('), context);
+  context.save = async () => { await gate.promise; serverModel = 'openai/saved'; return response('conv-a', serverModel); };
+  const saving = vm.runInContext("runConfigSaves.enqueue('conv-a', save)", context);
+  await Promise.resolve();
+  context.props.conversationUuid = 'conv-b'; context.runConfigInteractionGeneration++;
+  context.props.conversationUuid = 'conv-a'; context.runConfigInteractionGeneration++;
+  gate.resolve(); await saving;
+  await Promise.resolve();
+  assert.equal(context.visibleModel, 'openai/saved');
+  assert.equal(context.runConfigOverride.value, null, 'do not apply a response from the previous visit');
+  assert.equal(refreshes.length, 1);
+  assert.equal(refreshes[0].conversationUuid, 'conv-a');
+  assert.equal(refreshes[0].fresh, true);
+  assert.equal(refreshes[0].scrollMode, 'preserve');
+});
+
 test("save responses must contain a complete config for the requested conversation", () => {
   const valid = response("conv-a", "openai/gpt");
   assert.equal(runConfigFromResponse(valid, "conv-a"), valid.runConfig);

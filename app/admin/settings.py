@@ -51,6 +51,7 @@ def serialize_spec(spec: SettingSpec) -> dict[str, Any]:
         "max": spec.max_value,
         "unit": spec.unit,
         "displayScale": spec.display_scale,
+        "nullable": spec.nullable,
         "choices": [{"value": value, "label": label} for value, label in spec.choices],
         "sensitive": is_sensitive_path(spec.path),
         "editor": spec.editor,
@@ -124,6 +125,8 @@ def parse_setting_value(path: str, value: Any) -> Any:
     spec = get_spec(path)
     if spec is None:
         raise ValueError("未知设置项")
+    if spec.nullable and value is None:
+        return None
     if spec.editor == "prompt":
         parsed = "" if value is None else str(value)
         validate_prompt_setting(path, parsed)

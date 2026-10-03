@@ -225,8 +225,14 @@ class WebTaskTelegramNotifier:
 
     async def start(self) -> None:
         now = _now()
+        # Upgrade existing webhook channel runs using their durable assignment
+        # identity before applying recovery policy; ordinary turns stay ordinary.
         await self.db.conn.execute(
-            "UPDATE web_tg_notification_outbox SET state='pending', updated_at=? WHERE state='processing'",
+            "INSERT OR IGNORE INTO webhook_notification_routes(root_turn_uuid,notification_key,created_at_ms) SELECT root_turn_uuid,notification_key,? FROM webhook_assignments WHERE origin_kind='webhook' AND notification_key IS NOT NULL",
+            (now * 1000,),
+        )
+        await self.db.conn.execute(
+            "UPDATE web_tg_notification_outbox SET state=CASE WHEN root_turn_uuid IN (SELECT root_turn_uuid FROM webhook_notification_routes) THEN 'unknown' ELSE 'pending' END, updated_at=? WHERE state='processing'",
             (now,),
         )
         await self.db.conn.commit()
@@ -636,6 +642,8 @@ class WebTaskTelegramNotifier:
         if not run:
             await self._mark(delivery, "cancelled", "run_not_found")
             return
+        cur = await self.db.conn.execute('SELECT 1 FROM webhook_notification_routes WHERE root_turn_uuid=?', (delivery.root_turn_uuid,))
+        webhook_owned = await cur.fetchone() is not None
         owner = int(run.get("owner_chat_id") or 0)
         whitelist = {int(value) for value in self.config.telegram.whitelist_ids}
         if owner <= 0 or owner not in whitelist:
@@ -647,6 +655,8 @@ class WebTaskTelegramNotifier:
             else:
                 message_ids = await self._send_notification_page(delivery, owner, run, 1, await self._event_html(run, delivery))
         except asyncio.CancelledError:
+            if webhook_owned:
+                await asyncio.shield(self._mark(delivery, 'unknown', 'delivery_cancelled_verify_before_retry'))
             raise
         except TelegramRetryAfter as exc:
             await self._retry(delivery, f"rate_limited:{int(exc.retry_after)}", delay=max(1, int(exc.retry_after)))
@@ -655,7 +665,9 @@ class WebTaskTelegramNotifier:
             await self._mark(delivery, "failed", type(exc).__name__)
             return
         except Exception as exc:
-            if delivery.attempts >= _MAX_DELIVERY_ATTEMPTS:
+            if webhook_owned:
+                await self._mark(delivery, 'unknown', type(exc).__name__ + ':verify_before_retry')
+            elif delivery.attempts >= _MAX_DELIVERY_ATTEMPTS:
                 await self._mark(delivery, "failed", type(exc).__name__)
             else:
                 await self._retry(delivery, type(exc).__name__, delay=min(300, 2 ** delivery.attempts))

@@ -32,7 +32,7 @@ const render = compile(descriptor.template.content);
 const setupNames = [...script.matchAll(/^(?:async )?function (\w+)\(/gm)].map(match => match[1]);
 const slot = {inheritAttrs: false, setup: (_, {slots}) => () => slots.default?.()};
 function turnList(turns, running = false, hiddenIds = []) {
-  const copies = [], emitted = [];
+  const copies = [], emitted = [], webhookMessages = [];
   const props = {turns, running, conversationUuid: "test-conversation", detailKey: () => "detail", isDetailOpen: () => false, activeToolResultIndex: () => 0};
   const hidden = new Set(hiddenIds);
   const visibility = {hiddenIds: ref(hidden), selecting: ref(false), selected: ref(new Set()), busy: ref(false), canTarget: () => true, isHidden: value => hidden.has(value?.operation?.opId || value?.opId || value?.eventKey || value?.id), assistantTargets: turn => (turn.events || []).filter(event => !hidden.has(event.id))};
@@ -53,9 +53,14 @@ function turnList(turns, running = false, hiddenIds = []) {
   // with its real lifecycle in conversationWork.integration.test.mjs.
   app.component('ConversationWorkBlock', {props: ['entries'], setup: (p, {slots}) => () => p.entries.map((entry, conversationIndex) => slots.default({entry, conversationIndex}))});
   app.component('ConversationProcessEvent', {props: ['event'], setup: p => () => h('div', {'data-event-id': p.event.id}, p.event.message?.reasoning || '上下文压缩')});
+  // The real card's time/details contracts are covered in webhookMessage.integration.test.mjs.
+  app.component("WebhookMessageCard", {props: ['message'], setup: p => {
+    webhookMessages.push(p.message);
+    return () => h('div', {'data-webhook-op-id': p.message.opId}, p.message.eventCard?.name);
+  }});
   app.component("ConsoleMarkdown", {props: ["text"], setup: props => () => h("p", props.text)});
   app.component("TurnEvent", {props: ["event"], setup: props => () => h("div", {"data-event-id": props.event.id}, props.event.message?.content || "上下文压缩")});
-  return {props, copies, emitted, hidden, html: () => renderToString(app), run: code => vm.runInContext(code, context)};
+  return {props, copies, emitted, hidden, webhookMessages, html: () => renderToString(app), run: code => vm.runInContext(code, context)};
 }
 const answer = (id = "answer", content = "已完成") => ({kind: "answer", id, message: {content, createdAt: 1789044000, live: false}});
 const savedStats = () => ({live: false, durationMs: 128664,
@@ -66,6 +71,65 @@ const compact = strategy => ({kind: "tool", id: `compress-${strategy}`, toolName
   payload: {scope: "root", strategy, summary: "摘要不属于复制正文", durationMs: 1000},
 }});
 function footer(html) { return html.match(/<div class="assistant-message-meta">[\s\S]*?<\/div>/)?.[0] || ""; }
+
+const footerTurn = source => ({id: 'footer-turn', user: {
+  source, opId: 'saved-user', turnUuid: 'footer-turn', deleteTraceable: true,
+  content: '事件来信 webhook 原文', createdAt: 1789043900,
+  eventCard: {name: '事件来信', receivedAtMs: 1789043900000, events: [{eventId: 'event-one', summary: '入库完成'}]},
+}, events: [answer()], stats: savedStats()});
+
+for (const source of ['webhook', 'user', undefined]) {
+  test(`compiled TurnList renders ${source || 'legacy'} user footer policy without changing the assistant footer`, async () => {
+    const turn = footerTurn(source);
+    const original = structuredClone(turn);
+    const component = turnList([turn]);
+    const html = await component.html();
+    const userRow = html.split('<div class="assistant-row">')[0];
+    if (source === 'webhook') {
+      assert.match(userRow, /data-webhook-op-id="saved-user"/);
+      assert.match(userRow, /事件来信/);
+      assert.equal(component.webhookMessages[0], turn.user, 'the card receives the complete original message');
+      assert.doesNotMatch(userRow, /user-message-meta|user-message-time|message-icon-action|message-visibility-action/);
+      assert.doesNotMatch(userRow, /aria-label="(?:复制消息|引用本轮问答|从此处重来|隐藏消息)"/);
+    } else {
+      assert.equal(component.webhookMessages.length, 0);
+      assert.match(userRow, /class="message-user"/);
+      assert.match(userRow, /class="user-message-meta"/);
+      assert.match(userRow, /class="user-message-time"[^>]*>\d{2}:\d{2}:\d{2}<\/time>/);
+      for (const label of ['复制消息', '引用本轮问答', '从此处重来', '隐藏消息']) {
+        assert.ok(userRow.includes(`aria-label="${label}"`), `${label} remains available`);
+      }
+    }
+    const assistantFooter = footer(html);
+    assert.match(assistantFooter, /assistant-message-time/);
+    assert.match(assistantFooter, /2m 9s/);
+    assert.match(assistantFooter, /turn-token-usage/);
+    for (const label of ['复制消息', '分享回复 Markdown', '隐藏回复']) {
+      assert.ok(assistantFooter.includes(`aria-label="${label}"`), `${label} remains available on assistant replies`);
+    }
+    assert.deepEqual(turn, original, 'rendering does not alter content, event metadata or traceability');
+  });
+}
+
+test('webhook rows still participate in global visibility selection, hiding and restoration', async () => {
+  const turn = footerTurn('webhook');
+  const original = structuredClone(turn);
+  const component = turnList([turn]);
+  component.run("visibility.selecting.value = true; visibility.selected.value.add('saved-user')");
+  const selected = await component.html();
+  assert.match(selected, /class="[^"]*timed-row-user[^"]*visibility-selectable[^"]*visibility-selected/);
+  assert.match(selected, /data-webhook-op-id="saved-user"/);
+  assert.doesNotMatch(selected, /user-message-meta/);
+  const hidden = await turnList([turn], false, ['saved-user']).html();
+  assert.doesNotMatch(hidden, /timed-row-user|data-webhook-op-id/);
+  assert.match(hidden, /assistant-message-meta/);
+  const allHidden = await turnList([turn], false, ['saved-user', 'answer']).html();
+  assert.doesNotMatch(allHidden, /turn-block|assistant-message-meta|data-webhook-op-id/);
+  const restored = await turnList([turn]).html();
+  assert.match(restored, /data-webhook-op-id="saved-user"/);
+  assert.doesNotMatch(restored, /user-message-meta/);
+  assert.deepEqual(turn, original);
+});
 
 test('restart action renders a non-circular Undo2 icon while retaining its label and guarded delete-suffix event', async () => {
   const turn = {id:'rewind', user:{turnUuid:'rewind', opId:'saved-user', content:'从这一轮重新开始', deleteTraceable:true}, events:[]};

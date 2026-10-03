@@ -1,0 +1,14 @@
+# Optional baseline preparation; select BASE_IMAGE explicitly in the caller.
+# BASE_IMAGE must be Debian 13 with real bash/git and uv already installed.
+# docker build -f scripts/release_support/images/Dockerfile.python \
+#   --build-arg BASE_IMAGE=<explicit-baseline> --build-arg PYTHON_VERSION=3.11 -t <config-python-image> .
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ARG PYTHON_VERSION
+ENV UV_PYTHON_INSTALL_DIR=/opt/managed-python UV_LINK_MODE=copy
+RUN test "$PYTHON_VERSION" = 3.11 -o "$PYTHON_VERSION" = 3.12 -o "$PYTHON_VERSION" = 3.13 \
+ && bash --version && git --version && uv --version \
+ && uv python install "$PYTHON_VERSION" \
+ && uv venv --python "$PYTHON_VERSION" /opt/baseline-venv
+ENV PATH=/opt/baseline-venv/bin:$PATH
+WORKDIR /

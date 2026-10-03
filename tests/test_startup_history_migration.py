@@ -32,8 +32,11 @@ async def legacy_database(path, *, count=5):
                    VALUES ('history', ?, ?, 'reasoning', 'end', 1, ?, '{}', ?, ?)""",
                 (index + 1, f"op-{index}", index + 1, 1000 + index, 1000 + index),
             )
-        # Actual legacy installations have no migration completion table.
-        await database.conn.execute("DROP TABLE schema_data_migrations")
+        # Model unfinished history repair without invalidating other installed schemas.
+        await database.conn.execute(
+            "DELETE FROM schema_data_migrations WHERE name=?",
+            (migrations.WEB_OPERATION_HISTORY_MIGRATION,),
+        )
         await database.conn.commit()
     finally:
         await database.close()
