@@ -101,6 +101,9 @@ function showReferenceShelf(event,key,keyboard=false){
 function referenceNavKey(event,key){if(event.key==='ArrowRight'&&['memory','secrets','docs'].includes(key)){event.preventDefault();showReferenceShelf(event,key,true);}}
 function insertShelfReference(reference){window.dispatchEvent(new CustomEvent('openbear:insert-reference',{detail:{reference}}));closeReferenceShelf();}
 watch(active,closeReferenceShelf);
+watch(active, (value) => {
+  document.documentElement.toggleAttribute('data-openbear-console', value === 'console');
+}, {immediate: true});
 const channelStatsText = ref("系统就绪");
 async function refreshChannelStats() {
   try {
@@ -960,6 +963,7 @@ onMounted(() => {
   }
 });
 onBeforeUnmount(() => {
+  document.documentElement.removeAttribute('data-openbear-console');
   stopPushNavigation?.();
   pushPresence?.stop();
   stopMobileViewport?.();
