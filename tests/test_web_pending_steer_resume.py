@@ -5,6 +5,8 @@ import asyncio
 import copy
 from types import SimpleNamespace
 
+import pytest
+
 from app.agent import steering
 from app.runtime.scheduler import ControllerRuns
 from app.context.builder import build_controller_history
@@ -16,7 +18,8 @@ from app.tools.base import ToolRegistry
 from tests.test_web_admin import FakeRunFactory, FakeStreamBackend, _cfg, web_env
 
 
-async def test_failed_run_restores_pending_steer_before_new_input_without_changing_turn(web_env, monkeypatch):
+@pytest.mark.parametrize("task_status", [None, "running", "needs_openbear_control"])
+async def test_failed_run_restores_pending_steer_before_new_input_without_changing_turn(web_env, monkeypatch, task_status):
     entered, release = asyncio.Event(), asyncio.Event()
 
     class Backend(FakeStreamBackend):
@@ -37,6 +40,8 @@ async def test_failed_run_restores_pending_steer_before_new_input_without_changi
     server.model_selection = SimpleNamespace(current="openai/gpt")
     server.tools = ToolRegistry()
     server.runs = ControllerRuns()
+    # Isolate user-driven recovery from unrelated post-turn notification drains.
+    monkeypatch.setattr(server, "_ensure_web_task_notification_worker", lambda *args, **kwargs: None)
 
     async def system():
         return "sys"
@@ -63,6 +68,13 @@ async def test_failed_run_restores_pending_steer_before_new_input_without_changi
         assert queued["queued"] is True
         queued_item = steering.pending_items(chat)[0]
         source_op_id = f"msg:{queued_item['messageUuid']}"
+        task_uuid = "task-left-after-controller-failure"
+        if task_status:
+            await server.agent_dao.create_task(
+                chat_id=chat, parent_session_uuid=conv_uuid, workflow_uuid="wf-test",
+                title="Agent survives controller failure", status=task_status,
+                task_uuid=task_uuid,
+            )
         release.set()
         assert await asyncio.wait_for(first, 3) is False
         assert steering.has_pending(chat)
@@ -75,7 +87,17 @@ async def test_failed_run_restores_pending_steer_before_new_input_without_changi
         assert backend.calls == 2
         assert not steering.has_pending(chat)
         user_contents = [m["content"] for m in backend.seen_convos[1] if m["role"] == "user"]
-        assert [str(text).split("\n\n[⏰", 1)[0] for text in user_contents] == [initial, old_input, latest_input]
+        visible_inputs = [
+            str(text).split("\n\n<background-agent-control-context>", 1)[0].split("\n\n[⏰", 1)[0]
+            for text in user_contents
+        ]
+        assert visible_inputs == [initial, old_input, latest_input]
+        if task_status:
+            assert task_uuid in str(user_contents[-1])
+            assert task_status in str(user_contents[-1])
+            task = await server.agent_dao.get_task(task_uuid)
+            assert task.status == task_status
+            assert await server.agent_dao.pending_controls(task_uuid) == []
 
         operations = await server._web_operations(conv_uuid)
         answer = next(o for o in operations if o["opType"] == "assistant_message" and o["payload"].get("text") == "FOLLOWUP ANSWER 2")

@@ -1918,16 +1918,16 @@ class WebAdminChatHandlersMixin:
             task_row for task_row in active_background_tasks
             if not conv_uuid or str(getattr(task_row, "parent_session_uuid", "") or "") == conv_uuid
         ]
-        # Do not queue a new user message behind a stale operation whose runner
-        # has already ended. A known unfinished task may still be registering its
-        # runner; preserve its existing same-root interruption path.
+        # Reconcile stale operations only when there is no unfinished Agent;
+        # preserve existing task state for the controller's routing context.
         if not active_background_tasks:
             await self._reconcile_inactive_web_conversation_operations(row, source="conversation_send_reconcile")
         active_round = await self._web_active_round_info(conv_uuid, internal_chat_id)
-        # A stranded steering queue alone cannot consume another interruption.
-        # Start a controller below and leave the old messages queued for it.
-        pending_only = set(active_round.get("activeReasons") or []) == {"steering"}
-        if active_round.get("active") and not pending_only and media:
+        # Background tasks, notifications and durable operations can keep the
+        # round open after its controller exits. Only a live controller can
+        # consume steering; otherwise start one below with the existing task
+        # context and leave earlier queued messages for it to adopt.
+        if self.runs is not None and self.runs.is_running(internal_chat_id) and media:
             return {"ok": False, "error": "attachments_while_running_not_supported"}
         try:
             reference_bundle_id, reference_manifest = await self._prepare_reference_bundle(row, text, f"msg:{user_message_uuid}", existing_keys=reference_order)
@@ -1939,10 +1939,11 @@ class WebAdminChatHandlersMixin:
             text = effective_reference_text(text, reference_manifest)
             visible_user_text = effective_reference_text(visible_user_text, reference_manifest)
             input_metadata.update(referenceBundleId=reference_bundle_id, references=reference_manifest)
-        # A detached Agent does not create a new visible turn. The main
-        # controller stays alive in an event-driven wait inside the original root
-        # turn, so interruptions use the normal steering queue and wake it now.
-        if active_round.get("active") and not pending_only:
+        # While the main controller is alive (including its event-driven wait),
+        # interruptions stay in the original root and wake that controller.
+        # A detached/waiting Agent alone must not strand input in this queue.
+        # Recheck after reference preparation, which may outlast the old runner.
+        if self.runs is not None and self.runs.is_running(internal_chat_id):
             if media:
                 return {"ok": False, "error": "attachments_while_running_not_supported"}
             root_turn_uuid = str(active_round.get("rootTurnUuid") or "").strip() or await self._latest_visible_root_turn_uuid(conv_uuid) or turn_uuid

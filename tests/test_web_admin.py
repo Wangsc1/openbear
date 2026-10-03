@@ -3673,11 +3673,32 @@ async def test_web_list_does_not_reconcile_run_during_startup_registration_windo
                 await asyncio.wait_for(controller_task, timeout=1.0)
 
 
-async def test_background_agent_interruption_queues_to_same_root_controller_without_steering_agent(web_env, monkeypatch):
+@pytest.fixture
+async def running_web_controller(web_env):
+    """Same-root steering tests require a real consumer, not just an Agent row."""
+    controllers = []
+
+    def register(chat_id):
+        task = asyncio.create_task(asyncio.Event().wait())
+        web_env.server.runs.register(chat_id, task)
+        controllers.append((chat_id, task))
+        return task
+
+    try:
+        yield register
+    finally:
+        for chat_id, task in controllers:
+            steering.clear(chat_id)
+            task.cancel()
+        await asyncio.gather(*(task for _, task in controllers), return_exceptions=True)
+
+
+async def test_background_agent_interruption_queues_to_same_root_controller_without_steering_agent(web_env, monkeypatch, running_web_controller):
     steering.clear(-1)
     web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="background interrupt")
     chat_id = int(row["internal_chat_id"])
+    running_web_controller(chat_id)
     task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=chat_id,
         parent_session_uuid=row["conversation_uuid"],
@@ -3727,11 +3748,12 @@ async def test_background_agent_interruption_queues_to_same_root_controller_with
             await sleeper
 
 
-async def test_background_agent_interruption_with_waiting_control_queues_to_same_root(web_env, monkeypatch):
+async def test_background_agent_interruption_with_waiting_control_queues_to_same_root(web_env, monkeypatch, running_web_controller):
     steering.clear(-1)
     web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="background continue")
     chat_id = int(row["internal_chat_id"])
+    running_web_controller(chat_id)
     task_uuid = await web_env.server.agent_dao.create_task(
         chat_id=chat_id,
         parent_session_uuid=row["conversation_uuid"],
@@ -3760,11 +3782,12 @@ async def test_background_agent_interruption_with_waiting_control_queues_to_same
     assert await web_env.server.agent_dao.pending_controls(task_uuid) == []
 
 
-async def test_background_agent_interruption_with_multiple_tasks_queues_to_same_root(web_env, monkeypatch):
+async def test_background_agent_interruption_with_multiple_tasks_queues_to_same_root(web_env, monkeypatch, running_web_controller):
     steering.clear(-1)
     web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="multi background interrupt")
     chat_id = int(row["internal_chat_id"])
+    running_web_controller(chat_id)
     task_uuids = []
     sleepers = []
     for idx in range(2):
@@ -3806,11 +3829,12 @@ async def test_background_agent_interruption_with_multiple_tasks_queues_to_same_
                 await sleeper
 
 
-async def test_background_agent_status_request_queues_to_same_root_controller(web_env, monkeypatch):
+async def test_background_agent_status_request_queues_to_same_root_controller(web_env, monkeypatch, running_web_controller):
     steering.clear(-1)
     web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="background status")
     chat_id = int(row["internal_chat_id"])
+    running_web_controller(chat_id)
     live = web_env.server._live_for(row)
     await live.publish({"type": "accepted", "turnUuid": "turn-root"})
     await live.publish({"type": "user", "turnUuid": "turn-root", "messageUuid": "msg-root", "text": "请调查"})
@@ -3845,10 +3869,11 @@ async def test_background_agent_status_request_queues_to_same_root_controller(we
     assert [op for op in ops if op.get("opType") == "agent_control"] == []
 
 
-async def test_active_background_process_send_stays_on_backend_root_turn(web_env, monkeypatch):
+async def test_active_background_process_send_stays_on_backend_root_turn(web_env, monkeypatch, running_web_controller):
     web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="process active round")
     chat_id = int(row["internal_chat_id"])
+    running_web_controller(chat_id)
     steering.clear(chat_id)
     live = web_env.server._live_for(row)
     await live.publish({"type": "accepted", "turnUuid": "turn-root"})
@@ -3874,11 +3899,12 @@ async def test_active_background_process_send_stays_on_backend_root_turn(web_env
         steering.clear(chat_id)
 
 
-async def test_needs_openbear_control_agent_send_queues_to_same_root_controller(web_env, monkeypatch):
+async def test_needs_openbear_control_agent_send_queues_to_same_root_controller(web_env, monkeypatch, running_web_controller):
     steering.clear(-1)
     web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="needs control active round")
     chat_id = int(row["internal_chat_id"])
+    running_web_controller(chat_id)
     live = web_env.server._live_for(row)
     await live.publish({"type": "accepted", "turnUuid": "turn-root"})
     await live.publish({"type": "user", "turnUuid": "turn-root", "messageUuid": "msg-root", "text": "请调查"})
