@@ -159,6 +159,17 @@ class WebAdminOperationsMixin:
             )
             if await event_cur.fetchone():
                 patch_payload["eventTriggered"] = True
+        # Match exact Cron-owned inputs/replies; human corrections in the same
+        # conversation/root remain human interactions. Also cover legacy rows
+        # when a visibility patch changes their recency eligibility.
+        if op_type in {"user_message", "assistant_message"} and (existing is None or "hidden" in patch_payload):
+            cron_cur = await conn.execute(
+                """SELECT 1 FROM cron_runs WHERE conversation_uuid=? AND root_turn_uuid=?
+                   AND (?='assistant_message' OR ?='msg:'||run_id) LIMIT 1""",
+                (conv_uuid, str(run_root_turn_uuid or turn_uuid or ""), op_type, op_id),
+            )
+            if await cron_cur.fetchone():
+                patch_payload["eventTriggered"] = True
         if existing is not None and op_type == "agent":
             existing_payload = operation_json_loads_dict(str(existing["payload_json"] or "{}"))
             for field in ("rootToolCallId", "rootToolName", "rootArguments"):
@@ -442,6 +453,11 @@ class WebAdminOperationsMixin:
                       AND COALESCE(json_extract(payload_json,'$.internal'),0)=0
                       AND COALESCE(json_extract(payload_json,'$.hidden'),0)=0
                       AND COALESCE(json_extract(payload_json,'$.eventTriggered'),0)=0
+                      AND NOT EXISTS (
+                          SELECT 1 FROM cron_runs cr WHERE cr.conversation_uuid=web_operations.conversation_uuid
+                            AND cr.root_turn_uuid=COALESCE(NULLIF(web_operations.run_root_turn_uuid,''),web_operations.turn_uuid)
+                            AND (web_operations.op_type='assistant_message' OR web_operations.op_id='msg:'||cr.run_id)
+                      )
                       AND ((op_type='user_message' AND
                             (LENGTH(TRIM(COALESCE(json_extract(payload_json,'$.text'),'')))>0
                              OR COALESCE(json_array_length(payload_json,'$.attachments'),0)>0))
@@ -1052,10 +1068,12 @@ class WebAdminOperationsMixin:
             (conv_uuid, conv_uuid, int(limit or 10000)),
         )
         from app.webhooks.presentation import enrich_operations
-        return await enrich_operations(self.db.conn, [
+        from app.cron.presentation import enrich_operations as enrich_cron_operations
+        operations = await enrich_operations(self.db.conn, [
             operation_public(dict(row), include_tool_details=include_tool_details)
             for row in await cur.fetchall()
         ])
+        return await enrich_cron_operations(self.db.conn, operations, conv_uuid)
 
     async def _web_operations_page(
         self,
@@ -1260,7 +1278,9 @@ class WebAdminOperationsMixin:
             public["operationOrder"] = int(row.get("id") or 0)
             operations.append(public)
         from app.webhooks.presentation import enrich_operations
+        from app.cron.presentation import enrich_operations as enrich_cron_operations
         await enrich_operations(self.db.conn, operations)
+        await enrich_cron_operations(self.db.conn, operations, conv_uuid)
         return operations, {
             "hasMoreBefore": has_more,
             "nextBeforeDisplaySeq": page_boundary if has_more else None,
@@ -1361,6 +1381,11 @@ class WebAdminOperationsMixin:
             payload["opType"] = frames[-1].get("opType")
             payload["revision"] = frames[-1].get("revision")
             payload["displaySeq"] = frames[-1].get("displaySeq")
+        cron_service = getattr(self, "cron", None)
+        if cron_service is not None:
+            root = str(payload.get("rootTurnUuid") or payload.get("turnUuid") or payload.get("runUuid") or "")
+            if await cron_service.owns_event(conv_uuid, root):
+                return payload  # Cron notifies after its optional cleanup, not model-done.
         webhook_service = getattr(self, "webhooks", None)
         if webhook_service is not None:
             from app.webhooks.notifications import owns_event

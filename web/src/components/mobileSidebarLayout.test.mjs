@@ -110,9 +110,16 @@ test('both resource surfaces share three columns, quiet vertical tiles, inherite
   assert.equal(reduced,true);
 });
 
-test('desktop six-grid renders native buttons in original order, marks the active page and preserves all reference entry gestures',async()=>{
+test('desktop six-entry dock stays in one row without changing the mobile resource grid',()=>{
+  assert.equal(baseGridRules('.sidebar-desktop-nav.sidebar-resource-grid')['grid-template-columns'],'repeat(6, minmax(0, 1fr))');
+  assert.equal(baseGridRules('.sidebar-desktop-nav > .sidebar-resource-tile')['min-height'],'46px');
+  assert.equal(baseGridRules('.sidebar-desktop-nav > .sidebar-resource-tile').padding,'4px 1px');
+  assert.equal(baseGridRules('.sidebar-resource-grid')['grid-template-columns'],'repeat(3, minmax(0, 1fr))');
+});
+
+test('desktop grid renders native buttons with Cron between docs and Skills, marks the active page and preserves all reference entry gestures',async()=>{
   const r=runtime(),calls=[];
-  assert.deepEqual(Array.from(r.props.items,item=>item.key),['memory','secrets','docs','skills','mcp','settings']);
+  assert.deepEqual(Array.from(r.props.items,item=>item.key),['memory','secrets','docs','cron','skills','mcp','settings']);
   const markup=appNodes.find(n=>hasClass(n,'sidebar-desktop-nav')).loc.source;
   const scope={desktopNav:r.props.items.filter(item=>item.key!=='settings'),active:'docs',closeReferenceShelf:()=>calls.push(['close']),selectNav:key=>calls.push(['select',key]),
     showReferenceShelf:(event,key)=>calls.push(['hover',key,event]),leaveReferenceShelf:()=>calls.push(['leave']),referenceNavKey:(event,key)=>calls.push(['key',key,event])};
@@ -122,7 +129,7 @@ test('desktop six-grid renders native buttons in original order, marks the activ
   ssr.config.warnHandler=message=>assert.fail(message);
   const html=await renderToString(ssr);
   const buttons=walk([tree]).filter(n=>n.type==='button');
-  assert.equal(buttons.length,5);
+  assert.equal(buttons.length,6);
   const desktopItems=r.props.items.filter(item=>item.key!=='settings');
   for(const [index,item] of desktopItems.entries()){
     const button=buttons[index];
@@ -168,7 +175,7 @@ test('reference shelf anchors outside the whole launcher, retaining desktop hove
 });
 
 function runtime(){
-  const nav=vm.runInNewContext(app.slice(app.indexOf('const nav = ['),app.indexOf('const pageToPath =')).replace('const nav =','result ='),{MemoryView:null,SecretsView:null,DocsView:null,SkillsView:null,McpView:null,SettingsHubView:null,StatisticsView:null,WebhooksView:null});
+  const nav=vm.runInNewContext(app.slice(app.indexOf('const nav = ['),app.indexOf('const pageToPath =')).replace('const nav =','result ='),{MemoryView:null,SecretsView:null,DocsView:null,CronView:null,SkillsView:null,McpView:null,SettingsHubView:null,StatisticsView:null,WebhooksView:null});
   const props={items:nav.filter(item=>!item.headerOnly),active:'docs',sidebarOpen:true},calls=[],mount=[],unmount=[],watchers=[];
   const media={matches:true,addEventListener(){},removeEventListener(){}};
   const context=vm.createContext({defineProps:()=>props,defineEmits:()=>((...args)=>calls.push(args)),ref,onMounted:fn=>mount.push(fn),onBeforeUnmount:fn=>unmount.push(fn),watch:(getter,fn)=>watchers.push(fn),window:{matchMedia:()=>media}});
@@ -184,11 +191,11 @@ async function render(r){
   for(const name of ['Grid','ArrowUp'])app.component(name,{render:()=>h('svg')});
   const html=await renderToString(app);return{html,nodes:walk([tree,...slots])};
 }
-test('collapsed resource footer is one entry; expanded grid keeps all six destinations, active page and click routing',async()=>{
+test('collapsed resource footer is one entry; expanded grid keeps all seven destinations, active page and click routing',async()=>{
   const r=runtime();let view=await render(r);
   assert.match(view.html,/资源与设置/);assert.doesNotMatch(view.html,/记忆管理|凭证库|MCP 管理/);
   vm.runInContext('menuOpen.value=true',r.context);view=await render(r);
-  const buttons=view.nodes.filter(n=>n.type==='button');assert.equal(buttons.length,7);
+  const buttons=view.nodes.filter(n=>n.type==='button');assert.equal(buttons.length,8);
   for(const [index,item] of r.props.items.entries()){
     assert.ok(view.html.includes(item.label));
     assert.equal(buttons[index+1].props['aria-current'],item.key==='docs'?'page':undefined);

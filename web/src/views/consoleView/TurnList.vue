@@ -12,6 +12,7 @@ import {
 } from "../../timelineProjection.js";
 import ConsoleMarkdown from "./ConsoleMarkdown.vue";
 import WebhookMessageCard from './WebhookMessageCard.vue';
+import CronMessageCard from './CronMessageCard.vue';
 import ReplyMarkdownShare from "./ReplyMarkdownShare.vue";
 import {replyMarkdownText} from "./replyMarkdownShare.js";
 import TurnEvent from "./TurnEvent.vue";
@@ -317,10 +318,11 @@ async function copyMessage(content, key) {
 <template>
 	<template v-for="(turn, turnIndex) in props.turns" :key="turn.id">
 	<section v-if="(turn.user && !turn.user.syntheticPlaceholder && !visibility.isHidden(turn.user)) || hasAssistantContent(turn) || assistantMetaVisible(turn, turnIndex)" class="turn-block" :data-turn-index="turnIndex">
-		<div v-if="turn.user && !turn.user.syntheticPlaceholder && !visibility.isHidden(turn.user)" class="timed-row timed-row-user visibility-hover-surface" :data-search-op-id="turn.user.opId || turn.user.id" :class="[visibilitySelectionClasses(turn.user, visibility), {'timed-row-event': turn.user.source === 'webhook'}]" @click.capture="selectVisibilityRow($event, turn.user, visibility)">
+		<div v-if="turn.user && !turn.user.syntheticPlaceholder && !visibility.isHidden(turn.user)" class="timed-row timed-row-user visibility-hover-surface" :data-search-op-id="turn.user.opId || turn.user.id" :class="[visibilitySelectionClasses(turn.user, visibility), {'timed-row-event': ['webhook', 'cron'].includes(turn.user.source)}]" @click.capture="selectVisibilityRow($event, turn.user, visibility)">
 			<div class="user-row">
 				<div class="user-message-group">
 					<WebhookMessageCard v-if="turn.user.source === 'webhook'" :message="turn.user"/>
+					<CronMessageCard v-else-if="turn.user.source === 'cron'" :message="turn.user"/>
 					<article v-else class="message-user">
 						<ConsoleMarkdown v-if="turn.user.content" :text="turn.user.content" :reference-bundle-id="turn.user.referenceBundleId || ''" :references="turn.user.references || []"/>
 						<div v-if="userAttachments(turn).length" class="user-attachments" :class="{ 'with-text': turn.user.content }">
@@ -341,7 +343,7 @@ async function copyMessage(content, key) {
 						</template>
 					</div>
 				</article>
-				<div v-if="turn.user.source !== 'webhook'" class="user-message-meta">
+				<div v-if="!['webhook', 'cron'].includes(turn.user.source)" class="user-message-meta">
 					<MessageVisibilityAction :target="turn.user" desktop-placement="footer" :turn="turn" mobile-selection-only/>
 					<el-tooltip v-if="turn.user.content" content="复制消息" placement="bottom" :show-after="350">
 						<button type="button" class="message-icon-action" aria-label="复制消息"

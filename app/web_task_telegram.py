@@ -327,9 +327,9 @@ class WebTaskTelegramNotifier:
         )
         await self.db.conn.commit()
 
-    async def register(self, event: dict[str, Any], *, owner_chat_id: int, internal_chat_id: int, title: str, model: str) -> None:
+    async def register(self, event: dict[str, Any], *, owner_chat_id: int, internal_chat_id: int, title: str, model: str, config_override: WebTaskNotificationsConfig | None = None) -> None:
         direct = event.get("source") == "telegram"
-        cfg = self._direct_reply_config() if direct else self.config.web.task_notifications
+        cfg = config_override if config_override is not None else self._direct_reply_config() if direct else self.config.web.task_notifications
         if not cfg.enabled or event.get("taskNotificationSilent") or event.get("hidden") or event.get("internal"):
             return
         root = str(event.get("runUuid") or event.get("turnUuid") or "").strip()
@@ -340,7 +340,7 @@ class WebTaskTelegramNotifier:
         now = _now()
         event_ts_ms = int(event.get("ts") or 0)
         started_at = event_ts_ms // 1000 if event_ts_ms > 0 else now
-        threshold_at = started_at if direct else started_at + int(cfg.threshold_minutes) * 60
+        threshold_at = started_at if direct or config_override is not None else started_at + int(cfg.threshold_minutes) * 60
         snapshot = cfg.model_dump(by_alias=True)
         await self.db.conn.execute(
             """

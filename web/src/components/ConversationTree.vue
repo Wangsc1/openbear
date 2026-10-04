@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import {
   Aim, Box, ArrowDown, ArrowRight, ChatLineRound, Check, Delete, DocumentCopy,
   EditPen, Folder, FolderAdd, FolderOpened, InfoFilled, Loading, MagicStick, MoreFilled,
-  Plus, Refresh, RefreshLeft, Search, Star, StarFilled,
+  Plus, Refresh, RefreshLeft, Search, Star, StarFilled, Timer,
 } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Api, apiError } from "../api";
@@ -1433,6 +1433,9 @@ async function runMenuAction(action) {
     else if (action === "rename") await renameRow(row);
     else if (action === "pin") await togglePin(row);
     else if (action === "move") await showMove(row);
+    else if (action === "cron" && row.kind === "folder" && row.folderId) {
+      window.dispatchEvent(new CustomEvent('openbear:open-cron', {detail:{folderId:String(row.folderId)}}));
+    }
     else if (action === "properties") await showProperties(row);
     else if (action === "conversation-properties") emit('conversation-properties', row);
     else if (action === "refresh-prompt" && !row.local && !running(row)) {
@@ -1668,6 +1671,7 @@ onBeforeUnmount(() => {
             <button role="menuitem" @click="runMenuAction('rename')"><el-icon><EditPen /></el-icon><span>重命名</span></button>
             <button role="menuitem" @click="runMenuAction('pin')"><el-icon><component :is="menu.row?.pinned ? Star : StarFilled" /></el-icon><span>{{ menu.row?.pinned ? '取消置顶' : '置顶' }}</span></button>
             <button role="menuitem" @click="runMenuAction('move')"><el-icon><FolderOpened /></el-icon><span>移动到…</span></button>
+            <button role="menuitem" @click="runMenuAction('cron')"><el-icon><Timer /></el-icon><span>定时任务</span></button>
             <button role="menuitem" @click="runMenuAction('properties')"><el-icon><InfoFilled /></el-icon><span>目录属性</span></button>
             <hr />
             <button class="danger" role="menuitem" @click="runMenuAction('delete-folder')"><el-icon><Delete /></el-icon><span>删除目录</span></button>

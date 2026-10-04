@@ -9,6 +9,7 @@ import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from app.agent.native_continuation import (
@@ -16,6 +17,7 @@ from app.agent.native_continuation import (
     validate_model_context,
 )
 from app.context.configuration import normalize_strategy
+from app.context.media_recovery import reference_historical_media
 from app.context.prompts import effective_context_prompt
 from app.context.store import ControllerBoundary, RequestTicket, StaleWindow, WindowStore
 from app.context.strategies import (
@@ -70,6 +72,7 @@ class ContextManager:
         self.system = ""
         self.frozen_system = frozen_system
         self.pending = False
+        self.media_overflow = False
         self._lock = asyncio.Lock()
         self.on_state = on_state
         self.active_run_root_turn_uuid = active_run_root_turn_uuid
@@ -260,13 +263,27 @@ class ContextManager:
                 # material. A provider's fixed/native overhead must not multiply
                 # a later large tool result. Shrinkage remains only a soft guess.
                 tokens = actual + (raw.tokens - previous) if raw.tokens >= previous else round(actual * raw.tokens / previous)
-            return InputEstimate(max(0, tokens), raw.media_unknown)
+            return InputEstimate(max(0, tokens), raw.media_unknown, raw.request_bytes)
 
         measured = estimator(messages)
+        before_estimate = measured
+        retired_media = 0
+        if self.media_overflow:
+            owner_dir = hashlib.sha256(self.store.owner.key.encode()).hexdigest()
+            messages, retired_media = reference_historical_media(
+                messages, artifact_dir=Path(self.store.db._path).resolve().parent / "tool_artifacts" / "media-recovery" / owner_dir,
+            )
+        if retired_media:
+            calibrated = False
+            measured = estimator(messages)
         self.last_estimate = measured
         exact = int((saved or {}).get("usage_tokens") or 0) if (saved or {}).get("usage_known") and (saved or {}).get("route_fingerprint") == route else 0
         threshold = self.policy.threshold
-        needed = force or self.pending or bool(threshold and max(measured.tokens, exact) >= threshold)
+        # Transport-size recovery is not token compression. Never fall through
+        # into text eviction/summary if there is no older media to replace.
+        if retired_media:
+            exact = 0
+        needed = not self.media_overflow and (force or self.pending or bool(threshold and max(measured.tokens, exact) >= threshold))
         selected = None
         outgoing = messages
         started = time.monotonic()
@@ -310,11 +327,15 @@ class ContextManager:
             self.last_estimate = measured
         if ceiling and measured.tokens > ceiling:
             raise RequiredContextTooLarge(measured.tokens, ceiling)
-        rotated = bool(selected and (selected.changed or serialize_messages(outgoing) != serialize_messages(messages)))
+        compressed = bool(selected and (selected.changed or serialize_messages(outgoing) != serialize_messages(messages)))
+        rotated = bool(retired_media or compressed)
         detail = {
             "ownerKind": self.store.owner.kind, "ownerId": self.store.owner.key,
-            "source": (self._active_compression or {}).get("source", source or "pre_model_request"),
-            "beforeEstimateTokens": self.last_estimate.tokens if not selected else estimator(messages).tokens,
+            "source": (self._active_compression or {}).get("source", source or ("media_payload_recovery" if retired_media else "pre_model_request")),
+            "beforeEstimateTokens": before_estimate.tokens,
+            "beforeRequestBytes": before_estimate.request_bytes,
+            "afterRequestBytes": measured.request_bytes,
+            "referencedMedia": retired_media,
             "afterEstimateTokens": measured.tokens, "estimateOnly": True,
             "mediaTokensUnknown": measured.media_unknown,
             "rolloverTriggerTokens": threshold,
@@ -347,9 +368,12 @@ class ContextManager:
         self.window_version = result["windowVersion"]
         self.state_revision = result["revision"]
         self.pending = False
+        self.media_overflow = False
         if self._active_compression:
             self._active_compression["stateCommitted"] = True
-        if rotated and self.on_rotated:
+        # A media-reference rewrite does not clear Read state or masquerade as
+        # a context-compaction event. The owning runner reports the one retry.
+        if compressed and self.on_rotated:
             await self.on_rotated({**detail, **result})
         elif needed and self.on_state:
             await self.on_state({**detail, **result, "status": "unavailable"})

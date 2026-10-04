@@ -51,6 +51,7 @@ class WebAdminChatRunMixin:
         reference_bundle_id: str = "",
         webhook_assignment_id: str = "",
         webhook_resume_message_id: int = 0,
+        cron_run_id: str = "",
     ) -> bool:
         messages = MessageDAO(self.db)
         user_saved = False
@@ -245,6 +246,9 @@ class WebAdminChatRunMixin:
             if webhook_assignment_id:
                 from app.webhooks.runtime_bridge import PROVENANCE
                 llm_text = PROVENANCE + "\nTrusted assignmentId: " + webhook_assignment_id + "\n\n" + llm_text
+            if cron_run_id:
+                from app.cron.executor import PROVENANCE as CRON_PROVENANCE
+                llm_text = CRON_PROVENANCE + "\nTrusted Cron run: " + cron_run_id + "\n\n" + llm_text
             if background_control_payload:
                 llm_text += (
                     "\n\n<background-agent-control-context>\n"
@@ -311,7 +315,7 @@ class WebAdminChatRunMixin:
                     run_root_turn_uuid=root_turn_uuid,
                     op_ids=[user_op_id] if user_op_id else None,
                     tokens=estimate_tokens(visible_user_text),
-                    binding_meta={"source": "webhook", "assignmentId": webhook_assignment_id} if webhook_assignment_id else None,
+                    binding_meta={"source": "webhook", "assignmentId": webhook_assignment_id} if webhook_assignment_id else {"source": "cron", "cronRunId": cron_run_id} if cron_run_id else None,
                 )
             else:
                 user_message_id = await messages.add(
@@ -320,7 +324,7 @@ class WebAdminChatRunMixin:
                     visible_user_text,
                     tokens=estimate_tokens(visible_user_text),
                 )
-            mark_source(user_msg, kind="webhook" if webhook_assignment_id else "notification" if task_notification else "human",
+            mark_source(user_msg, kind="webhook" if webhook_assignment_id else "cron" if cron_run_id else "notification" if task_notification else "human",
                         assignment_id=webhook_assignment_id,
                         source_id=f"message:{user_message_id}", message_id=user_message_id,
                         turn_uuid=root_turn_uuid, run_root_turn_uuid=root_turn_uuid)
@@ -956,7 +960,7 @@ class WebAdminChatRunMixin:
 
             runtime_tool_context = ToolRuntimeContext(
                 chat_id=chat_id, session_uuid=session_id, conversation_uuid=conversation_uuid,
-                source="webhook" if webhook_assignment_id else "web", turn_uuid=root_turn_uuid,
+                source="webhook" if webhook_assignment_id else "cron" if cron_run_id else "web", turn_uuid=root_turn_uuid,
                 run_root_turn_uuid=root_turn_uuid,
                 soft_stop_check=(lambda: self.control_actions.consume_soft_stop(chat_id)) if self.control_actions is not None else None,
                 task_notification=_task_notification_cb, conversation_event=_conversation_event_cb,
@@ -971,6 +975,9 @@ class WebAdminChatRunMixin:
                     "model": model_label, "thinkingLevel": think_level, "fast": run_fast_mode_requested,
                     "systemSha256": system_prompt_sha256(system), "contextWindow": ctx_window,
                 })
+            if cron_run_id:
+                from app.cron.executor import bind_context as bind_cron_context
+                bind_cron_context(self.cron, runtime_tool_context, cron_run_id)
             result = await agent.run(
                 convo, renderer, model=model_id, system=system,
                 max_tokens=max_tokens,
@@ -1050,7 +1057,7 @@ class WebAdminChatRunMixin:
                     )
                 else:
                     await self._touch_web_conversation(conversation_uuid, status="idle", current_status="就绪", last_error="")
-                    if turn_succeeded and conversation and not task_notification:
+                    if turn_succeeded and conversation and not task_notification and not cron_run_id:
                         self._start_conversation_title_task(conversation, automatic=True)
         except asyncio.CancelledError:
             with contextlib.suppress(Exception):

@@ -106,10 +106,13 @@ test('native history navigation closes stale sidebar/menu but still applies the 
   const fn = app.match(/function handleHistoryNavigation\(\) \{[\s\S]*?\n\}/)?.[0];
   assert.ok(fn);
   const calls=[];
-  const context=vm.createContext({closeSidebar:()=>calls.push('sidebar'),closeConversationMenu:()=>calls.push('menu'),applyRouteFromLocation:()=>calls.push('route')});
+  const context=vm.createContext({closeSidebar:()=>calls.push('sidebar'),closeConversationMenu:()=>calls.push('menu'),applyRouteFromLocation:()=>calls.push('route'),
+    window:{history:{state:{openbearRoutePosition:0},go:()=>calls.push('go')},location:{pathname:'/docs',search:''}},
+    ROUTE_POSITION:'openbearRoutePosition',restoringPosition:null,navigationSequence:0,historyNavigationPending:false,routePosition:1,routeLocation:'/chat',active:{value:'console'},pathToPage:{'/docs':'docs'}});
   vm.runInContext(fn+'\nhandleHistoryNavigation();',context);
   assert.deepEqual(calls,['sidebar','menu','route']);
   assert.match(app,/addEventListener\("popstate", handleHistoryNavigation\)/);
   assert.match(app,/removeEventListener\("popstate", handleHistoryNavigation\)/);
-  assert.doesNotMatch(fn,/pushState|replaceState|history\.go|history\.back/);
+  assert.equal(context.routePosition,0,'non-Cron back keeps the requested native history entry');
+  assert.equal(context.routeLocation,'/docs');
 });

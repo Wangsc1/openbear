@@ -118,7 +118,9 @@ class StartDeferred(Exception):
     """The durable launch reservation was returned without spawning."""
 
 
-async def execute(script,system,payload,*,capability_env=None,on_start=None,start_guard=None):
+async def execute(script,system,payload=None,*,capability_env=None,on_start=None,start_guard=None,protocol='webhook'):
+    # The subprocess owner is shared with Cron; only the wire adapter differs.
+    if protocol not in ('webhook', 'text'): raise ValueError('unsupported script protocol')
     path,cwd=resolve_environment(script,system)
     source=script.code.encode()
     argv=[path, '-c' if script.runtime=='python' else '-e',script.code]
@@ -149,7 +151,7 @@ async def execute(script,system,payload,*,capability_env=None,on_start=None,star
             readers=[asyncio.create_task(drain(p.stdout,stdout,system.max_stdout_bytes,True)),asyncio.create_task(drain(p.stderr,stderr,system.max_stderr_bytes))]
             async with asyncio.timeout(min(script.timeout_seconds or system.default_timeout_seconds,system.max_timeout_seconds)):
                 try:
-                    p.stdin.write(dumps(payload).encode()); await p.stdin.drain()
+                    p.stdin.write(b'' if payload is None else dumps(payload).encode()); await p.stdin.drain()
                 except (BrokenPipeError,ConnectionResetError): pass
                 finally: p.stdin.close()
                 await p.wait(); await asyncio.gather(*readers)
@@ -159,14 +161,22 @@ async def execute(script,system,payload,*,capability_env=None,on_start=None,star
                 await _finish_process(p, readers, terminate=not finished)
         error='stdout_limit' if too_large else 'nonzero_exit' if p.returncode else None
         result=None
-        if not error:
+        if not error and protocol == 'webhook':
             try:
                 result=json.loads(stdout.decode(),parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x)))
                 if not isinstance(result,dict): raise ValueError()
                 if payload['phase']=='pre' and (result.get('decision') not in ('continue','skip_model') or result.get('decision')=='skip_model' and result.get('outcome') not in ('handled','ignored')): raise ValueError()
             except (ValueError,UnicodeError): error='invalid_protocol'
-        return {'result':result if not error else None,'errorClass':error,'exitCode':p.returncode,'stderr':stderr.decode(errors='replace'),'stderrTruncated':truncated,'execution':info,'effectState':'unknown' if error else 'reported'}
+        return {'stdout':stdout.decode(errors='replace'),'stdoutTruncated':too_large,'result':result if not error else None,'errorClass':error,'exitCode':p.returncode,'stderr':stderr.decode(errors='replace'),'stderrTruncated':truncated,'execution':info,'effectState':'unknown' if error else 'reported'}
+    except asyncio.CancelledError as exc:
+        # Cleanup above has already reaped our process and bounded pipe draining.
+        # Keep the original exception (asyncio.timeout relies on its type) while
+        # allowing the owning Cron stage to persist the output captured so far.
+        exc.script_result = {'stdout':stdout.decode(errors='replace'),'stdoutTruncated':too_large,
+            'stderr':stderr.decode(errors='replace'),'stderrTruncated':truncated,
+            'errorClass':'cancelled','errorSummary':'脚本已取消','exitCode':p.returncode if p else None}
+        raise
     except TimeoutError:
-        return {'result':None,'errorClass':'timeout','exitCode':p.returncode if p else None,'stderr':stderr.decode(errors='replace'),'stderrTruncated':truncated,'execution':info,'effectState':'unknown'}
+        return {'stdout':stdout.decode(errors='replace'),'stdoutTruncated':too_large,'result':None,'errorClass':'timeout','exitCode':p.returncode if p else None,'stderr':stderr.decode(errors='replace'),'stderrTruncated':truncated,'execution':info,'effectState':'unknown'}
     except OSError as e:
         return {'result':None,'errorClass':'spawn_error','errorSummary':str(e),'exitCode':None,'stderr':'','stderrTruncated':False,'execution':info,'effectState':'none'}

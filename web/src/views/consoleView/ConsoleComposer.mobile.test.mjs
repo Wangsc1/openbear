@@ -65,13 +65,23 @@ test('actual attachment remove button has a filename, stops preview bubbling and
   assert.equal(stopped, 1); assert.deepEqual(calls, [['remove-attachment', 'two']]); assert.equal(props.pendingAttachments.length, 2, 'the composer still delegates ownership to ConsoleView');
 });
 
-test('actual send entry retains disabled state and ReferenceEditor canSend guard, without altering input content', async () => {
-  const calls = [], props = { canSend: false, draft: '未提交引用和输入', conversationUuid: 'A' };
-  const bindings = { props, emit: (...args) => calls.push(args), composerTextarea: null, onPaste() {}, onComposerKeydownCapture() {}, scheduleRunConfigPosition() {} };
-  let rendered = await render(sendTemplate, bindings); assert.equal(rendered.nodes.find(node => node.type === 'button').props.disabled, true);
-  rendered = await render(editorTemplate, bindings); rendered.nodes[0].props.onSend(); assert.deepEqual(calls, []);
-  props.canSend = true; rendered.nodes[0].props.onSend(); assert.deepEqual(calls, [['send']]); assert.equal(props.draft, '未提交引用和输入');
-  rendered = await render(sendTemplate, bindings); assert.equal(rendered.nodes[0].props.disabled, false);
+test('send remains shape-interactive but both button and ReferenceEditor guard canSend without altering input', async () => {
+  const calls = [], stops = [], props = reactive({ canSend: false, draft: '未提交引用和输入', conversationUuid: 'A', running: false });
+  const emit = (...args) => calls.push(args);
+  const context = vm.createContext({props, ref, emit, watch:(...args)=>{const stop=watch(...args);stops.push(stop);return stop;},
+    window:{localStorage:{getItem:()=>null,setItem(){}},setTimeout:()=>0,clearTimeout(){}}});
+  vm.runInContext(between(source, 'const STOP_BUTTON_SHAPE_KEY =', 'function focusInteraction('), context);
+  const controls = vm.runInContext('({clickSendButton,stopButtonContextMenu,startStopShapePress,moveStopShapePress,endStopShapePress,cancelButtonShapeInteraction,buttonShapeKeydown})',context);
+  const bindings = {props, emit, ...controls, composerTextarea:null, onPaste(){}, onComposerKeydownCapture(){}, scheduleRunConfigPosition(){}};
+  try {
+    let rendered = await render(sendTemplate, bindings);
+    assert.equal(rendered.nodes[0].props.disabled, undefined);assert.equal(rendered.nodes[0].props['aria-disabled'], true);
+    rendered.nodes[0].props.onClick({detail:1});assert.deepEqual(calls, []);
+    rendered = await render(editorTemplate, bindings);rendered.nodes[0].props.onSend();assert.deepEqual(calls, []);
+    props.canSend = true;rendered.nodes[0].props.onSend();assert.deepEqual(calls, [['send']]);assert.equal(props.draft, '未提交引用和输入');
+    rendered = await render(sendTemplate, bindings);assert.equal(rendered.nodes[0].props['aria-disabled'], false);
+    rendered.nodes[0].props.onClick({detail:1});assert.deepEqual(calls, [['send'], ['send']]);
+  } finally {stops.forEach(stop=>stop());}
 });
 
 test('actual composer paste and file chooser retain files, mixed text and focus semantics; rejected files warn', async () => {

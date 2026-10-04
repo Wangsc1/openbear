@@ -621,7 +621,7 @@ class WindowStore:
             if rotated:
                 if self.owner.kind == "controller":
                     await conn.execute("DELETE FROM controller_model_contexts WHERE chat_id=?", (self.owner.chat_id,))
-                if self.owner.kind == "controller" and detail and detail.get("strategy") == "model_summary":
+                if self.owner.kind == "controller" and detail and detail.get("strategy") == "model_summary" and "summary" in detail:
                     summary_cur = await conn.execute(
                         "INSERT INTO summaries(chat_id,summary,up_to_message_id,tokens,created_at) VALUES(?,?,?,?,?)",
                         (self.owner.chat_id, detail["summary"], int(detail.get("upToMessageId") or 0),

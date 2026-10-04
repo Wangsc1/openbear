@@ -16,6 +16,7 @@ function harness({rows=[local(),conv('saved')],active='local:new',confirm=async(
  const storage=new Map([['openbear.console.drafts.v1',JSON.stringify({'local:new':'discard this',saved:'retain this',other:'also retain'})]]);
  const ctx=vm.createContext({ref,nextTick,isLocalConversation,normalizeConversationRows,
   conversations:ref(rows),activeConversationUuid:ref(active),selectedFolderId:ref('a'),draftFolderId:ref('a'),active:ref('console'),LOCAL_CONVERSATION_UUID:'local:new',deletingConversations:new Set(),
+  restoringPosition:null,historyNavigationPending:false,navigationSequence:0,cronLeaveGuard:ref(null),
   window:{localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v)}},
   conversationTreeRef:ref({forgetConversation:id=>calls.forgotten.push(id),revealConversation:async id=>calls.reveals.push(id),revealDraft:async id=>calls.reveals.push('draft:'+id)}),
   consoleViewRef:ref(mounted?{discardConversationDraft:id=>calls.clears.push(id)}:null),
@@ -29,7 +30,8 @@ function harness({rows=[local(),conv('saved')],active='local:new',confirm=async(
  vm.runInContext(`
  function setConversationsIfChanged(rows){conversations.value=normalizeConversationRows(rows);}
  function setDraftFolderId(id){draftFolderId.value=id;}
- ${between(app,'function localConversation(', 'function currentRouteConversationUuid(')}
+ ${between(app,'function localConversation(', '// Position metadata')}
+ ${between(app,'function navigateFromCron(', 'function currentRouteConversationUuid(')}
  ${between(app,'function focusLocalConversation(', 'async function startConsoleNewSession(')}
  ${between(app,'async function handleTreeNewConversation(', 'function handleTreeRows(')}
  ${between(app,'function handleTreeFolderRemoved(', 'async function handleTreeOpen(')}
@@ -49,6 +51,12 @@ for (const folderId of ['b', '']) test(`recent sibling creation targets ${folder
  assert.equal(h.ctx.conversations.value.find(isLocalConversation).folderId,folderId);
  assert.deepEqual(h.calls.reveals,[]);assert.deepEqual(h.calls.confirms,[]);
  assert.deepEqual(h.calls.clears,[]);assert.deepEqual(h.calls.deletes,[]);
+});
+test('Cron leave cancellation prevents new-chat navigation and draft reassignment before either side effect',async()=>{
+ const h=harness();h.ctx.active.value='cron';h.ctx.cronLeaveGuard.value=async()=>false;
+ const original=JSON.stringify(h.ctx.conversations.value);await h.run("handleTreeNewConversation('b')");
+ assert.equal(h.ctx.active.value,'cron');assert.equal(h.ctx.draftFolderId.value,'a');assert.equal(JSON.stringify(h.ctx.conversations.value),original);
+ assert.deepEqual(h.calls.confirms,[]);assert.deepEqual(h.calls.reveals,[]);assert.deepEqual(h.calls.success,[]);
 });
 test('ordinary new conversation retains automatic draft reveal',async()=>{
  const h=harness({rows:[conv('saved')],active:'saved'});

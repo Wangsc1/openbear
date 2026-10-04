@@ -77,6 +77,9 @@ function appDeletion(env, {mounted = null, confirm = async () => true} = {}) {
     Api: {deleteConversation: async uuid => deletes.push(uuid), conversationTreeChildren: async () => ({items: []})},
     apiError: String, nextTick, syncRoute() {}, setDraftFolderId() {}, loadConversations: async () => {},
     focusLocalConversation: () => focused.push('local:new'),
+    // This storage harness represents a non-Cron page with Console unmounted.
+    // Cron draft navigation guards are exercised in cron.audit-fixes.test.mjs.
+    navigateFromCron: commit => commit(),
     setConversationsIfChanged: rows => {context.conversations.value = rows;},
   });
   vm.runInContext(actualAppDeletion, context);
@@ -106,6 +109,7 @@ test('RC02: confirmed deletion after Console unmount clears only its files befor
     deleting.resolve(); await job;
     assert.deepEqual(deletion.deletes, [], 'local draft deletion is still not a server DELETE');
     assert.deepEqual(deletion.focused, ['local:new']);
+    assert.deepEqual(deletion.notices, [['success', '草稿会话已移除']]);
     assert.equal(JSON.parse(env.window.localStorage.getItem(TEXT_KEY))['local:new'], undefined);
     assert.deepEqual((await deletion.attachmentDrafts.load('other')).items.map(item => item.file.name), ['keep.txt']);
     reopened = await mountDraftConsole(env, 'local:new'); await settleDraftConsole();

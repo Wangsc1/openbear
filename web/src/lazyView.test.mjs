@@ -117,7 +117,7 @@ test('App retains route behavior across management navigation/popstate and front
     ElMessageBox: { confirm: async () => { if (confirmation === 'cancel') throw 'cancel'; } },
     isLoginPath: false, sidebarOpen: Vue.ref(true), active: Vue.ref('console'), activeConversationUuid: Vue.ref('A'), memoryType: Vue.ref('identity'), settingsSection: Vue.ref('channels'), frontendRefreshRequired: Vue.ref(false),
   });
-  vm.runInContext(between('const pageToPath =', 'const active =') + between('function currentRouteConversationUuid()', 'function fmtTime(')
+  vm.runInContext(between('const pageToPath =', 'const active =') + between("const ROUTE_POSITION =", 'function fmtTime(')
     + 'let refreshPromptOpen = false;\n' + between('async function requestFrontendRefresh()', 'function observeFrontendVersion(')
     + between('function handlePreloadError(', 'let lastNotifiedVersionResult'), c);
   vm.runInContext("selectNav('settings')", c); assert.equal(pushes.at(-1), '/settings?section=channels'); assert.equal(c.sidebarOpen.value, false);

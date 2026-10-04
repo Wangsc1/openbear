@@ -2,7 +2,7 @@
 import {computed} from 'vue';
 import {modelThinkingLevels, thinkingLabel} from '../views/consoleView/display.js';
 import {RUN_DEFAULT_INHERIT, runDefaultOption, runDefaultSelection} from './folderRunDefaults.js';
-const props = defineProps({modelValue:{type:Object,default:()=>({})},effective:{type:Object,default:()=>({})},inherited:{type:Object,default:null},models:{type:Array,default:()=>[]},inheritable:Boolean,inheritLabel:{type:String,default:'继承目录'},disabled:Boolean,showAgent:{type:Boolean,default:true},showStrategy:{type:Boolean,default:true}});
+const props = defineProps({modelValue:{type:Object,default:()=>({})},effective:{type:Object,default:()=>({})},inherited:{type:Object,default:null},models:{type:Array,default:()=>[]},inheritable:Boolean,repairUnsupported:Boolean,inheritLabel:{type:String,default:'继承目录'},disabled:Boolean,showAgent:{type:Boolean,default:true},showStrategy:{type:Boolean,default:true}});
 const emit = defineEmits(['change']);
 const agentThinkingFollowLabel = '跟随主会话（不支持时用模型默认）';
 const effective = computed(() => ({...props.modelValue,...props.effective}));
@@ -16,6 +16,7 @@ const supported = (owner,kind) => kind === 'Model' || (kind === 'Thinking' ? mod
 function options(owner,kind) {
   if (kind === 'Model') return [...(owner === 'agent' ? [{value:'',label:'跟随主模型'}] : []),...props.models.map(item=>({value:item.key,label:item.label || item.name || item.key}))];
   if (kind === 'Thinking') return [...(owner === 'agent' ? [{value:'',label:agentThinkingFollowLabel}] : []),...modelThinkingLevels(info(owner)).map(value=>({value,label:thinkingLabel(value)}))];
+  if (props.repairUnsupported && !supported(owner,kind)) return [{value:false,label:'关闭'}];
   return [...(owner === 'agent' ? [{value:null,label:'跟随主会话'}] : []),{value:true,label:'开启'},{value:false,label:'关闭'}];
 }
 function label(key,value) {
@@ -34,7 +35,7 @@ function changed(key,selection) { emit('change',key,selection); }
     <div v-for="[kind,title] in rows" :key="kind" class="run-setting-row">
       <h4>{{ title }}</h4>
       <div v-for="owner in columns" :key="owner" class="run-default-cell" :data-owner="owner === 'main' ? '主会话' : 'Agent'">
-        <el-select v-if="supported(owner,kind)" :model-value="current(field(owner,kind))" :disabled="disabled" :aria-label="`${owner === 'main' ? '主会话' : 'Agent'}${title}`" :data-run-default-field="field(owner,kind)" popper-class="folder-properties-popover" :show-arrow="false" @change="changed(field(owner,kind),$event)">
+        <el-select v-if="supported(owner,kind) || (repairUnsupported && inheritable && Object.hasOwn(modelValue,field(owner,kind)))" :model-value="current(field(owner,kind))" :disabled="disabled" :aria-label="`${owner === 'main' ? '主会话' : 'Agent'}${title}`" :data-run-default-field="field(owner,kind)" popper-class="folder-properties-popover" :show-arrow="false" @change="changed(field(owner,kind),$event)">
           <el-option v-if="inheritable" :value="RUN_DEFAULT_INHERIT" :label="inheritText(field(owner,kind))" />
           <el-option v-if="Object.hasOwn(modelValue,field(owner,kind)) && !options(owner,kind).some(item=>Object.is(item.value,modelValue[field(owner,kind)]))" :value="current(field(owner,kind))" :label="`当前不可用 · ${label(field(owner,kind),modelValue[field(owner,kind)])}`" disabled />
           <el-option v-for="item in options(owner,kind)" :key="String(item.value)" :value="runDefaultOption(item.value)" :label="item.label" />

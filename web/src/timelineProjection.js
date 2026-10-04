@@ -994,6 +994,8 @@ export function projectOperationMessages(operations = [], options = {}) {
         role: "user",
         source: String(op.source || payload.source || "user"),
         eventCard: payload.eventCard || null,
+        cronCard: payload.cronCard || null,
+        cronRunId: payload.cronRunId || '',
         content: String(payload.text || payload.content || ""),
         ...(payload.referenceBundleId ? {referenceBundleId: payload.referenceBundleId, references: payload.references || []} : {}),
         attachments: Array.isArray(payload.attachments) ? payload.attachments : [],

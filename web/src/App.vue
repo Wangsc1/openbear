@@ -48,6 +48,7 @@ function chooseThemeMode(mode) {
 const MemoryView = defineLazyView(() => import("./views/MemoryView.vue"), "记忆管理");
 const SecretsView = defineLazyView(() => import("./views/SecretsView.vue"), "凭证库");
 const DocsView = defineLazyView(() => import("./views/DocsView.vue"), "文档库");
+const CronView = defineLazyView(() => import('./views/CronView.vue'), '定时任务');
 const SkillsView = defineLazyView(() => import("./views/SkillsView.vue"), "Skills");
 const McpView = defineLazyView(() => import("./views/McpView.vue"), "MCP 管理");
 const SettingsHubView = defineLazyView(() => import("./views/SettingsHubView.vue"), "设置");
@@ -58,6 +59,7 @@ const nav = [
   { key: "memory", label: "记忆管理", shortLabel: "记忆", icon: "Collection", component: MemoryView },
   { key: "secrets", label: "凭证库", shortLabel: "凭证", icon: "Key", component: SecretsView },
   { key: "docs", label: "文档库", shortLabel: "文档", icon: "Files", component: DocsView },
+  { key: 'cron', label: '定时任务', shortLabel: '定时', icon: 'Clock', component: CronView },
   { key: "skills", label: "Skills", shortLabel: "Skills", icon: "MagicStick", component: SkillsView },
   { key: "mcp", label: "MCP 管理", shortLabel: "MCP", icon: "Connection", component: McpView },
   { key: "settings", label: "设置", shortLabel: "设置", icon: "Setting", component: SettingsHubView },
@@ -69,6 +71,7 @@ const pageToPath = {
   memory: "/memory",
   secrets: "/secrets",
   docs: "/docs",
+  cron: '/cron',
   skills: "/skills",
   mcp: "/mcp",
   settings: "/settings",
@@ -81,6 +84,7 @@ const pathToPage = {
   "/memory": "memory",
   "/secrets": "secrets",
   "/docs": "docs",
+  '/cron': 'cron',
   "/skills": "skills",
   "/mcp": "mcp",
   "/settings": "settings",
@@ -121,6 +125,19 @@ async function refreshChannelStats() {
 }
 const memoryType = ref("identity");
 const settingsSection = ref("channels");
+const cronFolderId = ref('');
+const cronLeaveGuard = shallowRef(null);
+function handleOpenCron(event) {
+  cronFolderId.value = String(event?.detail?.folderId || '');
+  selectNav('cron');
+}
+function handleCronFolderChanged(folderId) {
+  cronFolderId.value = String(folderId || '');
+  syncRoute();
+}
+function openCronConversation(conversationId) {
+  if (conversationId) openConversation({conversationUuid:conversationId});
+}
 const pageHeaderReady = ref(false);
 // Keep fallback navigation available while a newly selected lazy page loads.
 watch(active, () => { pageHeaderReady.value = false; });
@@ -241,6 +258,26 @@ function localConversation(folderId = draftFolderId.value) {
     costUsd: 0,
   };
 }
+// Position metadata lets a cancelled Cron popstate restore the existing entry,
+// without pushing a duplicate URL or replacing the page the user went back to.
+const ROUTE_POSITION = 'openbearRoutePosition';
+let routePosition = Number.isInteger(window.history.state?.[ROUTE_POSITION]) ? window.history.state[ROUTE_POSITION] : 0;
+let routeLocation = `${window.location.pathname}${window.location.search}`;
+let navigationSequence = 0, restoringPosition = null, historyNavigationPending = false;
+function writeRoute(url, replace = false) {
+  if (!replace) routePosition++;
+  window.history[replace ? 'replaceState' : 'pushState']({...window.history.state, [ROUTE_POSITION]: routePosition}, '', url);
+  routeLocation = url;
+}
+function navigateFromCron(commit, nextPage = '') {
+  if (restoringPosition !== null || historyNavigationPending) return false;
+  const sequence = ++navigationSequence;
+  if (active.value !== 'cron' || nextPage === 'cron') return commit();
+  return Promise.resolve(cronLeaveGuard.value?.() ?? true).then(allowed => {
+    if (!allowed || sequence !== navigationSequence || restoringPosition !== null) return false;
+    return commit();
+  });
+}
 function currentRouteConversationUuid() {
   if (window.location.pathname !== "/chat") return "";
   return new URLSearchParams(window.location.search).get("id") || "";
@@ -250,6 +287,7 @@ function routeForCurrentState() {
   const params = new URLSearchParams();
   if (active.value === "console" && activeConversationUuid.value) params.set("id", activeConversationUuid.value);
   if (active.value === "memory") params.set("type", memoryType.value || "identity");
+  if (active.value === 'cron' && cronFolderId.value) params.set('folderId', cronFolderId.value);
   if (active.value === "settings") {
     params.set("section", settingsSection.value || "channels");
     // Keep a system-setting deep link through the initial route normalization.
@@ -265,9 +303,12 @@ function syncRoute(options = {}) {
   if (isLoginPath) return;
   const next = routeForCurrentState();
   const current = `${window.location.pathname}${window.location.search}`;
-  if (next === current) return;
-  const method = options.replace ? "replaceState" : "pushState";
-  window.history[method]({}, "", next);
+  if (next === current) {
+    if (window.history.state?.[ROUTE_POSITION] !== routePosition) writeRoute(next, true);
+    routeLocation = next;
+    return;
+  }
+  writeRoute(next, Boolean(options.replace));
 }
 function applyRouteFromLocation(options = {}) {
   if (isLoginPath) return;
@@ -276,6 +317,7 @@ function applyRouteFromLocation(options = {}) {
   active.value = page;
   if (page === "console") activeConversationUuid.value = url.searchParams.get("id") || activeConversationUuid.value || "";
   if (page === "memory") memoryType.value = url.searchParams.get("type") || "identity";
+  if (page === 'cron') cronFolderId.value = url.searchParams.get('folderId') || '';
   if (page === "settings") settingsSection.value = url.searchParams.get("section") || "channels";
   if (options.replaceUnknown || !pathToPage[url.pathname]) syncRoute({ replace: true });
 }
@@ -283,16 +325,49 @@ function closeSidebar() {
   sidebarOpen.value = false;
 }
 function handleHistoryNavigation() {
-  // Keep native Back/Forward semantics; stale navigation UI must not obscure
-  // the page selected by the browser's history entry.
-  closeSidebar();
-  closeConversationMenu();
-  applyRouteFromLocation();
+  const targetPosition = window.history.state?.[ROUTE_POSITION];
+  if (restoringPosition !== null) {
+    if (targetPosition === restoringPosition) restoringPosition = null;
+    else if (Number.isInteger(targetPosition)) window.history.go(restoringPosition - targetPosition);
+    return;
+  }
+  const sequence = ++navigationSequence;
+  const apply = () => {
+    historyNavigationPending = false;
+    if (Number.isInteger(targetPosition)) routePosition = targetPosition;
+    closeSidebar();
+    closeConversationMenu();
+    applyRouteFromLocation();
+    routeLocation = `${window.location.pathname}${window.location.search}`;
+  };
+  const targetPage = pathToPage[window.location.pathname] || 'console';
+  if (active.value !== 'cron' || targetPage === 'cron') return apply();
+  historyNavigationPending = true;
+  return Promise.resolve(cronLeaveGuard.value?.() ?? true).then(allowed => {
+    if (sequence !== navigationSequence) return;
+    if (allowed) return apply();
+    historyNavigationPending = false;
+    if (Number.isInteger(targetPosition) && targetPosition !== routePosition) {
+      restoringPosition = routePosition;
+      window.history.go(routePosition - targetPosition);
+    } else writeRoute(routeLocation, true);
+  });
 }
 function selectNav(key) {
-  active.value = key;
-  closeSidebar();
-  syncRoute();
+  return navigateFromCron(() => {
+    active.value = key;
+    closeSidebar();
+    syncRoute();
+  }, key);
+}
+function navigateToUrl(url) {
+  const page = pathToPage[new URL(url, window.location.href).pathname] || 'console';
+  return navigateFromCron(() => {
+    writeRoute(url);
+    closeSidebar();
+    closeConversationMenu();
+    applyRouteFromLocation();
+  }, page);
 }
 function fmtTime(ts) {
   if (!ts) return "";
@@ -503,21 +578,23 @@ async function startConsoleNewSession() {
   await handleTreeNewConversation(selectedFolderId.value);
 }
 async function handleTreeNewConversation(folderId = "", options = {}) {
-  const target = String(folderId || "");
-  const existing = conversations.value.find(isLocalConversation);
-  if (existing && String(existing.folderId || "") !== target) {
-    try {
-      await ElMessageBox.confirm(
-        `当前未发送草稿属于「${existing.folderId ? '另一目录' : '临时会话'}」。是否明确把该草稿（含文字和附件）改到新的目标？`,
-        "更改草稿归属",
-        { confirmButtonText: "更改归属", cancelButtonText: "保持原归属", type: "warning" },
-      );
-      setDraftFolderId(target);
-      setConversationsIfChanged(conversations.value.map((row) => isLocalConversation(row) ? { ...row, folderId: target, parentId: target } : row));
-    } catch { /* Repeated new keeps the existing draft and its original folder. */ }
-  } else if (!existing) setDraftFolderId(target);
-  focusLocalConversation(draftFolderId.value, options);
-  ElMessage.success(existing ? "已聚焦未发送的新会话" : "已开启新会话");
+  return navigateFromCron(async () => {
+    const target = String(folderId || "");
+    const existing = conversations.value.find(isLocalConversation);
+    if (existing && String(existing.folderId || "") !== target) {
+      try {
+        await ElMessageBox.confirm(
+          `当前未发送草稿属于「${existing.folderId ? '另一目录' : '临时会话'}」。是否明确把该草稿（含文字和附件）改到新的目标？`,
+          "更改草稿归属",
+          { confirmButtonText: "更改归属", cancelButtonText: "保持原归属", type: "warning" },
+        );
+        setDraftFolderId(target);
+        setConversationsIfChanged(conversations.value.map((row) => isLocalConversation(row) ? { ...row, folderId: target, parentId: target } : row));
+      } catch { /* Repeated new keeps the existing draft and its original folder. */ }
+    } else if (!existing) setDraftFolderId(target);
+    focusLocalConversation(draftFolderId.value, options);
+    ElMessage.success(existing ? "已聚焦未发送的新会话" : "已开启新会话");
+  });
 }
 function handleTreeRows(rows = []) {
   const draft = conversations.value.find(isLocalConversation);
@@ -547,14 +624,16 @@ async function handleTreeOpen(row) {
 function currentDraftConversation() { return conversations.value.find(isLocalConversation) || null; }
 async function openConversation(row) {
   if (!row?.conversationUuid || Date.now() < suppressConversationOpenUntil) return;
-  active.value = "console";
-  try {
-    activeConversationUuid.value = row.conversationUuid;
-    closeSidebar();
-    syncRoute();
-  } catch (error) {
-    ElMessage.error(apiError(error));
-  }
+  return navigateFromCron(() => {
+    active.value = "console";
+    try {
+      activeConversationUuid.value = row.conversationUuid;
+      closeSidebar();
+      syncRoute();
+    } catch (error) {
+      ElMessage.error(apiError(error));
+    }
+  });
 }
 async function renameConversation(row) {
   if (!row?.conversationUuid) return;
@@ -595,9 +674,13 @@ async function duplicateConversation(row) {
     const data = await Api.duplicateConversation(row.conversationUuid);
     const uuid = data.conversation?.conversationUuid || data.state?.conversationUuid || "";
     if (uuid) {
-      active.value = "console";
-      activeConversationUuid.value = uuid;
-      syncRoute();
+      const opened = await navigateFromCron(() => {
+        active.value = "console";
+        activeConversationUuid.value = uuid;
+        syncRoute();
+        return true;
+      });
+      if (!opened) return;
       await nextTick();
       if (conversationTreeRef.value?.revealConversation) await conversationTreeRef.value.revealConversation(uuid);
       else await loadConversations({ conversationUuid: uuid, reveal: true });
@@ -723,7 +806,7 @@ async function deleteConversation(row) {
         await nextTick();
         await conversationTreeRef.value?.revealConversation(next.conversationUuid);
         revealed = true;
-      } else focusLocalConversation();
+      } else await navigateFromCron(() => focusLocalConversation());
     }
     if (!local && !revealed) await loadConversations({ trackActive: false });
     ElMessage.success(local ? "草稿会话已移除" : "会话已删除");
@@ -766,7 +849,7 @@ function handleConversationMenuKeydown(event) {
 async function handleConsoleConversationCreated(uuid) {
   if (!uuid) return;
   if (isLocalConversation(uuid)) {
-    focusLocalConversation();
+    await navigateFromCron(() => focusLocalConversation());
     return;
   }
   setConversationsIfChanged(conversations.value.filter((row) => !isLocalConversation(row)));
@@ -965,10 +1048,7 @@ let stopPushNavigation = null, pushPresence = null;
 watch([active, activeConversationUuid], () => pushPresence?.update(), {flush: 'post'});
 onMounted(() => {
   if (!isLoginPath) {
-    stopPushNavigation = installPushNavigation(window, (url) => {
-      window.history.pushState({}, '', url);
-      handleHistoryNavigation();
-    });
+    stopPushNavigation = installPushNavigation(window, navigateToUrl);
     pushPresence = installPushPresence(window, () => active.value === 'console' ? activeConversationUuid.value : '');
   }
   if (!isLoginPath) stopMobileViewport = installMobileViewport({
@@ -976,6 +1056,7 @@ onMounted(() => {
     afterChange: anchor => consoleViewRef.value?.restoreMobileViewportAnchor(anchor),
   });
   window.addEventListener("popstate", handleHistoryNavigation);
+  window.addEventListener('openbear:open-cron', handleOpenCron);
   window.addEventListener("openbear:conversations-refresh", handleExternalConversationsRefresh);
   window.addEventListener("click", closeConversationMenu);
   window.addEventListener("scroll", closeConversationMenu, true);
@@ -1000,6 +1081,7 @@ onBeforeUnmount(() => {
   stopReferenceCatalog({clear:true});
   stopThemeSubscription();
   window.removeEventListener("popstate", handleHistoryNavigation);
+  window.removeEventListener('openbear:open-cron', handleOpenCron);
   window.removeEventListener("openbear:conversations-refresh", handleExternalConversationsRefresh);
   window.removeEventListener("click", closeConversationMenu);
   window.removeEventListener("scroll", closeConversationMenu, true);
@@ -1016,7 +1098,7 @@ onBeforeUnmount(() => {
 
 <template>
   <LoginView v-if="isLoginPath" />
-  <div v-else class="app-shell h-full flex" :class="{'is-console': active === 'console', 'is-settings': active === 'settings' && pageHeaderReady, 'is-admin': ['memory', 'secrets', 'docs', 'skills', 'mcp'].includes(active) && pageHeaderReady}">
+  <div v-else class="app-shell h-full flex" :class="{'is-console': active === 'console', 'is-settings': active === 'settings' && pageHeaderReady, 'is-admin': ['memory', 'secrets', 'docs', 'cron', 'skills', 'mcp'].includes(active) && pageHeaderReady}">
     <div class="mobile-app-bar">
       <button
         type="button"
@@ -1418,13 +1500,17 @@ onBeforeUnmount(() => {
         :is="activeView"
         :section="settingsSection"
         :navigation-obscured="sidebarOpen"
+        :folder-id="active === 'cron' ? cronFolderId : undefined"
+        @cron-leave-guard="cronLeaveGuard = $event"
+        @folder-changed="handleCronFolderChanged"
+        @open-conversation="openCronConversation"
         @section-changed="handleSettingsSectionChanged"
         @open-webhook-properties="openWebhookProperties"
         @mobile-header-ready="pageHeaderReady = $event"
       >
         <template #mobile-navigation>
           <button
-            v-if="['settings', 'secrets', 'docs', 'skills', 'mcp'].includes(active)"
+            v-if="['settings', 'secrets', 'docs', 'cron', 'skills', 'mcp'].includes(active)"
             type="button"
             class="mobile-sidebar-toggle"
             :aria-expanded="sidebarOpen"

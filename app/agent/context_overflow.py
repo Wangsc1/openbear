@@ -26,6 +26,14 @@ def _has_rate_limit_tpm_hint(lower: str) -> bool:
     )
 
 
+def is_request_size_error(error_message: str | None) -> bool:
+    """Transport payload overflow, independent of model token capacity."""
+    lower = str(error_message or "").lower()
+    return not _has_rate_limit_tpm_hint(lower) and (
+        "message_too_big" in lower or "message too big" in lower
+    )
+
+
 def is_context_overflow_error(error_message: str | None) -> bool:
     """错误文本是否表示「上下文/prompt 超出模型窗口」。"""
     if not error_message:
@@ -44,7 +52,8 @@ def is_context_overflow_error(error_message: str | None) -> bool:
     )
 
     return (
-        "request_too_large" in lower
+        is_request_size_error(msg)
+        or "request_too_large" in lower
         or ("invalid_argument" in lower and "maximum number of tokens" in lower)
         or "request exceeds the maximum size" in lower
         or "context length exceeded" in lower

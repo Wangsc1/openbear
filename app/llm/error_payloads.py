@@ -12,8 +12,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.agent.context_overflow import is_request_size_error
 from app.llm.error_classify import (
     BILLING,
+    CONTEXT_OVERFLOW,
+    FORMAT,
     classify_error,
     normalize_classification,
     retryable_from_contract,
@@ -338,6 +341,10 @@ def normalize_error_payload(value: Any, *, transport_status: int = 0) -> Normali
     # even when an older gateway mislabeled the same payload as a transient error.
     if BILLING in {classification, code_reason, fallback_reason}:
         reason = BILLING
+    elif is_request_size_error(message) and classification in {"", FORMAT}:
+        # A generic invalid_request/format envelope must not hide WS 1009.
+        # Reuse bounded overflow recovery, not ordinary unchanged retries.
+        reason = CONTEXT_OVERFLOW
     else:
         reason = classification or code_reason or fallback_reason
 

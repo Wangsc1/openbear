@@ -76,18 +76,8 @@ watch([tab, selected, open], () => { copied.value = false; });
   </el-dialog>
 </template>
 
+<style scoped src="./eventMessageCard.css"></style>
 <style scoped>
-.event-envelope{display:flex;align-items:flex-start;gap:13px;width:min(100%,520px);padding:16px 18px;text-align:left;border:1px solid var(--ob-border);border-left:3px solid var(--el-color-primary);border-radius:12px;background:var(--ob-bg-elevated,var(--el-bg-color));color:var(--ob-text);cursor:pointer;transition:background .15s,border-color .15s;box-shadow:0 2px 7px #00000004;}
-.event-envelope:hover,.event-envelope:focus-visible{border-color:var(--el-color-primary);background:var(--el-color-primary-light-9);outline:none;}
-.event-envelope-icon{display:grid;place-items:center;flex:0 0 34px;height:34px;border-radius:9px;background:var(--el-color-primary-light-9);color:var(--el-color-primary);font-size:20px;}
-.event-envelope-main{display:flex;flex:1;flex-direction:column;gap:7px;min-width:0;}
-.event-envelope-label{font-size:10px;letter-spacing:.06em;color:var(--el-color-primary);}
-.event-envelope-label span{color:var(--ob-text-muted);letter-spacing:0;}
-.event-envelope-main strong{font-size:13px;font-weight:600;line-height:1.5;overflow-wrap:anywhere;}
-.event-envelope-summary{font-size:12px;line-height:1.6;color:var(--ob-text-subtle);display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;overflow-wrap:anywhere;}
-.event-envelope-meta{display:flex;gap:10px;flex-wrap:wrap;font-size:10px;color:var(--ob-text-muted);font-variant-numeric:tabular-nums;}
-.event-envelope-id{font-family:var(--ob-font-mono,monospace);opacity:.75;}
-.event-envelope-arrow{align-self:center;color:var(--ob-text-muted);font-size:12px;}
 .event-letter-head{display:flex;flex-direction:column;gap:6px;padding:0 2px 16px;overflow-wrap:anywhere;}
 .event-letter-head strong{font-size:15px;}.event-letter-head span{font-size:11px;color:var(--ob-text-muted);}
 .event-letter-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid var(--ob-border);padding-bottom:8px;}
@@ -99,5 +89,5 @@ watch([tab, selected, open], () => { copied.value = false; });
 .event-json{margin:0 0 18px;padding:14px;border:1px solid var(--ob-border);border-radius:8px;background:var(--ob-bg-sunken,var(--el-fill-color-light));font-size:12px;line-height:1.75;tab-size:2;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ob-text);}
 .event-json :deep(.hljs-attr){color:var(--el-color-primary);}.event-json :deep(.hljs-string){color:var(--el-color-success);}.event-json :deep(.hljs-number),.event-json :deep(.hljs-literal){color:var(--el-color-warning);}.event-json :deep(.hljs-punctuation){color:var(--ob-text-muted);}
 .event-letter-hint{font-size:12px;line-height:1.7;color:var(--ob-text-subtle);margin:0 0 12px;}
-@media(max-width:640px){.event-envelope{padding:13px 12px;gap:10px;}.event-letter-content{max-height:56dvh;}.event-letter-tabs button{padding:10px;}.event-json{padding:10px;font-size:11px;}}
+@media(max-width:640px){.event-letter-content{max-height:56dvh;}.event-letter-tabs button{padding:10px;}.event-json{padding:10px;font-size:11px;}}
 </style>

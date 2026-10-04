@@ -22,7 +22,7 @@ log = get_logger("db.engine")
 
 _SCHEMA = "\n".join(
     (Path(__file__).parent / name).read_text(encoding="utf-8")
-    for name in ("schema.sql", "user_interactions.sql", "interaction_telegram.sql", "web_telegram_replies.sql", "web_push.sql", "context_schema.sql", "runtime_schema.sql")
+    for name in ("schema.sql", "user_interactions.sql", "interaction_telegram.sql", "web_telegram_replies.sql", "web_push.sql", "context_schema.sql", "runtime_schema.sql", "cron.sql")
 )
 
 

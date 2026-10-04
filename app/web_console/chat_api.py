@@ -534,6 +534,12 @@ class WebAdminChatHandlersMixin:
             (conv_uuid, lower, upper, *keys),
         )
         operations = [operation_public(dict(item), include_tool_details=False) for item in await cur.fetchall()]
+        # Search windows are timeline snapshots too; apply the same trusted
+        # presentation enrichment as regular/paginated history.
+        from app.webhooks.presentation import enrich_operations
+        from app.cron.presentation import enrich_operations as enrich_cron_operations
+        await enrich_operations(self.db.conn, operations)
+        await enrich_cron_operations(self.db.conn, operations, conv_uuid)
         return web.json_response({"ok": True, "conversationUuid": conv_uuid, "operations": operations,
                                   "nextBeforeDisplaySeq": min(op["displaySeq"] for op in operations)})
 

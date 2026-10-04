@@ -32,7 +32,7 @@ const render = compile(descriptor.template.content);
 const setupNames = [...script.matchAll(/^(?:async )?function (\w+)\(/gm)].map(match => match[1]);
 const slot = {inheritAttrs: false, setup: (_, {slots}) => () => slots.default?.()};
 function turnList(turns, running = false, hiddenIds = []) {
-  const copies = [], emitted = [], webhookMessages = [];
+  const copies = [], emitted = [], webhookMessages = [], cronMessages = [];
   const props = {turns, running, conversationUuid: "test-conversation", detailKey: () => "detail", isDetailOpen: () => false, activeToolResultIndex: () => 0};
   const hidden = new Set(hiddenIds);
   const visibility = {hiddenIds: ref(hidden), selecting: ref(false), selected: ref(new Set()), busy: ref(false), canTarget: () => true, isHidden: value => hidden.has(value?.operation?.opId || value?.opId || value?.eventKey || value?.id), assistantTargets: turn => (turn.events || []).filter(event => !hidden.has(event.id))};
@@ -58,9 +58,13 @@ function turnList(turns, running = false, hiddenIds = []) {
     webhookMessages.push(p.message);
     return () => h('div', {'data-webhook-op-id': p.message.opId}, p.message.eventCard?.name);
   }});
+  app.component("CronMessageCard", {props: ['message'], setup: p => {
+    cronMessages.push(p.message);
+    return () => h('div', {'data-cron-op-id': p.message.opId}, p.message.cronCard?.name);
+  }});
   app.component("ConsoleMarkdown", {props: ["text"], setup: props => () => h("p", props.text)});
   app.component("TurnEvent", {props: ["event"], setup: props => () => h("div", {"data-event-id": props.event.id}, props.event.message?.content || "上下文压缩")});
-  return {props, copies, emitted, hidden, webhookMessages, html: () => renderToString(app), run: code => vm.runInContext(code, context)};
+  return {props, copies, emitted, hidden, webhookMessages, cronMessages, html: () => renderToString(app), run: code => vm.runInContext(code, context)};
 }
 const answer = (id = "answer", content = "已完成") => ({kind: "answer", id, message: {content, createdAt: 1789044000, live: false}});
 const savedStats = () => ({live: false, durationMs: 128664,
@@ -75,24 +79,26 @@ function footer(html) { return html.match(/<div class="assistant-message-meta">[
 const footerTurn = source => ({id: 'footer-turn', user: {
   source, opId: 'saved-user', turnUuid: 'footer-turn', deleteTraceable: true,
   content: '事件来信 webhook 原文', createdAt: 1789043900,
+  cronCard: {name: '定时验收', runId: 'cron-run', trigger: 'scheduled'},
   eventCard: {name: '事件来信', receivedAtMs: 1789043900000, events: [{eventId: 'event-one', summary: '入库完成'}]},
 }, events: [answer()], stats: savedStats()});
 
-for (const source of ['webhook', 'user', undefined]) {
+for (const source of ['webhook', 'cron', 'user', undefined]) {
   test(`compiled TurnList renders ${source || 'legacy'} user footer policy without changing the assistant footer`, async () => {
     const turn = footerTurn(source);
     const original = structuredClone(turn);
     const component = turnList([turn]);
     const html = await component.html();
     const userRow = html.split('<div class="assistant-row">')[0];
-    if (source === 'webhook') {
-      assert.match(userRow, /data-webhook-op-id="saved-user"/);
-      assert.match(userRow, /事件来信/);
-      assert.equal(component.webhookMessages[0], turn.user, 'the card receives the complete original message');
+    if (['webhook', 'cron'].includes(source)) {
+      assert.ok(userRow.includes(`data-${source}-op-id="saved-user"`));
+      assert.match(userRow, source === 'cron' ? /定时验收/ : /事件来信/);
+      assert.equal((source === 'cron' ? component.cronMessages : component.webhookMessages)[0], turn.user, 'the card receives the complete original message');
       assert.doesNotMatch(userRow, /user-message-meta|user-message-time|message-icon-action|message-visibility-action/);
       assert.doesNotMatch(userRow, /aria-label="(?:复制消息|引用本轮问答|从此处重来|隐藏消息)"/);
     } else {
       assert.equal(component.webhookMessages.length, 0);
+      assert.equal(component.cronMessages.length, 0);
       assert.match(userRow, /class="message-user"/);
       assert.match(userRow, /class="user-message-meta"/);
       assert.match(userRow, /class="user-message-time"[^>]*>\d{2}:\d{2}:\d{2}<\/time>/);
@@ -111,22 +117,22 @@ for (const source of ['webhook', 'user', undefined]) {
   });
 }
 
-test('webhook rows still participate in global visibility selection, hiding and restoration', async () => {
-  const turn = footerTurn('webhook');
+for (const source of ['webhook', 'cron']) test(`${source} rows still participate in global visibility selection, hiding and restoration`, async () => {
+  const turn = footerTurn(source);
   const original = structuredClone(turn);
   const component = turnList([turn]);
   component.run("visibility.selecting.value = true; visibility.selected.value.add('saved-user')");
   const selected = await component.html();
   assert.match(selected, /class="[^"]*timed-row-user[^"]*visibility-selectable[^"]*visibility-selected/);
-  assert.match(selected, /data-webhook-op-id="saved-user"/);
+  assert.ok(selected.includes(`data-${source}-op-id="saved-user"`));
   assert.doesNotMatch(selected, /user-message-meta/);
   const hidden = await turnList([turn], false, ['saved-user']).html();
-  assert.doesNotMatch(hidden, /timed-row-user|data-webhook-op-id/);
+  assert.doesNotMatch(hidden, /timed-row-user|data-(?:webhook|cron)-op-id/);
   assert.match(hidden, /assistant-message-meta/);
   const allHidden = await turnList([turn], false, ['saved-user', 'answer']).html();
-  assert.doesNotMatch(allHidden, /turn-block|assistant-message-meta|data-webhook-op-id/);
+  assert.doesNotMatch(allHidden, /turn-block|assistant-message-meta|data-(?:webhook|cron)-op-id/);
   const restored = await turnList([turn]).html();
-  assert.match(restored, /data-webhook-op-id="saved-user"/);
+  assert.ok(restored.includes(`data-${source}-op-id="saved-user"`));
   assert.doesNotMatch(restored, /user-message-meta/);
   assert.deepEqual(turn, original);
 });

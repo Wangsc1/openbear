@@ -65,10 +65,10 @@
 }
 
 /* =========================================================================
-   PC 桌面端专属：单行 5 联微胶囊坞 (One-Row 5-Pill Dock)
+   PC 桌面端专属：六入口单排，保持会话树可用高度
    ========================================================================= */
 .sidebar-desktop-nav.sidebar-resource-grid {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 2px;
   border-radius: 12px;
   padding: 3px;
@@ -77,8 +77,8 @@
 
 .sidebar-desktop-nav > .sidebar-resource-tile {
   min-height: 46px;
-  padding: 4px 2px;
-  gap: 7px;
+  padding: 4px 1px;
+  gap: 6px;
   border-radius: 6px;
   font-size: 11px;
 }

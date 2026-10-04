@@ -749,9 +749,12 @@ function cancelStopShapePress() {
 	stopShapePress = null;
 }
 function startStopShapePress(event) {
+	// A secondary finger must not reset an already-consumed long press. Desktop
+	// right-click still starts a fresh gesture before its contextmenu event.
+	if (event.isPrimary === false || (event.button > 0 && !(event.pointerType === 'mouse' && event.button === 2))) return;
 	cancelStopShapePress();
 	suppressStopClick = false;
-	if (event.pointerType !== 'touch' || event.isPrimary === false || event.button > 0) return;
+	if (event.pointerType !== 'touch' || event.button > 0) return;
 	stopShapePress = {id: event.pointerId, x: event.clientX, y: event.clientY};
 	stopShapeTimer = window.setTimeout(() => {
 		stopShapeTimer = null;
@@ -778,16 +781,31 @@ function stopButtonContextMenu() {
 	suppressStopClick = true;
 	cancelStopShapePress();
 }
-function clickStopButton(event) {
-	if (suppressStopClick && (event.detail !== 0 || event.pointerType === 'touch')) {
-		suppressStopClick = false;
-		event.preventDefault();
-		return;
-	}
+function consumeShapeClick(event) {
+	if (!suppressStopClick) return false;
+	// Touch-generated clicks can have detail=0 and omit pointerType. A shape
+	// gesture consumes that click too; real keyboard activation resets below.
 	suppressStopClick = false;
-	emit('stop');
+	event.preventDefault();
+	return true;
 }
-watch(() => [props.conversationUuid, props.running, Boolean(props.draft.trim())], cancelStopShapePress);
+function clickStopButton(event) {
+	if (!consumeShapeClick(event)) emit('stop');
+}
+function clickSendButton(event) {
+	if (!consumeShapeClick(event) && props.canSend) emit('send');
+}
+function buttonShapeKeydown(event) {
+	if (event.key !== 'Enter' && event.key !== ' ') return;
+	cancelStopShapePress();
+	suppressStopClick = false;
+}
+function cancelButtonShapeInteraction(event) {
+	if (event && stopShapePress && event.pointerId !== stopShapePress.id) return;
+	if (stopShapePress) suppressStopClick = true;
+	cancelStopShapePress();
+}
+watch(() => [props.conversationUuid, props.running, Boolean(props.draft.trim()), props.canSend], () => cancelButtonShapeInteraction());
 
 function focusInteraction(interactionId) {
 	const pending = props.pendingConfirmations.find(item => item.confirmationId === interactionId);
@@ -1163,16 +1181,20 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 							</div>
 						</el-popover>
 						<el-tooltip v-if="props.running && !props.draft.trim()" content="停止生成（右键或长按切换按钮形状）" placement="top" :show-after="260">
-							<button type="button" class="send-button stop-button" :class="{'is-round': stopButtonShape === 'circle'}" aria-label="停止生成" aria-description="右键单击或长按切换方形与圆形，偏好保存在当前浏览器" @click="clickStopButton" @contextmenu.prevent="stopButtonContextMenu" @pointerdown="startStopShapePress" @pointermove="moveStopShapePress" @pointerup="endStopShapePress" @pointercancel="cancelStopShapePress" @pointerleave="cancelStopShapePress">
-								<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/></svg>
+							<button type="button" class="send-button stop-button" :class="{'is-round': stopButtonShape === 'circle'}" aria-label="停止生成" aria-description="右键单击或长按切换方形与圆形，偏好保存在当前浏览器" @click="clickStopButton" @contextmenu.prevent="stopButtonContextMenu" @pointerdown="startStopShapePress" @pointermove="moveStopShapePress" @pointerup="endStopShapePress" @pointercancel="cancelButtonShapeInteraction" @pointerleave="cancelButtonShapeInteraction" @keydown="buttonShapeKeydown">
+								<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+									<rect v-if="stopButtonShape === 'circle'" x="5" y="5" width="14" height="14" rx="1.5"/>
+									<rect v-else x="4" y="4" width="16" height="16" rx="3"/>
+								</svg>
 							</button>
 						</el-tooltip>
-						<el-tooltip v-else content="发送消息（Enter；触屏可用 Ctrl/⌘+Enter）" placement="top" :show-after="260">
-							<button type="button" class="send-button" :class="{'is-round': stopButtonShape === 'circle'}" aria-label="发送消息（桌面 Enter；触屏 Ctrl 或 Command 加 Enter）" :disabled="!props.canSend"
-							        @click="emit('send')">
-								<Promotion/>
+						<template v-else>
+							<button type="button" class="send-button" :class="{'is-round': stopButtonShape === 'circle'}" aria-label="发送消息（桌面 Enter；触屏 Ctrl 或 Command 加 Enter）" aria-description="右键单击或长按切换方形与圆形，空输入也可切换；偏好保存在当前浏览器" :aria-disabled="!props.canSend"
+							        @click="clickSendButton" @contextmenu.prevent="stopButtonContextMenu" @pointerdown="startStopShapePress" @pointermove="moveStopShapePress" @pointerup="endStopShapePress" @pointercancel="cancelButtonShapeInteraction" @pointerleave="cancelButtonShapeInteraction" @keydown="buttonShapeKeydown">
+								<Promotion v-if="stopButtonShape !== 'circle'"/>
+								<svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20V4M5 11l7-7 7 7"/></svg>
 							</button>
-						</el-tooltip>
+						</template>
 					</div>
 				</div>
 			</div>
@@ -2472,6 +2494,8 @@ button.status-chip:hover, .status-chip-active {
 	line-height: 1;
 	cursor: pointer;
 	box-shadow: var(--ob-shadow-panel);
+	-webkit-touch-callout: none;
+	user-select: none;
 }
 
 .send-button svg {
@@ -2485,9 +2509,11 @@ button.status-chip:hover, .status-chip-active {
 	-webkit-touch-callout: none;
 	user-select: none;
 }
-.send-button.is-round { border-radius: 50%; }
+.send-button.is-round { border-radius: 50%; box-shadow: none; }
+.send-button.is-round:not(.stop-button) svg { width: 60%; height: 60%; }
 
-.send-button:disabled {
+.send-button:disabled,
+.send-button[aria-disabled="true"] {
 	background: var(--ob-text-disabled);
 	cursor: not-allowed;
 }

@@ -58,6 +58,8 @@ class WebAdminAppMixin:
         app = web.Application(middlewares=[self._auth_middleware])
         from app.webhooks.http import install as install_webhooks
         install_webhooks(app, self)
+        from app.cron.http import install as install_cron
+        install_cron(app, self)
         app.cleanup_ctx.append(self._realtime_context)
         app.cleanup_ctx.append(self._web_push_context)
         app.on_shutdown.append(self._realtime_shutdown)
@@ -73,6 +75,7 @@ class WebAdminAppMixin:
             web.get("/settings", self.handle_index),
             web.get("/statistics", self.handle_index),
             web.get("/webhooks", self.handle_index),
+            web.get("/cron", self.handle_index),
             web.get("/assets/{path:.*}", self.handle_asset),
             *(web.get(path, self.handle_pwa_asset) for path in PWA_PUBLIC_FILES),
             web.post("/api/auth/login/start", self.handle_login_post),

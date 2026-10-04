@@ -114,6 +114,10 @@ async def execute_attempt(
     ``on_start`` commits pre-request facts; failure prevents transport/settle.
     Its latency is excluded from the physical request timing.
     """
+    from app.runtime.budget import current_budget
+    budget = current_budget()
+    if budget is not None:
+        await budget.before_call()
     if mode not in {"auto", "stream", "complete"}:
         raise ValueError(f"unknown model call mode: {mode}")
     stream = getattr(request.backend, "stream", None)
@@ -148,6 +152,8 @@ async def execute_attempt(
         # It must never run inside the atomic ledger/action transaction.
         if after_settle is not None:
             await _invoke(after_settle, value)
+        if budget is not None:
+            await budget.after_call()
 
     settle = commit_attempt
     if on_start is not None:
@@ -306,6 +312,8 @@ async def execute_attempt(
                     await _invoke(settle, outcome)
     if cancelled is not None:
         raise cancelled
+    if budget is not None:
+        await budget.before_call()  # No tool execution or retry after budget exhaustion.
     return outcome
 
 

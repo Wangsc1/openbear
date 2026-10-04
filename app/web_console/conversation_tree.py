@@ -236,7 +236,7 @@ class WebAdminConversationTreeMixin:
             tasks.clear()
 
     async def _tree_ensure_interaction_projection(self, owner_chat_id: int) -> None:
-        """Lazily backfill only legacy NULL rows; 0 remains a known empty value."""
+        """Backfill legacy recency and reconcile Cron-owned rows once per owner."""
         owner = int(owner_chat_id)
         ready = getattr(self, "_tree_projection_ready", None)
         if ready is None:
@@ -250,6 +250,17 @@ class WebAdminConversationTreeMixin:
         if task is None:
             async def backfill() -> None:
                 async with self.db.conn.transaction(label="conversation-tree-interaction-projection") as conn:
+                    # Older Cron messages were stored as ordinary user/reply
+                    # rows. Recompute only this derived timestamp; keep message
+                    # originals and any genuine later human interaction intact.
+                    await conn.execute(
+                        """UPDATE web_conversations SET last_interaction_at_ms=NULL
+                           WHERE owner_chat_id=? AND COALESCE(archived_at,0)=0
+                             AND last_interaction_at_ms>0 AND EXISTS (
+                                 SELECT 1 FROM cron_runs cr
+                                 WHERE cr.conversation_uuid=web_conversations.conversation_uuid
+                             )""", (owner,),
+                    )
                     cur = await conn.execute(
                         """
                         SELECT o.conversation_uuid,
@@ -265,6 +276,11 @@ class WebAdminConversationTreeMixin:
                           AND COALESCE(json_extract(o.payload_json,'$.internal'),0)=0
                           AND COALESCE(json_extract(o.payload_json,'$.hidden'),0)=0
                           AND COALESCE(json_extract(o.payload_json,'$.eventTriggered'),0)=0
+                          AND NOT EXISTS (
+                              SELECT 1 FROM cron_runs cr WHERE cr.conversation_uuid=o.conversation_uuid
+                                AND cr.root_turn_uuid=COALESCE(NULLIF(o.run_root_turn_uuid,''),o.turn_uuid)
+                                AND (o.op_type='assistant_message' OR o.op_id='msg:'||cr.run_id)
+                          )
                           AND ((o.op_type='user_message' AND
                                 (LENGTH(TRIM(COALESCE(json_extract(o.payload_json,'$.text'),'')))>0
                                  OR COALESCE(json_array_length(o.payload_json,'$.attachments'),0)>0))

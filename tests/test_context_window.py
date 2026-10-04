@@ -16,6 +16,9 @@ from app.context.window import (
     estimate_request,
     mark_source,
     select_window,
+    protocol_groups,
+    required_context_groups,
+    source_of,
 )
 from app.db.engine import DB
 from app.llm.events import ToolCall
@@ -35,6 +38,32 @@ def batch(index, *, name="Read", text="result"):
 
 def units(messages):
     return InputEstimate(10 + len(messages) * 10)
+
+
+def test_cron_original_input_is_pinned_without_becoming_human_or_pinning_old_runs():
+    old = mark_source({'role': 'user', 'content': 'old scheduled task'}, kind='cron', source_id='old', run_root_turn_uuid='prior')
+    original = mark_source({'role': 'user', 'content': 'only execute the authorized schedule'}, kind='cron', source_id='cron-input', run_root_turn_uuid='active')
+    messages = [old, original]
+    for i in range(5):
+        messages += [mark_source(message, run_root_turn_uuid='active') for message in batch(i)]
+    before = copy.deepcopy(messages)
+    selected = select_window(messages, estimate=units, target=50, latest_batches=2, active_run_root_turn_uuid='active')
+    assert original in selected.messages and old not in selected.messages
+    assert selected.messages[0] == original
+    assert source_of(selected.messages[0])['kind'] == 'cron'
+    assert messages == before
+    # Switching to model-summary mode must not weaken original-input retention.
+    assert 1 in required_context_groups(messages, protocol_groups(messages))
+
+
+def test_cron_input_can_anchor_unscoped_tool_batches_and_human_corrections():
+    original = mark_source({'role': 'user', 'content': 'scheduled scope'}, kind='cron', source_id='cron-input', run_root_turn_uuid='active')
+    correction = mark_source(human('stop at the agreed boundary', 'correction'), kind='human', run_root_turn_uuid='active')
+    messages = [original, *batch(0), *batch(1), correction, *batch(2), *batch(3)]
+    selected = select_window(messages, estimate=units, target=50, latest_batches=1, active_run_root_turn_uuid='active')
+    assert original in selected.messages and correction in selected.messages
+    assert any(message.get('tool_call_id') == 't3' for message in selected.messages)
+    assert not any(message.get('tool_call_id') == 't0' for message in selected.messages)
 
 
 def test_preserves_current_run_originals_and_antecedent_not_latest_n():
@@ -99,7 +128,8 @@ def test_opaque_turns_are_dropped_whole_when_opening_new_prefix():
 def test_media_base64_is_not_tokenized_as_text():
     small = estimate_payload({"content": [{"type": "input_image", "image_url": "data:image/png;base64,123"}]})
     large = estimate_payload({"content": [{"type": "input_image", "image_url": "data:image/png;base64," + "a" * 1_000_000}]})
-    assert large == small
+    assert large.tokens == small.tokens
+    assert large.request_bytes > small.request_bytes + 900_000
     assert large.media_unknown
 
 

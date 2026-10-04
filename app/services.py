@@ -46,6 +46,8 @@ from app.tools.mcp import register_mcp_tools
 from app.tools.memory import register_memory_tools
 from app.tools.openbear_control import register_openbear_control_tool
 from app.tools.webhook import register_webhook_tool
+from app.tools.cron import register_cron_tool
+from app.cron.service import CronService
 from app.webhooks.service import WebhookService
 from app.webhooks.runtime_bridge import RuntimeBridge
 from app.webhooks.worker import Worker
@@ -129,6 +131,8 @@ class Services:
         self.web_admin.webhooks = self.webhooks
         self.webhook_bridge = RuntimeBridge(self.webhooks, self.web_admin)
         self.webhook_worker = Worker(self.webhooks)
+        self.cron = CronService(self.db, self.web_admin)
+        self.web_admin.cron = self.cron
 
         # 工具注册
         self.file_state = FileStateStore(config.tools.file_state_max_entries)
@@ -155,6 +159,7 @@ class Services:
         register_user_interaction_tools(self.tools, self.interactions)
         register_openbear_control_tool(self.tools, self)
         register_webhook_tool(self.tools, self.webhooks)
+        register_cron_tool(self.tools, self.cron)
         register_browser_tool(self.tools, self.browser)
         register_agent_tools(
             self.tools,
@@ -239,6 +244,7 @@ class Services:
             log.info("MCP 工具已注册", 数量=registered_mcp_tools)
         await self.web_admin.start()
         await self.webhook_worker.start()
+        await self.cron.start()
         await self.update.start()
         log.info("服务已启动", 工具数=len(self.tools.names()), skills=len(self.skills),
                  主力模型=self.selection.current)
@@ -681,6 +687,7 @@ class Services:
         register_user_interaction_tools(self.tools, self.interactions)
         register_openbear_control_tool(self.tools, self)
         register_webhook_tool(self.tools, self.webhooks)
+        register_cron_tool(self.tools, self.cron)
         register_browser_tool(self.tools, self.browser)
         register_agent_tools(
             self.tools,
@@ -982,6 +989,7 @@ class Services:
                  工具数=len(self.tools.names()), skills=len(self.skills), MCP热重载=mcp_changed)
 
     async def shutdown(self) -> None:
+        await self.cron.close()
         await self.webhook_worker.close()
         if self._browser_validation_task:
             self._browser_validation_task.cancel()

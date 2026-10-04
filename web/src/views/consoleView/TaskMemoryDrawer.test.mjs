@@ -47,7 +47,7 @@ test("floating and composer controls use Element Plus tooltips instead of native
   assert.match(minimapSource, /<el-tooltip[\s\S]*?:content="turnNavLabel\(turn, idx\)"[\s\S]*?placement="left"/);
   assert.doesNotMatch(minimapSource, /:title=/);
   assert.doesNotMatch(composerSource, /<button\b[^>]*\btitle=/, 'action buttons use Element Plus tooltips; read-only totals may retain native descriptions');
-  for (const label of ["移除附件", "新话题（Ctrl+N）", "上传图片或附件", "清空草稿", "停止生成（右键或长按切换按钮形状）", "发送消息（Enter；触屏可用 Ctrl/⌘+Enter）"]) {
+  for (const label of ["移除附件", "新话题（Ctrl+N）", "上传图片或附件", "清空草稿", "停止生成（右键或长按切换按钮形状）"]) {
     assert.ok(composerSource.includes(`content="${label}"`), `missing Element Plus tooltip: ${label}`);
   }
   assert.match(composerSource, /aria-label="运行配置"/);

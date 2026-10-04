@@ -23,7 +23,7 @@ from app.llm.base import Message
 from app.utils import estimate_tokens
 
 CONTEXT_META = "openbear_context_source"
-PINNED_KINDS = frozenset({"human", "task", "control", "decision", "required_runtime", "legacy_handoff", "summary"})
+PINNED_KINDS = frozenset({"human", "task", "cron", "control", "decision", "required_runtime", "legacy_handoff", "summary"})
 _MEDIA_TYPES = frozenset({"image", "image_url", "input_image", "input_audio", "input_file", "audio"})
 
 WINDOW_SYSTEM_POLICY = """## Context window runtime
@@ -139,12 +139,14 @@ def _text_payload(value: Any) -> tuple[Any, bool]:
 class InputEstimate:
     tokens: int
     media_unknown: bool = False
+    request_bytes: int = 0
 
 
 def estimate_payload(payload: Any) -> InputEstimate:
     clean, media_unknown = _text_payload(payload)
     text = json.dumps(clean, ensure_ascii=False, separators=(",", ":"), default=str)
-    return InputEstimate(estimate_tokens(text), media_unknown)
+    request_bytes = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str).encode())
+    return InputEstimate(estimate_tokens(text), media_unknown, request_bytes)
 
 
 def estimate_request(
@@ -253,7 +255,7 @@ def required_context_groups(
         kinds = {source_of(message).get("kind") for message in group}
         if kinds & pinned:
             required.add(index)
-        if kinds & {"human", "task", "control"}:
+        if kinds & {"human", "task", "cron", "control"}:
             human.append(index)
         for call in group[0].get("tool_calls") or []:
             if _decision_exchange(call, group):
@@ -262,7 +264,7 @@ def required_context_groups(
     for index in human:
         for previous in range(index - 1, -1, -1):
             first = messages[bounds[previous][0]]
-            if source_of(first).get("kind") in {"human", "task", "control"}:
+            if source_of(first).get("kind") in {"human", "task", "cron", "control"}:
                 break
             if first.get("role") == "assistant" and not first.get("tool_calls") and first.get("content"):
                 required.add(previous)
@@ -283,8 +285,10 @@ def sliding_required_context_groups(
     Multiple unscoped inputs are ambiguous: fail instead of dropping a possibly
     current instruction or turning all historical inputs into lifetime pins.
     """
-    input_kinds = {"human", "task", "control", "decision"}
-    primary_kinds = {"human", "task"}
+    # Scheduled instructions are task inputs, while retaining their distinct
+    # trusted origin (not a new live human message).
+    input_kinds = {"human", "task", "cron", "control", "decision"}
+    primary_kinds = {"human", "task", "cron"}
     target = active_task_uuid or active_run_root_turn_uuid
     agent = bool(active_task_uuid)
     kinds: list[set[str]] = []
