@@ -33,7 +33,7 @@ async def main(path,stage,url):
         print('READY '+json.dumps({'event':event,'assignment':assignment}),flush=True)
         await asyncio.Event().wait()
     if stage=='notification_ack':
-        async def enqueue(owner,conversation,key,status):
+        async def enqueue(owner,conversation,key,status,**metadata):
             async with ClientSession() as session:
                 async with session.post(url,data=key) as response: await response.read()
             await barrier()  # channel accepted stable ID; local outbox ACK absent

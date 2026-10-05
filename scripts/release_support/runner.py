@@ -8,14 +8,15 @@ import shutil
 import time
 from pathlib import Path
 
-from . import candidate, scope
-from .common import Commands, ReleaseError, State, atomic_json, fingerprint, load, sha
+from . import build, candidate, scope
+from .common import Commands, ReleaseError, State, atomic_json, fingerprint, load, process_ticks, sha
 from .github import GitHub
 from .publication import asset_metadata, publish
 
 TEST_STAGES = ("py311", "py312", "py313", "frontend")
-DEFAULT_IMAGES = {"pythonImages": {v: f"openbear-matrix-1503-py{v}:local" for v in ("311", "312", "313")},
-                  "systemdImage": "openbear-systemd-acceptance:debian13-20260920"}
+DEFAULT_IMAGES = {"pythonImages": {v: f"openbear-release-python:{version}" for v, version in
+                                  (("311", "3.11"), ("312", "3.12"), ("313", "3.13"))},
+                  "systemdImage": "openbear-release-systemd:local"}
 ALLOWED_LOCAL_SKIP = "test_openbear_v31_is_active_baseline_derived_and_renders_from_database"
 
 
@@ -25,6 +26,27 @@ def execution_environment(environment, stage):
     if stage.startswith("py") or stage == "frontend-checks":
         identity["pythonImage"] = environment["pythonImages"][stage[2:] if stage.startswith("py") else "312"]
     return identity
+
+
+def verified_build(result, root=None, identity=None):
+    """Verify the entire compiled tree and immutable manifest, not just index.html."""
+    try:
+        outputs = result["outputs"]
+        manifest = Path(outputs["manifest"])
+        record = load(manifest)
+        files = build.tree_files(Path(outputs["dist"]))
+        if (not result.get("ok") or "index.html" not in files or files != record["files"]
+                or build.digest_json(files) != outputs["distSha256"]
+                or sha(manifest.read_bytes()) != outputs["manifestSha256"]):
+            return False
+        if identity is not None and record["identity"] != identity:
+            return False
+        if root is not None and (load(root / "manifest.json") != record or build.tree_files(root / "dist") != files):
+            return False
+        log = Path(outputs["log"])
+        return log.is_file() and sha(log.read_bytes()) == outputs["logSha256"]
+    except (OSError, ValueError, KeyError, build.ReleaseError):
+        return False
 
 
 def matrix_contract(results):
@@ -209,29 +231,50 @@ class Runner:
         if not release_scope:
             return None
         component = "backend" if name.startswith("py") else "frontend"
+        source = release_scope.get(component + "StageFingerprint")
+        if name == "frontend-checks":
+            backend, frontend = release_scope.get("backendStageFingerprint"), release_scope.get("frontendFingerprint")
+            if not backend or not frontend:
+                return None
+            # Unlike the reusable main matrix, these checks cover both sides.
+            source = {"backend": backend, "frontend": frontend, "checks": list(scope.FRONTEND_CHECKS)}
+        if not source:
+            return None  # Old scope schemas cannot establish the new input contract.
         return {"policy": scope.POLICY, "stage": name,
-                "source": release_scope[component + "Fingerprint"],
+                "source": source,
                 "environment": execution_environment(environment, name)}
 
     def cached_test(self, name, environment):
         key = self.test_cache_key(name, environment)
-        release_scope = self.value.get("scope", {})
-        allowed = release_scope.get("kind") in {"frontend", "metadata"} if name.startswith("py") else release_scope.get("kind") in {"backend", "metadata"}
-        if not key or not allowed:
+        if not key:
             return None
         path = self.cache / "tests" / (fingerprint(key) + ".json")
         try:
             record = load(path)
             if record["key"] == key and scope.verified_result(record["result"]):
-                return {**record["result"], "evidenceReuse": {"runId": record["runId"], "key": key}}
+                origin = record["result"].get("evidenceReuse", {}).get("runId", record["runId"])
+                return {**record["result"], "evidenceReuse": {"runId": origin, "key": key}}
         except (OSError, ValueError, KeyError):
             pass
         return None
 
     def build_once(self, environment):
-        return self.state.execute("build", {"candidate": self.value["candidate"]["sourceFingerprint"],
-            "environment": execution_environment(environment, "build"), "scope": self.value.get("scope")},
-            lambda: self.build_stage("build"), valid=lambda _: (self.directory / "build/dist/index.html").is_file())
+        inputs = scope.build_identity(self.value.get("scope", {}).get("frontendStageFingerprint")
+            or self.value["candidate"]["sourceFingerprint"], environment, self.value["version"])
+
+        def operation():
+            root = self.directory / "build"
+            # Different inputs need a fresh canonical build, never an overwrite
+            # of its immutable attempt evidence. Same-input corruption fails in
+            # build.py instead of silently trusting an index.html existence test.
+            if root.exists() and load(root / "manifest.json").get("identity") != inputs:
+                archive = self.directory / "superseded" / ("build-" + str(time.time_ns()))
+                archive.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(root), archive)
+            return self.build_stage("build")
+
+        return self.state.execute("build", inputs, operation,
+            valid=lambda result: verified_build(result, self.directory / "build", inputs))
 
     def parallel(self, operations):
         """Join every owned job before cleanup; one failure blocks the next gate."""
@@ -254,34 +297,53 @@ class Runner:
         return results
 
     def run_tests(self, environment, *, with_build=False):
-        cached = {name: self.cached_test(name, environment) for name in TEST_STAGES}
         built = {}
+        cached = {name: self.cached_test(name, environment) for name in TEST_STAGES}
+
+        def stage_inputs(name):
+            return self.test_cache_key(name, environment) or {
+                "candidate": self.value["candidate"]["sourceFingerprint"],
+                "environment": execution_environment(environment, name), "policy": scope.POLICY}
+
+        def same_candidate_reuse(name):
+            prior = self.value.get("stages", {}).get(name, {})
+            return (prior.get("status") == "passed" and prior.get("fingerprint") == fingerprint(stage_inputs(name))
+                    and scope.verified_result(prior["result"]))
+
+        def checks_passed(result):
+            cases = result.get("testCases", [])
+            return bool(cases) and all(case["status"] == "passed" for case in cases)
 
         def execute(name):
-            inputs = {"candidate": self.value["candidate"]["sourceFingerprint"],
-                      "environment": execution_environment(environment, name), "policy": scope.POLICY}
-            result = self.state.execute(name, inputs, lambda: cached.get(name) or self.build_stage(name))
+            key = self.test_cache_key(name, environment)
+
+            def operation():
+                result = cached.get(name) or self.build_stage(name)
+                if name == "frontend-checks" and not checks_passed(result):
+                    raise ReleaseError("Frontend Python checks must all pass without skips")
+                return result
+
+            result = self.state.execute(name, stage_inputs(name), operation,
+                valid=lambda result: scope.verified_result(result) and (name != "frontend-checks" or checks_passed(result)))
+            # Persist each success before starting dependent work or waiting for
+            # siblings. A failed Python job/build cannot swallow this evidence.
+            if key and scope.verified_result(result):
+                atomic_json(self.cache / "tests" / (fingerprint(key) + ".json"),
+                            {"key": key, "runId": self.value["runId"], "result": result})
             if name == "frontend" and with_build:
                 # Frontend test completion gates compilation, not sibling Python jobs.
                 built.update(self.build_once(environment))
             return result
 
         operations = {name: lambda name=name: execute(name) for name in TEST_STAGES}
-        if self.value.get("scope", {}).get("frontendChanged") and any(cached[n] for n in TEST_STAGES[:3]):
+        if self.value.get("scope", {}).get("frontendChanged") and any(
+                cached[name] or same_candidate_reuse(name) for name in TEST_STAGES[:3]):
+            cached["frontend-checks"] = self.cached_test("frontend-checks", environment)
             operations["frontend-checks"] = lambda: execute("frontend-checks")
         results = self.parallel(operations)
         matrix = matrix_contract(results)
-        if "frontend-checks" in results:
-            checks = results["frontend-checks"]
-            if any(c["status"] != "passed" for c in checks["testCases"]):
-                raise ReleaseError("Frontend Python checks must all pass without skips")
-        for name in TEST_STAGES:
-            key = self.test_cache_key(name, environment)
-            result = results[name]
-            if key and scope.verified_result(result):
-                atomic_json(self.cache / "tests" / (fingerprint(key) + ".json"),
-                            {"key": key, "runId": self.value["runId"], "result": result})
-        matrix["reusedStages"] = [name for name, result in results.items() if result.get("evidenceReuse")]
+        matrix["reusedStages"] = [name for name, result in results.items()
+                                  if result.get("evidenceReuse") or self.value["stages"][name].get("lastReusedAt")]
         return (matrix, built) if with_build else matrix
 
     def report(self):
@@ -330,7 +392,7 @@ class Runner:
             self.state.save()
             self.report()
             return
-        invocation = {"startedAt": time.time()}
+        invocation = {"startedAt": time.time(), "pid": os.getpid(), "startTicks": process_ticks(os.getpid())}
         self.value.setdefault("invocations", []).append(invocation)
         self.state.save()
         try:
@@ -346,7 +408,8 @@ class Runner:
             self.state.save()
             print("Release scope: " + self.value["scope"]["kind"], flush=True)
             atomic_json(self.directory / "build-config.json", self.build_config())
-            self.state.execute("env", {"images": {k: self.value["images"][k] for k in ("311", "312", "313")},  "lock": identity["files"]["uv.lock"], "nodeLock": identity["files"]["web/package-lock.json"]},
+            self.state.execute("env", {"images": {k: self.value["images"][k] for k in ("311", "312", "313")},
+                                     "dependencies": build.normalize_dependencies(self.directory / "source")},
                                      lambda: self.build_stage("env"), valid=lambda _: (self.directory / "environment.json").is_file())
             environment = load(self.directory / "environment.json")
             matrix, built = self.run_tests(environment, with_build=True)
@@ -367,6 +430,7 @@ class Runner:
             self.value["published"] = True
         except BaseException as exc:
             self.value["lastError"] = {"type": type(exc).__name__, "message": self.command.redact(str(exc)),
+                "exitCode": getattr(exc, "code", 130 if isinstance(exc, KeyboardInterrupt) else 1),
                 "resume": f"{self.value['python']} scripts/release.py resume {self.value['runId']}"}
             raise
         finally:

@@ -3,7 +3,7 @@ import {normalizedRunDefaults, updateRunDefault} from '../folderRunDefaults.js';
 export const OUTCOMES = ['completed', 'failed', 'timed_out', 'tokens_exceeded', 'cost_exceeded', 'cancelled'];
 export const STATUSES = ['starting', 'running', ...OUTCOMES, 'interrupted', 'post_failed', 'missed'];
 export const TABS = [['basic', '基本配置'], ['schedule', '时间规则'], ['instructions', '处理指令'], ['scripts', '脚本']];
-export const PAGE_TABS = [['jobs', '任务列表'], ['history', '运行历史']];
+export const PAGE_TABS = [['calendar', '任务日历'], ['jobs', '任务列表'], ['history', '运行历史']];
 // Keep draft text intact while typing; the API receives only an integer or null.
 export function parseTokenBudget(value) {
   if (value == null || (typeof value === 'string' && !value.trim())) return null;
@@ -57,15 +57,19 @@ export function draftOf(job, folderId = '') {
   return {folderId:job?.folderId || folderId,name:job?.name || '',description:job?.description || '',enabled:job?.enabled ?? false,config:clone(job?.config || defaultConfig())};
 }
 export function schedulePayload(schedule) {
-  return {kind:schedule.kind,timezone:schedule.timezone,expression:schedule.kind === 'cron' ? schedule.expression : null,at:schedule.kind === 'at' ? schedule.at : null,everySeconds:schedule.kind === 'every' ? schedule.everySeconds : null,anchorAt:schedule.kind === 'every' ? schedule.anchorAt || null : null};
+  const bounds=schedule.kind!=='at' && (schedule.startAt || schedule.endAt) ? {startAt:schedule.startAt || null,endAt:schedule.endAt || null} : {};
+  const extras={...(schedule.kind==='cron' && schedule.second!=null?{second:schedule.second}:{}),...(schedule.skipHolidays?{skipHolidays:true}:{})};
+  return {...bounds,...extras,kind:schedule.kind,timezone:schedule.timezone,expression:schedule.kind === 'cron' ? schedule.expression : null,at:schedule.kind === 'at' ? schedule.at : null,everySeconds:schedule.kind === 'every' ? schedule.everySeconds : null,anchorAt:schedule.kind === 'every' ? schedule.anchorAt || null : null};
 }
 export function scheduleText(schedule = {}) {
-  if (schedule.kind === 'at') return `一次性 · ${time(schedule.at)}`;
+  const rest=schedule.skipHolidays?' · 跳过休息日（含调休）':'';
+  const bounds=schedule.startAt || schedule.endAt ? ` · ${schedule.startAt?time(schedule.startAt):'不限开始'} 至 ${schedule.endAt?`${time(schedule.endAt)}（不含）`:'不限结束'}` : '';
+  if (schedule.kind === 'at') return `一次性 · ${time(schedule.at)}${rest}`;
   if (schedule.kind === 'every') {
     const unit = INTERVAL_UNITS.find(item => item.value === intervalUnitFor(schedule.everySeconds));
-    return `每 ${number(schedule.everySeconds == null ? null : schedule.everySeconds / unit.value)} ${unit.label}`;
+    return `每 ${number(schedule.everySeconds == null ? null : schedule.everySeconds / unit.value)} ${unit.label}${bounds}${rest}`;
   }
-  return `${schedule.expression || '—'} · ${schedule.timezone || '—'}`;
+  return `${schedule.expression || '—'}${schedule.second?` · 第 ${schedule.second} 秒`:''} · ${schedule.timezone || '—'}${bounds}${rest}`;
 }
 export const overrides = config => Object.fromEntries(Object.entries(config || {}).filter(([,value]) => value != null));
 export function effectiveModel(config, folder, models) {
@@ -92,7 +96,15 @@ export function scheduleErrors(schedule) {
     if (!Number.isInteger(schedule.everySeconds) || schedule.everySeconds <= 0) add('everySeconds','间隔须为正整数秒');
     if (schedule.anchorAt && !validDate(schedule.anchorAt)) add('anchorAt','请选择有效的间隔起点');
   }
-  if (schedule.kind === 'cron' && String(schedule.expression || '').trim().split(/\s+/).length !== 5) add('expression','Cron 表达式须为五段；具体规则由服务器预览校验');
+  if (schedule.kind === 'cron') {
+    if (String(schedule.expression || '').trim().split(/\s+/).length !== 5) add('expression','Cron 表达式须为五段；具体规则由服务器预览校验');
+    if(schedule.second!=null && (!Number.isInteger(schedule.second) || schedule.second<0 || schedule.second>59))add('second','秒数须为 0–59 的整数');
+  }
+  if(schedule.skipHolidays && schedule.kind!=='at' && !schedule.endAt)add('endAt','跳过休息日需要设置结束时间');
+  if(schedule.kind!=='at') {
+    for (const [field,title] of [['startAt','开始时间'],['endAt','结束时间']]) if(schedule[field] && !validDate(schedule[field]))add(field,`请选择有效的${title}`);
+    if(schedule.startAt && schedule.endAt && Date.parse(schedule.startAt)>=Date.parse(schedule.endAt))add('endAt','结束时间必须晚于开始时间');
+  }
   return errors;
 }
 export function validateDraft(draft, {models,folder = {},environment = {}} = {}) {

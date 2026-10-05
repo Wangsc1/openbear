@@ -12,13 +12,20 @@ import time
 import uuid
 from pathlib import Path
 
-from release_support.candidate import VERSION_RE, version
-from release_support.common import ReleaseError, atomic_json, load
-from release_support.runner import DEFAULT_IMAGES, Runner
+if __package__:
+    from .release_support.candidate import VERSION_RE, version
+    from .release_support.common import ReleaseError, atomic_json, load
+    from .release_support.runner import DEFAULT_IMAGES, Runner
+else:
+    from release_support.candidate import VERSION_RE, version
+    from release_support.common import ReleaseError, atomic_json, load
+    from release_support.runner import DEFAULT_IMAGES, Runner
 
 
-def environment(path):
-    result = load(Path(path).resolve()) if path else DEFAULT_IMAGES
+def environment(path, repo=None):
+    local = Path(repo) / ".release-environment.json" if repo else None
+    selected = Path(path).resolve() if path else local if local and local.is_file() else None
+    result = load(selected) if selected else DEFAULT_IMAGES
     if set(result) != {"pythonImages", "systemdImage"} or set(result["pythonImages"]) != {"311", "312", "313"}:
         raise ReleaseError("Environment requires pythonImages 311/312/313 and systemdImage")
     images = list(result["pythonImages"].values()) + [result["systemdImage"]]
@@ -36,16 +43,17 @@ def parser():
     start.add_argument("--notes", required=True)
     start.add_argument("--files", nargs="*", required=True, help="Explicit reviewed paths; version files are included automatically")
     start.add_argument("--repository", default="danger-dream/openbear")
-    start.add_argument("--environment", help="Image references JSON; otherwise the documented baseline images")
+    start.add_argument("--environment", help="Image references JSON; defaults to local .release-environment.json or generic baseline names")
     start.add_argument("--timeout", type=int, default=1800, help="Per-stage timeout; not a retry permission")
     start.add_argument("--approve-container-cgroup", action="store_true", help="Only after this run's private-container remount authorization")
     resume = commands.add_parser("resume", help="Reconcile side effects and continue the same run")
     resume.add_argument("run_id")
-    resume.add_argument("--files", nargs="*", help="Explicitly include corrective files; new candidate invalidates prior validation")
+    resume.add_argument("--files", nargs="*", help="Explicitly include corrective files; revalidate changed stage inputs and the new package")
     resume.add_argument("--environment", help="Reviewed replacement test environment after diagnosing an environment failure")
     resume.add_argument("--approve-container-cgroup", action="store_true")
     status = commands.add_parser("status", help="Read saved state without executing any stage")
     status.add_argument("run_id")
+    status.add_argument("--summary", action="store_true", help="Bounded read-only JSON diagnostics (schema 1)")
     cleanup = commands.add_parser("cleanup", help="Clean only owned interrupted resources, preserving restart evidence and assets")
     cleanup.add_argument("run_id")
     return cli
@@ -55,7 +63,6 @@ def main(argv=None):
     args = parser().parse_args(argv)
     repo = Path(args.repo).resolve()
     root = repo / ".release-runs"
-    root.mkdir(mode=0o700, exist_ok=True)
     try:
         if args.action == "status":
             if not re.fullmatch(r"\d+\.\d+\.\d+-[0-9a-f]{12}", args.run_id):
@@ -63,8 +70,15 @@ def main(argv=None):
             value = load(root / args.run_id / "state.json")
             if value.get("schema") != 1 or value.get("runId") != args.run_id or value.get("repo") != str(repo):
                 raise ReleaseError("Release state schema/owner mismatch")
+            if args.summary:
+                if __package__:
+                    from .release_support.diagnostics import summary
+                else:
+                    from release_support.diagnostics import summary
+                value = summary(root / args.run_id, value)
             print(json.dumps(value, ensure_ascii=False, indent=2))
             return 0
+        root.mkdir(mode=0o700, exist_ok=True)
         with (root / "lock").open("a") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -88,7 +102,7 @@ def main(argv=None):
                 value = {"schema": 1, "runId": run_id, "repository": args.repository, "repo": str(repo),
                          "oldVersion": old, "version": args.version, "notes": notes, "files": sorted(set(args.files)),
                          "python": str(Path(sys.executable).absolute()), "timeout": args.timeout,
-                         "environment": environment(args.environment), "createdAt": time.time(), "stages": {}}
+                         "environment": environment(args.environment, repo), "createdAt": time.time(), "stages": {}}
                 atomic_json(directory / "state.json", value)
                 print("Release run:", run_id, flush=True)
             else:

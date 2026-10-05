@@ -215,7 +215,6 @@ class WebAdminServer(
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self.config.web.host, self.config.web.port)
-        await self.interactions.start()
         await self.interaction_telegram.start()
         await self.web_task_telegram.start()
         try:
@@ -250,13 +249,16 @@ class WebAdminServer(
                     deleted = await self._prune_web_event_frames()
                     notification_deleted = await self._prune_web_task_notification_history()
                     tg_runs_deleted, tg_deliveries_deleted = await self.web_task_telegram.prune()
-                    if deleted or notification_deleted or tg_runs_deleted or tg_deliveries_deleted:
+                    push_runs_deleted, push_deliveries_deleted = await self.browser_push.prune()
+                    if deleted or notification_deleted or tg_runs_deleted or tg_deliveries_deleted or push_runs_deleted or push_deliveries_deleted:
                         log.info(
                             "已清理过期 Web 运行历史",
                             event_frames=deleted,
                             task_notifications=notification_deleted,
                             telegram_notification_runs=tg_runs_deleted,
                             telegram_notification_deliveries=tg_deliveries_deleted,
+                            browser_push_runs=push_runs_deleted,
+                            browser_push_deliveries=push_deliveries_deleted,
                         )
                 except asyncio.CancelledError:
                     raise

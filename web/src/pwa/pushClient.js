@@ -1,4 +1,28 @@
 import {installationEnvironment} from "./install.js";
+import {notificationTarget} from "../loginRedirect.js";
+
+const PUSH_CHANGED = "openbear:push-changed";
+const pageIds = new WeakMap();
+function pageId(win) {
+  // Memory belongs to this document, unlike sessionStorage copied by window.open.
+  if (!pageIds.has(win)) {
+    const id = win.crypto.randomUUID?.() || Array.from(win.crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
+    pageIds.set(win, id);
+  }
+  return pageIds.get(win);
+}
+
+function notifyPushChanged(win) {
+  win.dispatchEvent(new win.Event(PUSH_CHANGED));
+  try {
+    const channel = new win.BroadcastChannel(PUSH_CHANGED);
+    channel.postMessage(PUSH_CHANGED);
+    channel.close();
+  } catch {
+    // Older engines may lack BroadcastChannel. Do not store endpoints or keys.
+    try { win.localStorage.setItem(PUSH_CHANGED, `${Date.now()}:${Math.random()}`); } catch { /* Focus also re-reads the subscription. */ }
+  }
+}
 
 export function pushSupport(win) {
   const env = installationEnvironment(win);
@@ -52,7 +76,7 @@ export function createPushClient(win, request = pushRequest) {
     const registration = await win.navigator.serviceWorker.getRegistration("/");
     return {registration, subscription: await registration?.pushManager.getSubscription() || null};
   }
-  function changed() { win.dispatchEvent(new win.Event("openbear:push-changed")); }
+  function changed() { notifyPushChanged(win); }
   return {
     async status() {
       const support = pushSupport(win);
@@ -70,28 +94,33 @@ export function createPushClient(win, request = pushRequest) {
       const {publicKey} = await request("key", undefined, "GET");
       const registration = await win.navigator.serviceWorker.register("/openbear-push-sw.js", {scope: "/", updateViaCache: "none"});
       await waitForPushWorker(registration);
-      let subscription = await registration.pushManager.getSubscription();
-      const key = decodePushKey(publicKey);
-      if (subscription?.options?.applicationServerKey && String(new Uint8Array(subscription.options.applicationServerKey)) !== String(key)) {
-        await subscription.unsubscribe();
-        subscription = null;
+      try {
+        let subscription = await registration.pushManager.getSubscription();
+        const key = decodePushKey(publicKey);
+        if (subscription?.options?.applicationServerKey && String(new Uint8Array(subscription.options.applicationServerKey)) !== String(key)) {
+          await subscription.unsubscribe();
+          subscription = null;
+        }
+        const fresh = !subscription;
+        subscription ||= await registration.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: key});
+        try { await request("subscription", {subscription: subscription.toJSON()}); }
+        catch (error) { if (fresh) await subscription.unsubscribe().catch(() => {}); throw error; }
+      } finally {
+        // Rotation/rollback can change the endpoint even when enabling fails.
+        changed();
       }
-      const fresh = !subscription;
-      subscription ||= await registration.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: key});
-      try { await request("subscription", {subscription: subscription.toJSON()}); }
-      catch (error) { if (fresh) await subscription.unsubscribe().catch(() => {}); throw error; }
-      changed();
       return {supported: true, permission, enabled: true};
     },
     async disable() {
       const {subscription} = await current();
-      if (subscription) {
-        // Disable server delivery first. Keep the worker: it never caches or
-        // intercepts the application, and may be shared by another open tab.
-        await request("subscription", {endpoint: subscription.endpoint}, "DELETE");
-        await subscription.unsubscribe();
-      }
-      changed();
+      try {
+        if (subscription) {
+          // Disable server delivery first. Keep the worker: it never caches or
+          // intercepts the application, and may be shared by another open tab.
+          await request("subscription", {endpoint: subscription.endpoint}, "DELETE");
+          await subscription.unsubscribe();
+        }
+      } finally { changed(); }
       return {supported: true, permission: win.Notification.permission, enabled: false};
     },
     async test() {
@@ -103,12 +132,14 @@ export function createPushClient(win, request = pushRequest) {
 }
 
 export function installPushNavigation(win, navigate) {
-  const listener = event => {
+  const listener = async event => {
     if (event.data?.type !== "openbear:notification-open") return;
     try {
-      const url = new URL(event.data.url, win.location.origin);
-      if (url.origin !== win.location.origin || !["/chat", "/settings"].includes(url.pathname)) return;
-      navigate(url.pathname + url.search);
+      const target = notificationTarget(event.data.url, win.location.origin);
+      if (!target) return;
+      if (target !== win.location.pathname + win.location.search && await navigate(target) === false) return;
+      // Also reveal the device card when system settings is already mounted.
+      win.dispatchEvent(new win.Event("openbear:notification-navigated"));
     } catch { /* Ignore invalid notification navigation. */ }
   };
   win.navigator.serviceWorker?.addEventListener("message", listener);
@@ -117,12 +148,17 @@ export function installPushNavigation(win, navigate) {
 
 export function installPushPresence(win, currentConversation, request = pushRequest) {
   if (!win.navigator.serviceWorker) return {update() {}, stop() {}};
-  let endpoint = "", closed = false;
+  const clientId = pageId(win);
+  let endpoint = "", closed = false, refreshVersion = 0, channel;
   async function refresh() {
+    const version = ++refreshVersion;
+    endpoint = ""; // Never send a cached endpoint while a newer read is pending.
     try {
       const registration = await win.navigator.serviceWorker?.getRegistration("/");
-      endpoint = (await registration?.pushManager.getSubscription())?.endpoint || "";
-      // Refresh existing worker code without registering or prompting on a new device.
+      const subscription = await registration?.pushManager.getSubscription();
+      if (closed || version !== refreshVersion) return;
+      endpoint = subscription?.endpoint || "";
+      // Refresh existing worker code without registering, prompting or rebinding login.
       if (registration) void registration.update().catch(() => {});
       update();
     } catch { /* Notification support must never block the chat. */ }
@@ -130,20 +166,32 @@ export function installPushPresence(win, currentConversation, request = pushRequ
   function update() {
     if (closed || !endpoint) return;
     const conversationUuid = win.document.visibilityState === "visible" && win.document.hasFocus() ? currentConversation() : "";
-    void request("presence", {endpoint, conversationUuid}).catch(() => {});
+    void request("presence", {endpoint, conversationUuid, clientId}).catch(() => {});
   }
-  win.addEventListener("openbear:push-changed", refresh);
-  win.addEventListener("focus", update);
+  function visibilityChanged() {
+    if (win.document.visibilityState === "visible") void refresh();
+    else update();
+  }
+  function storageChanged(event) { if (event.key === PUSH_CHANGED) void refresh(); }
+  try {
+    channel = new win.BroadcastChannel(PUSH_CHANGED);
+    channel.onmessage = event => { if (event.data === PUSH_CHANGED) void refresh(); };
+  } catch { /* Use storage events and focus on older engines. */ }
+  win.addEventListener(PUSH_CHANGED, refresh);
+  win.addEventListener("storage", storageChanged);
+  win.addEventListener("focus", refresh);
   win.addEventListener("blur", update);
-  win.document.addEventListener("visibilitychange", update);
+  win.document.addEventListener("visibilitychange", visibilityChanged);
   const timer = win.setInterval(() => { if (win.document.visibilityState === "visible") update(); }, 25000);
   void refresh();
   return {update, stop() {
     closed = true;
     win.clearInterval(timer);
-    win.removeEventListener("openbear:push-changed", refresh);
-    win.removeEventListener("focus", update);
+    channel?.close();
+    win.removeEventListener(PUSH_CHANGED, refresh);
+    win.removeEventListener("storage", storageChanged);
+    win.removeEventListener("focus", refresh);
     win.removeEventListener("blur", update);
-    win.document.removeEventListener("visibilitychange", update);
+    win.document.removeEventListener("visibilitychange", visibilityChanged);
   }};
 }

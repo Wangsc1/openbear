@@ -92,7 +92,7 @@ function cancelAddress() {
         </div>
       </form>
 
-      <p class="px-1 text-xs leading-relaxed text-macsub">安装后仍连接当前同源服务，沿用现有登录认证。首期不提供离线使用、业务缓存或 Web Push。安装方式由浏览器决定；你始终可以继续使用网页版。</p>
+      <p class="px-1 text-xs leading-relaxed text-macsub">安装后仍连接当前同源服务，沿用现有登录认证，不提供离线使用或业务缓存。支持系统通知的设备首次进入时会询问是否开启；也可随时前往「设置 → 系统设置 → 通知」开启并测试。安装方式由浏览器决定；你始终可以继续使用网页版。</p>
     </div>
   </section>
 </template>

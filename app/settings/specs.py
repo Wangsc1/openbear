@@ -953,10 +953,11 @@ WEB_DOMAINS: dict[str, tuple[str, str, list[str]]] = {
     "browser": ("浏览器", "网页操作、等待时间与文件大小", ["browser_connection", "browser_limits", "browser_recovery"]),
     "memory": ("记忆", "内置记忆与外部 prompt-memory 连接", ["memory"]),
     "media": ("附件与媒体", "入站媒体处理、体积限制与缓存", ["media"]),
+    "notifications": ("通知", "本设备系统通知与 Telegram 提醒", ["web_notifications"]),
     "web": (
         "Web 与安全",
-        "管理台监听、登录会话、长任务通知与安全策略",
-        ["web", "web_notifications"],
+        "管理台监听、登录会话与安全策略",
+        ["web"],
     ),
     "webhooks": ("外部触发", "消息接收、排队、脚本与数据保留", list(_WEBHOOK_GROUPS)),
     "interface": ("界面显示", "回答内容和运行统计的默认呈现方式", ["interface"]),

@@ -4,6 +4,7 @@ import {ElMessage,ElMessageBox} from 'element-plus';
 import {Api} from '../api.js';
 import AdminPageHeader from '../components/AdminPageHeader.vue';
 import CronEditor from '../components/cron/CronEditor.vue';
+import CronCalendar from '../components/cron/CronCalendar.vue';
 import CronHistory from '../components/cron/CronHistory.vue';
 import CronRunDialog from '../components/cron/CronRunDialog.vue';
 import {createQuery,createCronActions} from '../components/cron/useCron.js';
@@ -18,12 +19,13 @@ const {data:folderData,error:folderError}=dirs;
 const {busy,error:actionError,preparation}=actions;
 const folders=computed(()=>folderData.value?.items || []);
 const deleteOpen=ref(false),confirming=ref(false);
-const activeTab=ref('jobs'),historyVisited=ref(false),pageTabs=ref(null);
-function selectTab(value){activeTab.value=value;if(value==='history')historyVisited.value=true;}
+const activeTab=ref('calendar'),historyVisited=ref(false),pageTabs=ref(null);
+const calendarRef=ref(null),calendarSearch=ref(''),editorInitial=ref(null);
+async function selectTab(value){if(!await canLeave())return;activeTab.value=value;if(value==='history')historyVisited.value=true;}
 function openHistory(job){historyJob.value={id:job.id,name:job.name};selectTab('history');}
 async function navigatePageTabs(event){
   if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
-  selectTab(tabKey(event,activeTab.value,PAGE_TABS));await nextTick();
+  await selectTab(tabKey(event,activeTab.value,PAGE_TABS));await nextTick();
   pageTabs.value?.querySelector(`[data-page-tab="${activeTab.value}"]`)?.focus();
 }
 let disposed=false;
@@ -35,12 +37,17 @@ async function load(){
   if(offset.value>lastOffset){offset.value=lastOffset;return load();}
   return true;
 }
-function filter(){offset.value=0;load();}
+function filter(){offset.value=0;calendarSearch.value=search.value;load();}
 function refresh(){load();refreshKey.value++;}
 function page(next){offset.value=next;load();}
 function selectFolder(value){emit('folder-changed',value || '');}
-async function canLeave(){return !editorOpen.value || Boolean(await editorRef.value?.canLeave());}
-async function edit(id=''){if(!await canLeave())return;editorId.value=id;editorOpen.value=true;}
+async function canLeave(){
+  if(editorOpen.value && !await editorRef.value?.canLeave())return false;
+  return !calendarRef.value || Boolean(await calendarRef.value.canLeave());
+}
+async function edit(id=''){if(!await canLeave())return;editorInitial.value=null;editorId.value=id;editorOpen.value=true;}
+async function advanced(initial){if(!await canLeave())return;editorInitial.value=initial;editorId.value='';editorOpen.value=true;}
+function create(event){if(activeTab.value==='calendar' && calendarRef.value)calendarRef.value.createSelected(event);else edit();}
 function saved(){refresh();}
 async function run(job){
   if(busy.value || confirming.value)return;
@@ -65,13 +72,14 @@ onBeforeUnmount(()=>{disposed=true;emit('cron-leave-guard',null);jobs.dispose();
 </script>
 <template>
   <div class="cron-view cron-root">
-    <AdminPageHeader title="定时任务" subtitle="目录计划 · 每次独立新会话" description="到点开始，不排队；停机错过不补跑。" @mobile-header-ready="emit('mobile-header-ready',$event)"><template #mobile-navigation><slot name="mobile-navigation" /></template><template #actions><el-button :loading="loading" @click="refresh">刷新</el-button></template><template #primary><el-button type="primary" @click="edit()">新建任务</el-button></template></AdminPageHeader>
+    <AdminPageHeader title="定时任务" subtitle="目录计划 · 每次独立新会话" description="到点开始，不排队；停机错过不补跑。" @mobile-header-ready="emit('mobile-header-ready',$event)"><template #mobile-navigation><slot name="mobile-navigation" /></template><template #actions><el-button :loading="loading" @click="refresh">刷新</el-button></template><template #primary><el-button type="primary" @click="create($event)">新建任务</el-button></template></AdminPageHeader>
     <nav ref="pageTabs" class="cron-tabs cron-page-tabs" role="tablist" aria-label="定时任务页面" @keydown="navigatePageTabs"><button v-for="[key,title] in PAGE_TABS" :id="`cron-page-tab-${key}`" :key="key" type="button" role="tab" :data-page-tab="key" :aria-selected="activeTab===key" :aria-controls="`cron-page-panel-${key}`" :tabindex="activeTab===key?0:-1" @click="selectTab(key)">{{ title }}</button></nav>
-    <div class="cron-view-scroll">
-      <div class="cron-filters"><el-select :model-value="folderId" clearable filterable placeholder="全部目录" aria-label="所属目录筛选" @update:model-value="selectFolder"><el-option v-for="folder in folders" :key="folder.id" :value="folder.id" :label="folder.path || folder.name" /></el-select><template v-if="activeTab==='jobs'"><el-input v-model="search" clearable placeholder="搜索定时任务" aria-label="搜索定时任务" @keyup.enter="filter" @clear="filter" /><el-select v-model="enabled" clearable placeholder="全部启用状态" aria-label="计划启用筛选"><el-option :value="true" label="已启用" /><el-option :value="false" label="已停用" /></el-select><el-button @click="filter">搜索</el-button></template></div>
+    <div class="cron-view-scroll" :class="{'is-calendar':activeTab==='calendar'}">
+      <div class="cron-filters"><el-select :model-value="folderId" clearable filterable placeholder="全部目录" aria-label="所属目录筛选" @update:model-value="selectFolder"><el-option v-for="folder in folders" :key="folder.id" :value="folder.id" :label="folder.path || folder.name" /></el-select><template v-if="activeTab!=='history'"><el-input v-model="search" clearable placeholder="搜索定时任务" aria-label="搜索定时任务" @keyup.enter="filter" @clear="filter" /><el-select v-model="enabled" clearable placeholder="全部启用状态" aria-label="计划启用筛选"><el-option :value="true" label="已启用" /><el-option :value="false" label="已停用" /></el-select><el-button @click="filter">搜索</el-button></template></div>
       <p v-if="folderError" class="cron-alert" role="alert">目录加载失败：{{ folderError }} <el-button link @click="dirs.load()">重试</el-button></p>
       <p v-if="folderId" class="cron-note">当前目录：{{ folders.find(item=>item.id===folderId)?.path || folderId }}</p>
       <div v-if="actionError" class="cron-alert" role="alert">{{ actionError }} <span>操作失败未自动重试；版本冲突请刷新列表，确认最新配置后再操作。</span></div>
+      <div v-if="activeTab==='calendar'" id="cron-page-panel-calendar" role="tabpanel" aria-labelledby="cron-page-tab-calendar" class="cron-calendar-panel"><CronCalendar ref="calendarRef" :folder-id="folderId" :search="calendarSearch" :enabled="enabled" :refresh-key="refreshKey" :busy="busy || confirming" @edit="edit" @advanced="advanced" @saved="saved" @control="control" @run="run" @delete="prepareDelete" @history="openHistory" @run-detail="runId=$event" @open-conversation="openConversation" /></div>
       <section v-show="activeTab==='jobs'" id="cron-page-panel-jobs" role="tabpanel" aria-labelledby="cron-page-tab-jobs" class="cron-panel">
         <div class="cron-panel-head"><div><h2>任务列表</h2><p class="cron-note">启停仅控制未来计划；当前运行可打开对应会话，使用会话现有停止操作。</p></div><span class="cron-note">{{ number(data?.total) }} 个任务</span></div>
         <div v-if="error" class="cron-alert" role="alert">{{ error }} <el-button link @click="load">重试</el-button></div>
@@ -82,7 +90,7 @@ onBeforeUnmount(()=>{disposed=true;emit('cron-leave-guard',null);jobs.dispose();
         <CronHistory v-if="historyVisited" :folder-id="folderId" :job-id="historyJob?.id" :job-name="historyJob?.name" :refresh-key="refreshKey" @clear-job="historyJob=null" @open-conversation="openConversation" />
       </div>
     </div>
-    <CronEditor v-if="editorOpen" ref="editorRef" :key="editorId || 'new'" :job-id="editorId" :folder-id="folderId" @close="editorOpen=false" @saved="saved" />
+    <CronEditor v-if="editorOpen" ref="editorRef" :key="editorId || 'new'" :job-id="editorId" :folder-id="folderId" :initial="editorInitial" @close="editorOpen=false" @saved="saved" />
     <CronRunDialog v-if="runId" :run-id="runId" @close="runId=''" @open-conversation="openConversation" />
     <el-dialog v-model="deleteOpen" title="删除定时任务" width="min(520px, calc(100vw - 24px))" append-to-body class="cron-root mobile-viewport-dialog" :before-close="closeDelete" :close-on-click-modal="false" :close-on-press-escape="!busy" :show-close="!busy">
       <template v-if="preparation"><h3>{{ preparation.job.name }}</h3><p>删除后停用未来计划并保留定义的删除记录。</p><p><strong>{{ number(preparation.impact.activeRuns) }}</strong> 个当前执行继续，不会被停止；保留 <strong>{{ number(preparation.impact.retainedRuns) }}</strong> 条运行记录及对应会话。</p></template><p v-if="actionError" class="cron-alert" role="alert">{{ actionError }}</p>

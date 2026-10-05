@@ -98,7 +98,7 @@ async def test_committed_crash_boundaries(env,stage):
             assert notification['state']=='paused' and len(actions)==1
             from app.webhooks.notifications import retry as retry_notification
             from aiohttp import ClientSession
-            async def enqueue(owner,conversation,key,status):
+            async def enqueue(owner,conversation,key,status,**metadata):
                 async with ClientSession() as session:
                     async with session.post(external.make_url('/effect'),data=key) as response: await response.read()
             env.server.browser_push=SimpleNamespace(enqueue=enqueue)

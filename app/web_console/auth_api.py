@@ -1,6 +1,8 @@
 # ruff: noqa: F401,F403,F405
 from __future__ import annotations
 
+from urllib.parse import urlencode, urlsplit
+
 from app.db.connection_router import SQLiteWriterTimeout
 from app.mcp.audit import record_audit
 from app.web_console.core import *
@@ -16,6 +18,24 @@ PWA_PUBLIC_FILES = {
 }
 
 
+def _notification_return_target(value: str) -> str:
+    # Root-relative, exact app paths only: no external/protocol-relative URL,
+    # backslash aliases, control characters or API/login destinations.
+    if not value.startswith("/") or value.startswith("//"):
+        return ""
+    if "\\" in value or any(ord(char) <= 32 or ord(char) == 127 for char in value):
+        return ""
+    parts = urlsplit(value)
+    if parts.scheme or parts.netloc or parts.path not in {"/chat", "/settings"}:
+        return ""
+    return parts.path + (f"?{parts.query}" if parts.query else "")
+
+
+def _notification_login_url(login_url: str, target: str) -> str:
+    safe_target = _notification_return_target(target)
+    return login_url + ("?" + urlencode({"next": safe_target}) if safe_target else "")
+
+
 class WebAdminAuthMixin:
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler):
@@ -28,7 +48,10 @@ class WebAdminAuthMixin:
             login_url = self._https_login_url(request)
             if login_url:
                 if path == "/login" and request.method in {"GET", "HEAD"}:
-                    raise web.HTTPFound(login_url, headers={"Cache-Control": "no-store"})
+                    raise web.HTTPFound(
+                        _notification_login_url(login_url, request.query.get("next", "")),
+                        headers={"Cache-Control": "no-store"},
+                    )
                 # Never replay the Secret Key POST to another origin. Reject before
                 # reading it or creating a request/Telegram notification.
                 return web.json_response(
@@ -48,7 +71,7 @@ class WebAdminAuthMixin:
         if session is None:
             if path.startswith("/api/"):
                 return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
-            raise web.HTTPFound("/login")
+            raise web.HTTPFound(_notification_login_url("/login", str(request.rel_url)))
         request[_WEB_SESSION_KEY] = session
         if not self._origin_allowed(request):
             if path.startswith("/api/"):

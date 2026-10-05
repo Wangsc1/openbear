@@ -49,6 +49,8 @@ class DB:
         await self._pre_migrate_memory_assets_schema()
         await migrate_agent_continuity(self._conn)
         await self._conn.executescript(_SCHEMA)
+        await self._add_column_if_missing("web_push_deliveries", "last_status", "last_status INTEGER NOT NULL DEFAULT 0")
+        await self._add_column_if_missing("web_push_deliveries", "last_error", "last_error TEXT NOT NULL DEFAULT ''")
         await self._conn.executescript(reference_schema())
         await self._remove_structural_memory_categories()
         backfilled_terminal_times, repaired_web_frames = await migrate_web_operation_history(self._conn)

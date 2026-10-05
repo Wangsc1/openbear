@@ -3,6 +3,7 @@ import { onBeforeUnmount, reactive, toRefs } from "vue";
 import { ElMessage } from "element-plus";
 import { Api } from "../api";
 import { createLoginFlow } from "./loginFlow.js";
+import { loginSuccessTarget } from "../loginRedirect.js";
 import BearLogo from "../components/BearLogo.vue";
 
 const state = reactive({secret: "", loading: false, requestUuid: "", status: "", retryAfter: 0, notice: ""});
@@ -12,7 +13,7 @@ const flow = createLoginFlow({
   api: Api,
   success: (message) => ElMessage.success(message),
   error: (message) => ElMessage.error(message),
-  authenticated: () => window.location.replace("/"),
+  authenticated: () => window.location.replace(loginSuccessTarget(window.location)),
 });
 const submit = () => flow.submit();
 onBeforeUnmount(() => flow.dispose());

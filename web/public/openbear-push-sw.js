@@ -4,7 +4,7 @@ self.addEventListener("activate", event => event.waitUntil(self.clients.claim())
 
 function notificationUrl(data) {
   const id = typeof data?.conversationUuid === "string" ? data.conversationUuid : "";
-  return id ? `/chat?id=${encodeURIComponent(id)}` : "/settings?section=system-settings&setting=web.taskNotifications.enabled";
+  return id ? `/chat?id=${encodeURIComponent(id)}` : "/settings?section=system-settings&domain=notifications";
 }
 
 self.addEventListener("push", event => {
@@ -27,15 +27,16 @@ self.addEventListener("push", event => {
 self.addEventListener("notificationclick", event => {
   event.notification.close();
   event.waitUntil((async () => {
-    const candidate = new URL(event.notification.data?.url || "/chat", self.location.origin);
-    const target = candidate.origin === self.location.origin && ["/chat", "/settings"].includes(candidate.pathname)
-      ? candidate.href : new URL("/chat", self.location.origin).href;
+    let target = new URL("/chat", self.location.origin).href;
+    try {
+      const candidate = new URL(event.notification.data?.url || "/chat", self.location.origin);
+      if (candidate.origin === self.location.origin && !candidate.username && !candidate.password && ["/chat", "/settings"].includes(candidate.pathname)) target = candidate.href;
+    } catch { /* A malformed old notification still opens a safe app page. */ }
     const clients = await self.clients.matchAll({type: "window", includeUncontrolled: true});
     const exact = clients.find(client => client.url === target);
-    if (exact) { await exact.focus(); return; }
     // Reuse an existing application window through SPA navigation, not reload:
     // unsent drafts, attachments and an active reply must not be discarded.
-    const client = clients.find(item => new URL(item.url).origin === self.location.origin && new URL(item.url).pathname !== "/login");
+    const client = exact || clients.find(item => new URL(item.url).origin === self.location.origin && new URL(item.url).pathname !== "/login");
     if (client) {
       client.postMessage({type: "openbear:notification-open", url: target});
       await client.focus();

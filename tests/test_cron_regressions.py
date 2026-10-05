@@ -279,6 +279,22 @@ async def test_inherit_notification_state_tracks_actual_outbox(cron_env, events,
         await e.db.conn.commit()
 
 
+async def test_push_names_cron_job_and_uses_finished_time_not_retry_time(cron_env):
+    e = cron_env
+    await notification_channels(e)
+    result = await run(e, await create(e, notifications={'mode': 'silent'}))
+    row = await one(e.db.conn, 'SELECT * FROM cron_runs WHERE run_id=?', (result['id'],))
+    config = json.loads(row['config_json'])
+    config['notifications'] = {'mode': 'push', 'errorsOnly': False}
+    start = e.cron.clock() - 600000
+    await e.db.conn.execute("UPDATE cron_runs SET config_json=?,job_name='日报整理',notification_state='pending',started_at_ms=?,finished_at_ms=? WHERE run_id=?",
+                            (json.dumps(config), start, start + 192000, result['id']))
+    await e.db.conn.commit()
+    await deliver(e.cron, await one(e.db.conn, 'SELECT * FROM cron_runs WHERE run_id=?', (result['id'],)))
+    queued = await one(e.db.conn, 'SELECT payload_json FROM web_push_deliveries WHERE event_key=?', ('cron-result:' + result['id'],))
+    assert json.loads(queued['payload_json'])['body'] == '定时任务：日报整理\n任务已完成 · 耗时 3分12秒'
+
+
 async def test_push_subscription_disappearing_before_enqueue_is_not_reported_enqueued(cron_env, monkeypatch):
     e = cron_env
     await notification_channels(e)

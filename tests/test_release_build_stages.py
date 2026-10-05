@@ -35,6 +35,7 @@ def fixture_source(root, version="1.2.4"):
     put(root / "scripts/runtime.py", "# retained runtime helper\n")
     put(root / "scripts/smoke_release_login.py", "# fake Docker executes only the test simulation\n")
     put(root / "scripts/release.py", "# must not ship\n")
+    put(root / "scripts/release_local.py", "# local CLI adapter, must not ship\n")
     put(root / "scripts/release_support/harness.py", "# must not ship\n")
     for name in ("updater.py", "release_validation.py"):
         shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
@@ -363,6 +364,7 @@ def test_package_actual_candidate_classifier_validator_unique_zip_and_smoke(conf
         assert "scripts/runtime.py" in names
         assert "scripts/smoke_release_login.py" in names
         assert "scripts/release.py" not in names
+        assert "scripts/release_local.py" not in names
         assert not any(n.startswith(("scripts/release_support/", "tests/")) for n in names)
         assert json.loads(archive.read("release-meta.json"))["comparedWith"] == "1.2.3"
     assert result["classification"]["effect"] in ("restart", "refresh", "noop")
@@ -419,7 +421,7 @@ def test_safe_zip_preserves_executable_runtime_script(tmp_path):
     assert (tmp_path / "unpacked/scripts/install.sh").stat().st_mode & 0o111
 
 
-@pytest.mark.parametrize("name", ["scripts/tests/test_secret.py", "app/openbear.json", "app/data/secret.json", "app/tmp.db", "prompts/private/note", "scripts/release_support/harness.py", "web/src/main.js"])
+@pytest.mark.parametrize("name", ["scripts/tests/test_secret.py", "app/openbear.json", "app/data/secret.json", "app/tmp.db", "prompts/private/note", "scripts/release.py", "scripts/release_local.py", "app/tools/release.py", "scripts/release_support/harness.py", "web/src/main.js"])
 def test_package_audit_rejects_private_or_harness(tmp_path, name):
     put(tmp_path / name, "private")
     with pytest.raises(build.ReleaseError):
@@ -455,7 +457,9 @@ def add_previous_frontend(config):
     put(root / "SHA256SUMS", "".join(f"{build.sha256(root / n)}  {n}\n" for n in (name, "install.sh", "release-meta.json")))
     source = config["sourceDir"]
     identity = build.identities({p.relative_to(source).as_posix(): p.read_bytes() for p in (source / "web").rglob("*") if p.is_file()})["frontend"]
-    config["releaseScope"] = {"frontendChanged": False, "frontendFingerprint": identity, "previousFrontendFingerprint": identity}
+    stage_identity = build.identities({p: (source / p).read_bytes() for p in build.tree_files(source)})["frontendStage"]
+    config["releaseScope"] = {"frontendChanged": False, "frontendFingerprint": identity,
+                              "previousFrontendFingerprint": identity, "previousFrontendStageFingerprint": stage_identity}
 
 
 def test_backend_release_reuses_original_frontend_bytes_and_build_id(config, docker):

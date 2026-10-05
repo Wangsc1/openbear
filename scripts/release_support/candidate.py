@@ -1,6 +1,7 @@
 """Local version authority and public-history export; never push private history."""
 from __future__ import annotations
 
+import copy
 import io
 import re
 import shutil
@@ -113,21 +114,27 @@ def freeze(repo: Path, directory: Path, state, command) -> dict:
             command(["bash", str(hook)], "pre-commit-hook", cwd=repo)
         value["commitIntent"] = {"parent": current, "tree": git("write-tree")}
         state.save()
-        git("-c", "user.name=virus", "-c", "user.email=virusinstant@gmail.com", "commit", "-m", f"release: prepare {value['version']}")
+        git("-c", "user.name=OpenBear Release", "-c", "user.email=release@openbear.invalid", "commit", "-m", f"release: prepare {value['version']}")
     local = git("rev-parse", "HEAD")
     files = tree_files(git)
     contents = {p: sha((repo / p).read_bytes()) for p in files}
     candidate = {"localCommit": local, "version": value["version"], "files": contents,
                  "sourceFingerprint": fingerprint(contents)}
     if value.get("candidate"):
-        value.setdefault("candidateHistory", []).append({"candidate": value["candidate"], "stages": value.get("stages", {})})
+        value.setdefault("candidateHistory", []).append(copy.deepcopy({"candidate": value["candidate"], "stages": value.get("stages", {})}))
         archive = directory / "superseded" / value["candidate"]["localCommit"]
         archive.mkdir(parents=True, exist_ok=True)
-        for name in ("source", "build", "package", "assets", "results", "acceptance"):
+        # Attempt directories contain immutable evidence referenced by caches
+        # and history. Never move them. Build stays until its own inputs change;
+        # candidate-specific packages/acceptance receipts are never retained.
+        for name in ("source", "package", "assets", "package-manifest.json"):
             path = directory / name
             if path.exists():
                 shutil.move(str(path), archive / name)
-    value.update(localCandidate=local, candidate=candidate, stages={})
+    retained = {name: record for name, record in value.get("stages", {}).items()
+                if name in {"py311", "py312", "py313", "frontend", "build"}}
+    value.update(localCandidate=local, candidate=candidate, stages=retained)
+    value.pop("scope", None)
     value.pop("commitIntent", None)
     state.save()
     return candidate
@@ -175,7 +182,7 @@ def export(repo: Path, directory: Path, state, command) -> dict:
     git("config", "core.hooksPath", ".githooks")
     git("add", "--all")
     git("diff", "--cached", "--check")
-    git("-c", "user.name=virus", "-c", "user.email=virusinstant@gmail.com", "commit", "-m",
+    git("-c", "user.name=OpenBear Release", "-c", "user.email=release@openbear.invalid", "commit", "-m",
         f"release: synchronize local candidate for {value['version']}")
     public = git("rev-parse", "HEAD")
     value["candidate"]["publicCommit"] = public

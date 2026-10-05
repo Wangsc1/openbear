@@ -15,8 +15,8 @@ export function createIntents(requestId = () => crypto.randomUUID()) {
 }
 export function createQuery(fetcher) {
   const data = ref(null), loading = ref(false), error = ref(''); let generation = 0;
-  async function load(params) {
-    const current = ++generation; loading.value = true; error.value = ''; data.value = null;
+  async function load(params, {keepData = false} = {}) {
+    const current = ++generation; loading.value = true; error.value = ''; if (!keepData) data.value = null;
     try { const result = await fetcher(params); if (current !== generation) return false; data.value = result; return true; }
     catch (exception) { if (current === generation) error.value = message(exception); return false; }
     finally { if (current === generation) loading.value = false; }
@@ -42,13 +42,17 @@ export function createCronEditor(api, {requestId} = {}) {
     catch (exception) { if (!disposed && current === folderGeneration) inheritanceError.value=message(exception); }
     finally { if (!disposed && current === folderGeneration) inheritanceLoading.value=false; }
   }
-  async function load(id = '', folderId = '') {
+  async function load(id = '', folderId = '', initial = null) {
     if (saving.value) return false;
     const current = ++generation; loading.value=true;loaded.value=false;error.value='';
     try {
       const [detail, env, opts, dirs] = await Promise.all([id ? api.cronJob(id) : null,api.cronEnvironment(),api.rathOptions(),api.cronFolders()]);
       if (disposed || current !== generation) return false;
       environment.value=env;models.value=opts.models || [];folders.value=dirs.items || [];adopt(detail?.job || null,folderId);
+      if (!id && initial?.draft) {
+        Object.assign(draft,clone(initial.draft));
+        if (!initial.dirty) baseline.value=JSON.stringify(draft);
+      }
       await loadInheritance(); return !disposed && current === generation;
     } catch (exception) { if (!disposed && current === generation) error.value=message(exception);return false; }
     finally { if (!disposed && current === generation) loading.value=false; }

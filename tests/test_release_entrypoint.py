@@ -147,7 +147,7 @@ def test_changed_candidate_invalidates_validation_but_preserves_old_evidence(git
     (git_repo / "app/main.py").write_text("VALUE = 3\n")
     second = candidate.freeze(git_repo, directory, state, command)
     assert first["localCommit"] != second["localCommit"]
-    assert state.value["stages"] == {}
+    assert state.value["stages"] == {"py311": {"status": "passed"}}  # rechecked by its stage-input key
     assert (directory / "superseded" / first["localCommit"] / "assets/old.zip").read_bytes() == b"original"
 
 
@@ -179,6 +179,15 @@ class MemoryCommands:
         return value
 
 
+def passed_result(directory, name):
+    log = directory / "results" / name / "attempts" / "fixture" / "stage.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("passed")
+    return {"ok": True, "counts": {"tests": 1, "passed": 1, "failed": 0, "skipped": 0},
+            "testCases": [{"id": "test_x", "status": "passed"}],
+            "outputs": {"log": str(log), "logSha256": sha(log.read_bytes())}}
+
+
 def test_whole_pipeline_B_failure_resumes_without_repeating_tests_build_or_A(tmp_path, monkeypatch):
     directory = tmp_path / "run"
     directory.mkdir()
@@ -205,6 +214,7 @@ def test_whole_pipeline_B_failure_resumes_without_repeating_tests_build_or_A(tmp
     monkeypatch.setattr(candidate, "freeze", freeze)
     monkeypatch.setattr(candidate, "export", export)
     monkeypatch.setattr(candidate, "assert_local", lambda *_: None)
+    monkeypatch.setattr(runner.build, "normalize_dependencies", lambda *_: {"fixture": "deps"})
 
     class TestRunner(runner.Runner):
         def preflight(self, approved):
@@ -228,12 +238,23 @@ def test_whole_pipeline_B_failure_resumes_without_repeating_tests_build_or_A(tmp
             if stage == "build":
                 (directory / "build/dist").mkdir(parents=True)
                 (directory / "build/dist/index.html").write_text("built")
+                result = passed_result(directory, stage)
+                out = Path(result["outputs"]["log"]).parent
+                shutil.copytree(directory / "build/dist", out / "dist")
+                files = runner.build.tree_files(out / "dist")
+                identity = runner.scope.build_identity("one", load(directory / "environment.json"), value["version"])
+                manifest = {"identity": identity, "files": files}
+                atomic_json(directory / "build/manifest.json", manifest)
+                atomic_json(out / "manifest.json", manifest)
+                result["outputs"].update(dist=str(out / "dist"), manifest=str(out / "manifest.json"),
+                    distSha256=runner.build.digest_json(files), manifestSha256=sha((out / "manifest.json").read_bytes()))
+                return result
             if stage == "package":
                 (directory / "assets").mkdir()
                 (directory / "assets/only.zip").write_bytes(b"zip")
                 return {"ok": True, "assets": {"only.zip": {"bytes": 3, "sha256": sha(b"zip")}}}
-            if stage in runner.TEST_STAGES:
-                return {"ok": True, "testCases": [{"id": "test_x", "status": "passed"}]}
+            if stage in (*runner.TEST_STAGES, "frontend-checks"):
+                return passed_result(directory, stage)
             return {"ok": True}
 
         def acceptance(self, case, approved):
@@ -267,7 +288,7 @@ def test_one_python_environment_correction_reuses_unaffected_stages(tmp_path):
 
     def stage(name):
         calls[name] += 1
-        return {"ok": True, "testCases": [{"id": "test_x", "status": "passed"}]}
+        return passed_result(obj.directory, name)
 
     obj.build_stage = stage
     env = {"nodeImage": "node", "nodeKey": "deps", "pythonImages": {v: "py" + v for v in ("311", "312", "313")}, "systemdImage": "systemd"}

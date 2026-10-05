@@ -1,8 +1,16 @@
 # OpenBear 固定发布入口
 
-维护者／模型负责审阅改动、确定版本、明确纳入的文件、编写面向用户的说明和取得本轮授权。**启动后由脚本连续完成流程，正常推进时不逐阶段干预；只有失败、授权缺失或结果不明才回到人工判断。**
+维护者负责审阅改动、确定版本、明确纳入的文件、编写面向用户的说明。**发布是发布服务器上的独立维护脚本，不是 OpenBear 产品工具、Web 接口或 Agent 能力。核心入口仍为 `scripts/release.py`；启动后由脚本连续执行，正常推进不逐阶段干预。**
 
-## 日常发布
+## 代码与部署边界
+
+- 发布源码可随 GitHub 源码仓库公开，但 `scripts/release.py`、`scripts/release_local.py` 和 `scripts/release_support/` 不进入用户安装 ZIP，也不由应用导入或注册。
+- `scripts/release_local.py` 保留原适配层的前台进程、进度脱敏、摘要、重复启动保护及取消清理逻辑，改为可选的独立 CLI；它调用同一核心脚本，不另实现发布链。
+- 凭据只由维护进程环境提供，不访问应用记忆库、数据库或配置。源码、测试、注释和文档不得包含真实密钥、个人账号资料、私有主机及路径。本机镜像配置放在已忽略的 `.release-environment.json`；运行状态、日志和授权材料不作为公开源码。
+- 公开源代码不等于开放服务器上的执行入口。维护者在自己的受控环境执行脚本，使用本地凭据及明确的本轮授权；应用登录用户和 Agent 没有发布工具。
+- 发布不更新本机在线前端、不重启正在运行的 OpenBear。公开仓库的源码、用户安装 ZIP 与维护者本地状态是三个不同边界。
+
+## 核心维护 CLI
 
 ```bash
 .venv/bin/python scripts/release.py start 0.9.4 \
@@ -13,12 +21,22 @@
 
 示例版本仅用于说明，不是下一版的发布授权。无源码改动、只发布已提交内容时可以使用空的 `--files`。不要提前手工升版；入口调用现有 `bump_version.py` 同步本机的五处版本文件，保留提交钩子并提交，随后冻结候选。
 
-- GitHub 凭证由调用方通过 `GH_TOKEN`（或 `GITHUB_TOKEN`）环境变量提供，不写命令行、说明、状态文件或日志，不读取 OpenBear 配置、数据库或密码存储。模型取 `@secret/github` 后只注入本次进程环境。
+- 发布脚本只接收维护进程提供的 `GH_TOKEN`（或 `GITHUB_TOKEN`）环境变量，不读取 OpenBear 配置、数据库或密码存储；不得把 token 写进命令参数、说明、状态文件、源码、注释或日志。
 - `--approve-container-cgroup` 只表示已取得**本轮专属验收容器**的命名空间内 cgroup remount 授权，不是自动授权或长期许可。未获授权省略，脚本在变更源码之前暂停。恢复时如果还需运行验收，同样只在授权仍覆盖本轮时传入。
 - 默认 GitHub 仓库为 `danger-dream/openbear`，可用 `--repository owner/repo` 明确指定。必须从本机 `main` 启动，不把 GitHub main 反向当作本机源码上游。
 - 未列入 `--files` 的源码改动会阻止提交；自动纳入五个版本文件，不纳入开发目录原有未跟踪 `build/` 备份。新修复文件用 `resume --files` 显式加入。
 - 说明原文在启动时冻结，不会因外部说明文件后来改变而偷偷替换。脚本按真实上一正式版补上准确 Full Changelog；已有错误跨度会拒绝。Annotated tag 正文是最终权威，Release 使用相同 Markdown。
 - 每阶段默认超时 1800 秒，可通过 `start --timeout` 配置。执行工具的总超时应覆盖整条链；不要用短超时反复杀脚本。
+
+## 可选的本地前台适配脚本
+
+```bash
+.venv/bin/python scripts/release_local.py start 0.9.4 --notes ./release-notes.md --files app/changed.py --approve-container-cgroup
+.venv/bin/python scripts/release_local.py status <运行ID>
+.venv/bin/python scripts/release_local.py resume <运行ID> --files tests/fix.py --approve-container-cgroup
+```
+
+这是原适配代码的独立脚本形态，不是新的发布引擎。进度输出到标准错误，有界 JSON 摘要输出到标准输出；凭据不进入参数或临时说明文件。`status`、重复 `start` 及已完成运行只读取状态，不重新发布。每次真正执行 `start/resume` 都须由本地操作者在已有本轮授权范围内显式提供容器权限参数；脚本不读取旧 Web 会话的确认记录。取消时停止子进程并仅清理已知的该次运行。
 
 ## 固定执行链
 
@@ -54,16 +72,13 @@
 
 ## 环境与缓存
 
-维护者本机默认复用：
+公开源码只保留通用镜像名称：`openbear-release-python:3.11`、`:3.12`、`:3.13` 和 `openbear-release-systemd:local`，不包含发布服务器实际使用的镜像标识。
 
-- `openbear-matrix-1503-py311:local`
-- `openbear-matrix-1503-py312:local`
-- `openbear-matrix-1503-py313:local`
-- `openbear-systemd-acceptance:debian13-20260920`
+入口优先使用显式 `--environment`；否则自动读取仓库根已忽略的 `.release-environment.json`，没有本机配置时才使用通用名称。续跑默认沿用该次运行冻结的环境，不自动换用新的本机配置。
 
-这些是已有基础镜像，不表示各镜像都带有前端依赖。入口先解析实际 image ID，构建模块按冻结锁文件准备自己的 Python 环境，三版后端的引用集成测试与前端共用脚本准备的 Node 依赖。Vite 在容器内可写副本构建。
+这些是需由维护者准备的基础镜像，不表示各镜像都带有前端依赖。入口先解析实际 image ID，构建模块按冻结锁文件准备自己的 Python 环境，三版后端的引用集成测试与前端共用脚本准备的 Node 依赖。Vite 在容器内可写副本构建。
 
-其他维护环境可准备对应基镜像，再用已忽略的 `.release-environment.json` 指定：
+本机配置格式示例（不要提交实际配置）：
 
 ```json
 {
@@ -87,13 +102,13 @@
 .venv/bin/python scripts/release.py resume <运行ID> --approve-container-cgroup
 ```
 
-先读 `.release-runs/<运行ID>/state.json`、`logs/` 和对应阶段结果，解决具体问题，再恢复同一次运行。不要重新 `start` 同一版本，不删除状态以绕过门禁。
+使用核心 CLI 的 `status <运行ID> --summary` 或独立适配脚本的 `status <运行ID>` 读取失败摘要。摘要包含失败用例、断言／堆栈摘录、日志位置、已通过阶段和恢复参数；仅在摘要不能回答具体问题时，才读取对应原始日志。核心 CLI 的原 `status` 完整状态仍可用于深入诊断。解决具体问题后恢复同一次运行，不重新 `start` 同一版本，不删除状态绕过门禁。
 
 | 情况 | 行为 |
 |---|---|
 | 同一候选、同一环境、阶段已通过 | 复用有效完成记录 |
 | 只有某个矩阵测试失败 | 其他已通过测试保留；只修正该 Python 环境时不重跑另外两版、前端或构建。共享 Node 环境变化则重做受影响的阶段 |
-| 源码或测试需要修改 | 修改本机文件，`resume --files ...` 提交新候选并重新验证；旧证据留档 |
+| 源码或测试需要修改 | 修改本机文件，`resume --files ...` 提交新候选；按阶段真实输入复用，旧证据留档。仅改 Python 测试不重跑输入未变的前端测试和构建；新候选的包及对应验收仍重新生成／执行 |
 | A 安装通过，B 升级失败 | 同包 A 证据保留，只恢复 B |
 | 上传或公开请求超时／响应丢失 | 查询远端 tag、Release 和资产，确认真实状态后补做缺项，不重复创建 |
 | 远端 main、tag、资产与本运行不一致 | 停止，不强推、不移动 tag、不删除或替换未知资产 |
@@ -136,4 +151,4 @@
 
 ## 给模型的简短规范
 
-> OpenBear 发布统一使用 `.venv/bin/python scripts/release.py`，参数见 `docs/releasing.md`／发布流程文档。版本、纳入的文件与面向用户的发布说明由模型准备；脚本按实际改动范围选择验证与前端复用，并行推进独立阶段，正常运行不逐阶段干预。失败先看 `status` 和日志，再用 `resume` 复用有效结果。不要提前手工升版、重复全量测试、另跑演练或手工拆解发布链。凭证取 `@secret/github`，仅通过 `GH_TOKEN` 注入。容器 cgroup 调整遵守本轮授权；发布不自动更新在线前端或重启本机服务。
+> 发布能力只保留为独立维护脚本，不注册产品工具。核心入口是 `.venv/bin/python scripts/release.py`；可选 `scripts/release_local.py` 提供前台适配和摘要。凭据仅通过维护进程环境传入，容器权限只按已获得的本轮授权传参。正常阶段连续推进；失败看摘要、修正具体问题并 resume 同一运行，不重新 start，不降低验证门禁，不手工升版、重复全测或另跑演练。发布不更新在线前端、不重启本机服务。公开源码及注释不包含私有维护资料。

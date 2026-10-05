@@ -155,7 +155,7 @@ async def test_F22_C24_post_and_notification_retry_do_not_repeat_business(env):
     app=web.Application(); app.router.add_post('/effect',effect); app.router.add_post('/notify',notify)
     simulator=TestServer(app); await simulator.start_server()
     class Push:
-        async def enqueue(self,owner,conv,key,status):
+        async def enqueue(self,owner,conv,key,status,**metadata):
             async with ClientSession() as session:
                 async with session.post(simulator.make_url('/notify'),data=key) as r:
                     if r.status!=200: raise RuntimeError('simulator delivery unavailable')

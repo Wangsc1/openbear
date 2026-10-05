@@ -13,6 +13,11 @@ from app.web_push import validate_subscription
 
 class WebAdminPushMixin:
     async def _web_push_context(self, app):
+        # Application cleanup contexts start before the HTTP site. Invalidate
+        # waiters from the previous process before any pending push can leave.
+        interactions = getattr(self, "interactions", None)
+        if interactions:
+            await interactions.start()
         push = getattr(self, "browser_push", None)
         if push:
             await push.start()
@@ -41,7 +46,8 @@ class WebAdminPushMixin:
             (str(body.get("endpoint") or ""), request[_WEB_SESSION_KEY].chat_id, _sha256(request.cookies.get(_COOKIE, ""))))).fetchone()
         if row:
             conversation = str(body.get("conversationUuid") or "")[:100]
-            self.browser_push.presence[row["id"]] = (conversation, time.monotonic() + 45)
+            client_id = str(body.get("clientId") or "legacy")[:100]
+            self.browser_push.set_presence(row["id"], client_id, conversation)
         return web.json_response({"ok": True})
 
     async def handle_api_push_subscribe(self, request):

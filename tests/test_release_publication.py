@@ -111,7 +111,7 @@ class FakeGit:
             self.local_tag = True
             return ''
         if 'cat-file' in args:
-            return 'object candidate\ntagger virus <virusinstant@gmail.com> 1 +0000\n\n' + self.notes.rstrip('\n')
+            return 'object candidate\ntagger OpenBear Release <release@openbear.invalid> 1 +0000\n\n' + self.notes.rstrip('\n')
         if 'rev-parse' in args:
             return 'tag-object'
         if 'push' in args:

@@ -52,7 +52,7 @@ def publish(directory: Path, state, command, github) -> dict:
     existing = git("tag", "--list", tag)
     note_path = directory / "notes.md"
     if not existing:
-        git("-c", "user.name=virus", "-c", "user.email=virusinstant@gmail.com", "tag", "-a", tag, commit,
+        git("-c", "user.name=OpenBear Release", "-c", "user.email=release@openbear.invalid", "tag", "-a", tag, commit,
             "--cleanup=verbatim", "-F", str(note_path))
     if git("rev-parse", tag + "^{commit}") != commit:
         raise ReleaseError("Existing local tag points to another candidate", code=2)
@@ -60,7 +60,7 @@ def publish(directory: Path, state, command, github) -> dict:
     # normalization shared with notes, never normalize Markdown itself.
     tag_data = git("cat-file", "-p", tag)
     header, annotation = tag_data.split("\n\n", 1)
-    if annotation + "\n" != notes or "tagger virus <virusinstant@gmail.com>" not in header:
+    if annotation + "\n" != notes or "tagger OpenBear Release <release@openbear.invalid>" not in header:
         raise ReleaseError("Annotated tag differs from frozen release notes", code=2)
     object_id = git("rev-parse", tag)
     remote_tag = github.api("/git/ref/tags/" + tag, missing=True)

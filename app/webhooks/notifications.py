@@ -71,7 +71,14 @@ async def deliver(s,n):
             await notifier.observe({**event,'type':'done' if payload['status']=='completed' else 'error' if payload['status']=='failed' else 'stopped'},owner_chat_id=n['owner_chat_id'],internal_chat_id=n['internal_chat_id'])
         push=getattr(h,'browser_push',None)
         if push:
-            await push.enqueue(n['owner_chat_id'],n['conversation_uuid'],n['notification_key'],payload['status'])
+            # Outbox creation follows the completed processing chain. Do not
+            # count delivery retries/digest waiting as task execution time.
+            digest = bool(payload.get('digestEndpoint'))
+            started = int(payload.get('startedAtMs') or 0)
+            elapsed = int(n['created_at']) - started // 1000 if started > 0 and not digest else None
+            title = f'触发器异常汇总（{len(payload.get("assignments") or [])}项）' if digest else ''
+            await push.enqueue(n['owner_chat_id'],n['conversation_uuid'],n['notification_key'],payload['status'],
+                               task_title=title,elapsed_seconds=elapsed)
         await h._live_for(conv).publish({'type':'webhook_result','turnUuid':payload['rootTurnId'],'eventUuid':n['notification_uuid'],'assignmentId':payload['assignmentId'],'notificationKey':n['notification_key'],'status':payload['status'],'postState':payload['postState']})
     except Exception as exc:
         async with s.db.webhook_transaction() as conn:
@@ -84,7 +91,12 @@ async def deliver(s,n):
 async def channel_delivery_states(s,notification_key):
     """Channel observations, not the adapter's durable enqueue acknowledgement."""
     rows=await many(s.db.conn,"SELECT o.state,o.last_error FROM web_tg_notification_outbox o JOIN webhook_notification_routes r USING(root_turn_uuid) WHERE r.notification_key=? ORDER BY o.id",(notification_key,))
-    return [{'channel':'telegram','state':r['state'],'error':r['last_error'],'verificationRequired':r['state']=='unknown'} for r in rows]
+    states = [{'channel':'telegram','state':r['state'],'error':r['last_error'],'verificationRequired':r['state']=='unknown'} for r in rows]
+    push_rows = await many(s.db.conn, "SELECT state,last_status,last_error FROM web_push_deliveries WHERE event_key=? ORDER BY id", (notification_key,))
+    states.extend({'channel':'browser_push','state':r['state'],'error':r['last_error'],
+                   'providerStatus':r['last_status'],'verificationRequired':r['state']=='sent',
+                   'deviceReceipt':'unavailable'} for r in push_rows)
+    return states
 
 
 async def retry(s,owner,aid,request):

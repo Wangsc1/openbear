@@ -1154,7 +1154,11 @@ class WebAdminChatRunMixin:
                 stats_task.cancel()
                 with contextlib.suppress(Exception, asyncio.CancelledError):
                     await stats_task
-            await renderer.close()
+            # The outer stop endpoint owns the stopped frame and only publishes
+            # it after this runner has unwound. Never manufacture success first.
+            await renderer.close(emit_done=not result.stopped and not bool(
+                conversation_uuid and self._web_stop_markers.get(conversation_uuid)
+            ))
             if not post_turn_actions_drained and self.control_actions is not None:
                 await self.control_actions.drain_after_turn(self, chat_id)
                 post_turn_actions_drained = True

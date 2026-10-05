@@ -34,6 +34,10 @@ class Schedule(Model):
     every_seconds: int | None = Field(None, ge=1, strict=True)
     anchor_at: str | None = None
     expression: str | None = '0 9 * * *'
+    start_at: str | None = None  # Inclusive boundary for a repeated calendar rule.
+    end_at: str | None = None  # Exclusive boundary; UI end dates include their full day.
+    second: int = Field(0, ge=0, le=59, strict=True)
+    skip_holidays: bool = Field(False, strict=True)
 
     @model_validator(mode='after')
     def valid(self):
@@ -50,6 +54,17 @@ class Schedule(Model):
                 raise ValueError('间隔必须是正整数秒')
             if self.anchor_at:
                 timestamp(self.anchor_at)
+        if self.start_at or self.end_at:
+            if self.kind == 'at':
+                raise ValueError('一次性任务使用执行时间，不设置重复范围')
+            start = timestamp(self.start_at) if self.start_at else None
+            end = timestamp(self.end_at) if self.end_at else None
+            if start is not None and end is not None and start >= end:
+                raise ValueError('结束时间必须晚于开始时间')
+        if self.kind != 'cron' and self.second:
+            raise ValueError('执行秒字段仅适用于 Cron，间隔与一次性时间直接包含秒')
+        if self.skip_holidays and self.kind != 'at' and not self.end_at:
+            raise ValueError('跳过休息日需要设置结束时间，以确认范围内的调休日历')
         if self.kind == 'cron':
             if not self.expression or len(self.expression.split()) != 5 or not croniter.is_valid(self.expression):
                 raise ValueError('Cron必须是合法的五段表达式')

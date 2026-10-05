@@ -1,6 +1,7 @@
 <script setup>
-import { computed, defineAsyncComponent, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
+import {Bell} from "@lucide/vue";
 import { Api, apiError } from "../api";
 import ModelOrderPicker from "../components/ModelOrderPicker.vue";
 import DeviceNotifications from "../pwa/DeviceNotifications.vue";
@@ -80,11 +81,25 @@ function matchesQuery(spec) {
 function specsForSection(section) {
   return (section?.paths || []).map((path) => specs.value[path]).filter(Boolean).filter(matchesQuery);
 }
+function revealNotificationDomain() {
+  const params = new URLSearchParams(window.location.search);
+  if (window.location.pathname === '/settings' && params.get('section') === 'system-settings' && params.get('domain') === 'notifications') {
+    activeDomain.value = 'notifications';
+    query.value = '';
+  }
+}
+onMounted(() => window.addEventListener('openbear:notification-navigated', revealNotificationDomain));
+onBeforeUnmount(() => window.removeEventListener('openbear:notification-navigated', revealNotificationDomain));
+
+function matchesDeviceNotificationQuery() {
+  const q = query.value.trim().toLowerCase();
+  return !q || '通知 本设备系统通知 浏览器 pwa 安卓 android chrome 应用 权限 开启 关闭 测试 notification push'.includes(q);
+}
 function domainSettingCount(domain, filtered = false) {
   return (domain?.sections || []).reduce((total, section) => {
     if (filtered) return total + specsForSection(section).length;
     return total + (section.paths || []).filter((path) => specs.value[path]).length;
-  }, 0);
+  }, domain?.key === 'notifications' && (!filtered || matchesDeviceNotificationQuery()) ? 1 : 0);
 }
 const activeDomainInfo = computed(() => domains.value.find((domain) => domain.key === activeDomain.value) || domains.value[0] || {});
 const visibleSections = computed(() => {
@@ -96,10 +111,12 @@ const visibleSections = computed(() => {
     specs: specsForSection(section),
   }))).filter((section) => section.specs.length > 0);
 });
-const totalSettings = computed(() => Object.keys(specs.value || {}).length);
+const showDeviceNotifications = computed(() => domains.value.some(domain => domain.key === 'notifications') &&
+  (query.value.trim() ? matchesDeviceNotificationQuery() : activeDomain.value === 'notifications'));
+const totalSettings = computed(() => Object.keys(specs.value || {}).length + Number(domains.value.some(domain => domain.key === 'notifications')));
 const restartCount = computed(() => Object.values(specs.value || {}).filter((s) => s.effect === "需要重启").length);
 const dirtyCount = computed(() => Object.values(specs.value || {}).filter((spec) => isDirty(spec)).length);
-const resultCount = computed(() => visibleSections.value.reduce((total, section) => total + section.specs.length, 0));
+const resultCount = computed(() => visibleSections.value.reduce((total, section) => total + section.specs.length, Number(showDeviceNotifications.value)));
 function optionsFor(spec) {
   if (Array.isArray(spec?.choices) && spec.choices.length) return spec.choices;
   return selectOptions[spec?.path] || [];
@@ -196,6 +213,7 @@ async function load() {
       if (domain) activeDomain.value = domain.key;
       query.value = settingPath;
     }
+    revealNotificationDomain();
     values.value = settingsData.values || {};
     masked.value = settingsData.masked || {};
     usingBuiltin.value = settingsData.usingBuiltin || {};
@@ -385,7 +403,7 @@ onMounted(load);
             :class="activeDomain === domain.key && !query ? 'is-active' : ''"
             @click="activeDomain = domain.key; query = ''"
           >
-            <span class="settings-domain__icon">{{ domainIcons[domain.key] || '•' }}</span>
+            <span class="settings-domain__icon"><Bell v-if="domain.key === 'notifications'" :size="16" aria-hidden="true" /><template v-else>{{ domainIcons[domain.key] || '•' }}</template></span>
             <span class="settings-domain__copy">
               <strong>{{ domain.title }}</strong>
               <small>{{ domain.desc }}</small>
@@ -401,7 +419,7 @@ onMounted(load);
 
       <main class="settings-content">
         <section class="settings-intro">
-          <div class="settings-intro__mark">{{ query ? '⌕' : (domainIcons[activeDomain] || '•') }}</div>
+          <div class="settings-intro__mark"><Bell v-if="!query && activeDomain === 'notifications'" :size="20" aria-hidden="true" /><template v-else>{{ query ? '⌕' : (domainIcons[activeDomain] || '•') }}</template></div>
           <div class="min-w-0 flex-1">
             <div class="flex flex-wrap items-center gap-2.5">
               <h2>{{ query ? `搜索“${query}”` : activeDomainInfo.title }}</h2>
@@ -415,7 +433,9 @@ onMounted(load);
           </div>
         </section>
 
-        <div v-if="!visibleSections.length" class="settings-empty">
+        <DeviceNotifications v-if="showDeviceNotifications" />
+
+        <div v-if="!visibleSections.length && !showDeviceNotifications" class="settings-empty">
           <div>⌕</div>
           <strong>没有找到匹配设置</strong>
           <p>换个关键词，或者搜索配置路径。</p>
@@ -440,7 +460,6 @@ onMounted(load);
             >{{ testingNotification ? '发送中…' : '发送 Telegram 测试通知' }}</button>
           </header>
 
-          <DeviceNotifications v-if="section.key === 'web_notifications'" />
           <div class="settings-list">
             <article
               v-for="spec in section.specs"

@@ -146,9 +146,9 @@ async def execute(s, row):
                 return
             await super().emit(event)
 
-        async def close(self):
-            await self._flush_delta(force_persist=True)
-            self._closed = True
+        async def close(self, *, emit_done: bool = True):
+            # Cron always owns the final boundary, including normal completion.
+            await super().close(emit_done=False)
 
     config = JobConfig.model_validate_json(row['config_json'])
     run_id, root = row['run_id'], row['root_turn_uuid']

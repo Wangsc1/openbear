@@ -5,6 +5,7 @@ import {createAttachmentDraftStorage} from "./views/consoleView/attachmentDraftS
 import { defineLazyView } from "./lazyView.js";
 import { installMobileViewport } from "./mobileViewport.js";
 import {installPushNavigation, installPushPresence} from "./pwa/pushClient.js";
+import NotificationOnboarding from "./pwa/NotificationOnboarding.vue";
 import LoginView from "./views/LoginView.vue";
 import BearLogoPreview from "./components/BearLogoPreview.vue";
 import ConversationTree from "./components/ConversationTree.vue";
@@ -294,6 +295,7 @@ function routeForCurrentState() {
     if (settingsSection.value === "system-settings" && window.location.pathname === "/settings") {
       const setting = new URLSearchParams(window.location.search).get("setting");
       if (setting) params.set("setting", setting);
+      if (new URLSearchParams(window.location.search).get("domain") === "notifications") params.set("domain", "notifications");
     }
   }
   const query = params.toString();
@@ -1099,6 +1101,7 @@ onBeforeUnmount(() => {
 <template>
   <LoginView v-if="isLoginPath" />
   <div v-else class="app-shell h-full flex" :class="{'is-console': active === 'console', 'is-settings': active === 'settings' && pageHeaderReady, 'is-admin': ['memory', 'secrets', 'docs', 'cron', 'skills', 'mcp'].includes(active) && pageHeaderReady}">
+    <NotificationOnboarding />
     <div class="mobile-app-bar">
       <button
         type="button"

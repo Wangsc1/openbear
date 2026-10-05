@@ -572,7 +572,7 @@ def test_helpers_have_no_frozen_versions_host_paths_or_insecure_tls():
     texts = [harness.SCRIPTS.parent.joinpath("acceptance.py").read_text()]
     texts += [path.read_text() for path in harness.SCRIPTS.glob("*.py")]
     for text in texts:
-        assert "/opt/src-space/" not in text
+        assert str(pathlib.Path(__file__).resolve().parents[1]) not in text
         assert "0.9.2" not in text and "0.9.3" not in text
         assert "ob093" not in text and "--insecure" not in text
         assert '"-k"' not in text

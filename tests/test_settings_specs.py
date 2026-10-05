@@ -47,6 +47,15 @@ def test_webhooks_navigation_follows_web_and_security():
     assert keys.index('webhooks') == keys.index('web') + 1
 
 
+def test_notifications_have_a_dedicated_web_domain_without_changing_settings():
+    from app.admin.settings import settings_specs_payload
+    domains = {item['key']: item for item in settings_specs_payload()['domains']}
+    assert domains['notifications']['title'] == '通知'
+    assert [section['key'] for section in domains['notifications']['sections']] == ['web_notifications']
+    assert [section['key'] for section in domains['web']['sections']] == ['web']
+    assert domains['notifications']['sections'][0]['paths'] == GROUPS['web_notifications'][1]
+
+
 def test_bool_setting_parse_chinese_values():
     spec = get_spec("rath.enabled")
     assert spec is not None

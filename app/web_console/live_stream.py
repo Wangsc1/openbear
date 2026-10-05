@@ -589,12 +589,12 @@ class _WebStreamRenderer:
             await self._flush_delta(force_persist=True)
         await self._emit_now(event)
 
-    async def close(self) -> None:
+    async def close(self, *, emit_done: bool = True) -> None:
         if self._closed:
             return
         await self._flush_delta(force_persist=True)
         self._closed = True
-        if self._terminal_emitted:
+        if self._terminal_emitted or not emit_done:
             return
         if self.live is not None:
             live_status = str(getattr(self.live, "status", "") or "")

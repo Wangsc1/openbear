@@ -1,5 +1,6 @@
 import axios from "axios";
 import {uploadFilesViaHttp} from "./uploads.js";
+import {loginUrlForLocation} from "./loginRedirect.js";
 
 const api = axios.create({ baseURL: "/api", timeout: 30000 });
 
@@ -7,7 +8,7 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error?.response?.status === 401 && window.location.pathname !== "/login") {
-      window.location.replace("/login");
+      window.location.replace(loginUrlForLocation(window.location));
       return Promise.reject(error);
     }
     return Promise.reject(error);
@@ -125,6 +126,7 @@ export const Api = {
   auditLogs: (params = {}) => api.get("/audit-logs", { params }).then(unwrap),
   statistics: (params = {}) => api.get("/statistics", { params }).then(unwrap),
 
+  cronCalendar: (params = {}) => api.get('/cron/calendar', { params }).then(unwrap),
   cronJobs: (params = {}) => api.get('/cron/jobs', { params }).then(unwrap),
   cronJob: (id) => api.get(`/cron/jobs/${encodeURIComponent(id)}`).then(unwrap),
   createCronJob: (data) => api.post('/cron/jobs', data).then(unwrap),

@@ -63,3 +63,38 @@ test('MCP setting deep link reaches its actual visible item within system settin
   assert.equal(p.run('query.value'), 'mcp.installDir');
   assert.deepEqual(Array.from(p.run('visibleSections.value.flatMap(section => section.specs.map(spec => spec.path))')), ['mcp.installDir']);
 });
+
+test('notifications have a dedicated domain; local device settings remain discoverable without Telegram search matches', async () => {
+  const p = page('Settings', {
+    settingsSpecs: async () => ({ok: true, domains: [
+      {key: 'agent', sections: [{key: 'agent', paths: ['agent.foo']}]},
+      {key: 'notifications', title: '通知', sections: [{key: 'web_notifications', title: 'Telegram 通知', paths: ['web.taskNotifications.enabled']}]},
+      {key: 'web', sections: [{key: 'web', paths: ['web.host']}]},
+    ], specs: {
+      'agent.foo': {path: 'agent.foo', title: 'Agent', kind: 'str'},
+      'web.taskNotifications.enabled': {path: 'web.taskNotifications.enabled', title: 'Telegram 长任务通知', kind: 'bool'},
+      'web.host': {path: 'web.host', title: '监听地址', kind: 'str'},
+    }}),
+    settings: async () => ({ok: true, values: {}}), rathOptions: async () => ({models: []}),
+  });
+  await p.run('load()');
+  assert.equal(p.run('showDeviceNotifications.value'), false);
+  p.run("activeDomain.value = 'notifications'");
+  assert.equal(p.run('showDeviceNotifications.value'), true);
+  assert.equal(p.run('domainSettingCount(activeDomainInfo.value)'), 2);
+  assert.equal(p.run('resultCount.value'), 2);
+  assert.equal(p.run('totalSettings.value'), 4);
+  assert.deepEqual(Array.from(p.run('visibleSections.value.map(section => section.key)')), ['web_notifications']);
+  for (const query of ['PWA', '系统通知', 'Chrome', '权限']) {
+    p.run(`query.value = ${JSON.stringify(query)}`);
+    assert.equal(p.run('showDeviceNotifications.value'), true);
+    assert.equal(p.run('resultCount.value'), 1);
+  }
+  p.run("query.value = 'Telegram'");
+  assert.equal(p.run('showDeviceNotifications.value'), false);
+  assert.equal(p.run('resultCount.value'), 1);
+  p.run("query.value = ''; activeDomain.value = 'web'");
+  assert.equal(p.run('showDeviceNotifications.value'), false);
+  assert.match(p.template, /<DeviceNotifications v-if="showDeviceNotifications"/);
+  assert.doesNotMatch(p.template, /<DeviceNotifications v-if="section.key/);
+});

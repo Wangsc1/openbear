@@ -37,10 +37,10 @@ from pathlib import Path, PurePosixPath
 
 # Also works when invoked directly as a script or loaded by an isolated test.
 if __package__:
-    from .scope import FRONTEND_CHECKS, identities
+    from .scope import FRONTEND_CHECKS, build_identity, identities
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from release_support.scope import FRONTEND_CHECKS, identities
+    from release_support.scope import FRONTEND_CHECKS, build_identity, identities
 
 STAGES = ("env", "py311", "py312", "py313", "frontend", "frontend-checks", "build", "package", "smoke")
 IMAGES = Path(__file__).resolve().parent / "images"
@@ -529,21 +529,36 @@ class Stage:
                 and self.details["counts"].get("cancelled", 0) == 0 and not self.details["unhandled"], "test failure or unhandled asynchronous exception")
         return self.details
 
+    def frontend_identity(self, env):
+        inputs = identities({name: (self.source / name).read_bytes() for name in self.source_files if not name.startswith(".git/")})
+        return build_identity(inputs["frontendStage"], env, self.config["version"])
+
+    def build_outputs(self, dist, marker):
+        # The canonical build is disposable; evidence paths must survive the next
+        # candidate/environment's build without being moved or overwritten.
+        target = self.out / "dist"
+        if not target.exists():
+            shutil.copytree(dist, target)
+        manifest = self.out / "manifest.json"
+        shutil.copy2(marker, manifest)
+        return {"dist": str(target), "manifest": str(manifest),
+                "distSha256": digest_json(tree_files(target)), "manifestSha256": sha256(manifest)}
+
     def build(self):
         env, node = self.environment()
         release_scope = self.config.get("releaseScope")
-        reuse = bool(release_scope and not release_scope["frontendChanged"])
-        identity = {"source": digest_json(self.source_files), "dependencies": env["dependencyFingerprint"], "nodeImage": env["nodeImage"]}
+        identity = self.frontend_identity(env)
+        reuse = bool(release_scope and not release_scope["frontendChanged"]
+                     and release_scope.get("previousFrontendStageFingerprint") == identity["source"])
         if reuse:
-            identity["previousAssets"] = self.previous_assets()
-            identity["frontendFingerprint"] = release_scope["frontendFingerprint"]
+            self.previous_assets()
         root = owned(self.run, "build")
         marker, dist = root / "manifest.json", root / "dist"
         if marker.exists() or dist.exists():
             require(marker.is_file() and dist.is_dir(), "completed/unidentified build must not be overwritten")
             record = read_json(marker)
             require(record["identity"] == identity and record["files"] == tree_files(dist), "existing build belongs to a different candidate or was modified")
-            return {"reused": True, "toolchain": record["toolchain"], "outputs": {"dist": str(dist), "manifest": str(marker), "distSha256": digest_json(record["files"])}}
+            return {"reused": True, "toolchain": record["toolchain"], "outputs": self.build_outputs(dist, marker)}
         if reuse:
             actual = identities({name: (self.source / name).read_bytes() for name in self.source_files if name.startswith("web/")})["frontend"]
             require(actual == release_scope["frontendFingerprint"] == release_scope["previousFrontendFingerprint"], "frontend reuse source proof mismatch")
@@ -566,12 +581,12 @@ class Stage:
             require((target / "index.html").is_file(), "previous frontend has no index")
             tools = env["toolchain"]["node"]
             root.mkdir(exist_ok=True)
-            os.replace(target, dist)
+            shutil.copytree(target, dist)
             record = {"identity": identity, "files": files, "toolchain": tools, "reusedFrontend": True,
                       "fromVersion": self.config["previousVersion"], "buildId": metadata["buildId"]}
             atomic_json(marker, record)
             shutil.rmtree(previous)
-            return {**record, "outputs": {"dist": str(dist), "manifest": str(marker), "distSha256": digest_json(files)}}
+            return {**record, "outputs": self.build_outputs(dist, marker)}
         image = self.image_id(env["nodeImage"])
         self.run_container(image, self.execution_script(writable_node=True) + "cd /work/source/web\nnpm run build -- --outDir /out/dist",
             [(self.source, "/inputs/source", True), (node, "/inputs/node", True), (self.out, "/out", False)], timeout=600)
@@ -580,9 +595,9 @@ class Stage:
         tools = read_json(self.out / "toolchain.json")
         require(not anomalies(self.log_path.read_text(errors="replace")), "build logged an unhandled exception")
         root.mkdir(exist_ok=True)
-        os.replace(self.out / "dist", dist)
+        shutil.copytree(self.out / "dist", dist)
         atomic_json(marker, {"identity": identity, "files": files, "toolchain": tools})
-        return {"image": image, "toolchain": tools, "outputs": {"dist": str(dist), "manifest": str(marker), "distSha256": digest_json(files)}}
+        return {"image": image, "toolchain": tools, "outputs": self.build_outputs(dist, marker)}
 
     def previous_assets(self):
         root = self.config["previousAssets"]
@@ -600,7 +615,8 @@ class Stage:
 
     def package_identity(self):
         build = read_json(owned(self.run, "build/manifest.json"))
-        require(build["identity"]["source"] == digest_json(self.source_files), "build source differs from candidate")
+        env, _node = self.environment()
+        require(build["identity"] == self.frontend_identity(env), "build inputs differ from candidate")
         require(build["files"] == tree_files(owned(self.run, "build/dist")), "built frontend changed")
         return {"runId": self.config["runId"], "version": self.config["version"],
                 "previousVersion": self.config["previousVersion"], "source": digest_json(self.source_files),
@@ -633,7 +649,7 @@ class Stage:
         def ignore(directory, names):
             result = {n for n in names if n == "__pycache__" or n.endswith((".pyc", ".pyo"))}
             if Path(directory) == self.source / "scripts":
-                result.update({"release.py", "release_support"} & set(names))
+                result.update({"release.py", "release_local.py", "release_support"} & set(names))
             return result
         for name in ("app", "prompts", "scripts"):
             shutil.copytree(self.source / name, package / name, ignore=ignore)
@@ -748,7 +764,7 @@ def audit_package(root):
     for relative in files:
         parts = PurePosixPath(relative).parts
         name = parts[-1].lower()
-        require(not (set(parts) & forbidden) and name not in {"openbear.json", "release.py"}
+        require(not (set(parts) & forbidden) and name not in {"openbear.json", "release.py", "release_local.py"}
                 and not name.startswith(".env") and not name.endswith((".pyc", ".pyo", ".db", ".sqlite", ".sqlite3", ".log", ".pem", ".key"))
                 and not any(name.endswith(suffix) for suffix in (".db-wal", ".db-shm", ".sqlite3-wal", ".sqlite3-shm")),
                 f"private data or test/release harness in package: {relative}")

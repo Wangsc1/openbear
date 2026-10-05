@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
+import {webcrypto} from 'node:crypto';
 import {createPushClient, decodePushKey, installPushNavigation, installPushPresence, pushSupport, waitForPushWorker} from './pushClient.js';
 
 const publicKey = Buffer.alloc(65, 4).toString('base64url');
@@ -16,7 +17,7 @@ function browser({permission = 'default', existing = false} = {}) {
   const win = {
     isSecureContext: true, location: {origin: 'https://bear.test', protocol: 'https:', href: 'https://bear.test/chat'},
     Notification: {permission, requestPermission() {calls.push('permission'); return Promise.resolve(this.permission === 'denied' ? 'denied' : 'granted');}},
-    PushManager: class {}, Event,
+    PushManager: class {}, Event, crypto: webcrypto,
     navigator: {userAgent: 'Chrome', serviceWorker: {
       async getRegistration() {return existing || registration.subscription ? registration : undefined;},
       async register(path, options) {calls.push(['register', path, options]); return registration;},
@@ -119,6 +120,154 @@ test('foreground presence is limited to focused visible device and cleaned up', 
   assert.equal(b.listeners.has('focus'), false);
 });
 
+const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test('each page has a unique stable clientId even with copied sessionStorage', async () => {
+  const a = browser({existing: true}), b = browser({existing: true});
+  a.win.sessionStorage = b.win.sessionStorage = {getItem: () => 'copied-page-id'};
+  b.win.document.hasFocus = () => false;
+  const pa = installPushPresence(a.win, () => 'same-conversation', a.request);
+  const pb = installPushPresence(b.win, () => 'same-conversation', b.request);
+  await settle();
+  const first = a.requests.at(-1).body, second = b.requests.at(-1).body;
+  assert.equal(first.endpoint, second.endpoint);
+  assert.ok(first.clientId);
+  assert.notEqual(first.clientId, second.clientId);
+  assert.equal(first.conversationUuid, 'same-conversation');
+  assert.equal(second.conversationUuid, '');
+  a.win.tick(); b.win.tick();
+  assert.equal(a.requests.at(-1).body.clientId, first.clientId);
+  assert.equal(b.requests.at(-1).body.clientId, second.clientId);
+  pa.stop(); pb.stop();
+  const resumed = installPushPresence(a.win, () => 'other', a.request);
+  await settle();
+  assert.equal(a.requests.at(-1).body.clientId, first.clientId);
+  resumed.stop();
+});
+
+test('older push-capable engines use per-page cryptographic IDs without randomUUID', async () => {
+  const b = browser({existing: true});
+  b.win.crypto = {getRandomValues: value => webcrypto.getRandomValues(value)};
+  const presence = installPushPresence(b.win, () => 'conv', b.request);
+  await settle();
+  assert.match(b.requests[0].body.clientId, /^[a-f0-9]{32}$/);
+  presence.stop();
+});
+
+test('failed key rotation still notifies another page that its old endpoint was removed', async () => {
+  const a = browser({existing: true}), b = browser({existing: true});
+  a.win.navigator.serviceWorker.getRegistration = async () => b.registration;
+  b.win.localStorage = {setItem(key) {a.listeners.get('storage')?.({key});}};
+  b.sub.options.applicationServerKey = new Uint8Array([1, 2, 3]);
+  const presence = installPushPresence(a.win, () => 'conv', a.request);
+  await settle();
+  assert.equal(a.requests.at(-1).body.endpoint, b.sub.endpoint);
+  await assert.rejects(createPushClient(b.win, (path, ...args) => path === 'subscription'
+    ? Promise.reject(new Error('save failed')) : b.request(path, ...args)).enable(), /save failed/);
+  await settle();
+  const count = a.requests.length;
+  a.win.tick();
+  assert.equal(a.requests.length, count);
+  assert.equal(b.registration.subscription, null);
+  presence.stop();
+});
+
+test('focus and restored visibility re-read absent, replaced and removed subscriptions without rebinding', async () => {
+  const b = browser();
+  const presence = installPushPresence(b.win, () => 'conv', b.request);
+  await settle();
+  assert.deepEqual(b.requests, []);
+  b.registration.subscription = b.sub;
+  await b.listeners.get('focus')();
+  assert.equal(b.requests.at(-1).body.endpoint, b.sub.endpoint);
+  b.registration.subscription = {...b.sub, endpoint: 'https://new.example/push'};
+  b.listeners.get('visibilitychange')();
+  await settle();
+  assert.equal(b.requests.at(-1).body.endpoint, 'https://new.example/push');
+  b.registration.subscription = null;
+  await b.listeners.get('focus')();
+  const count = b.requests.length;
+  b.win.tick(); presence.update();
+  assert.equal(b.requests.length, count);
+  assert.deepEqual(b.calls, []); // No permission, register, subscribe, or login binding.
+  assert.ok(b.requests.every(item => item.path === 'presence'));
+  presence.stop();
+});
+
+for (const transport of ['broadcast', 'storage']) {
+  test(`another page enable/disable refreshes presence through ${transport}`, async () => {
+    const a = browser(), b = browser();
+    a.win.navigator.serviceWorker.getRegistration = async () => b.registration;
+    const peers = new Set();
+    if (transport === 'broadcast') {
+      class Channel {
+        constructor() {peers.add(this);}
+        postMessage(data) {for (const peer of peers) if (peer !== this) queueMicrotask(() => peer.onmessage?.({data}));}
+        close() {peers.delete(this);}
+      }
+      a.win.BroadcastChannel = b.win.BroadcastChannel = Channel;
+    } else {
+      b.win.localStorage = {setItem(key, newValue) {a.listeners.get('storage')?.({key, newValue});}};
+    }
+    const presence = installPushPresence(a.win, () => 'conv', a.request);
+    await settle();
+    const client = createPushClient(b.win, b.request);
+    await client.enable();
+    await settle();
+    assert.equal(a.requests.at(-1).body.endpoint, b.sub.endpoint);
+    assert.equal(a.requests.at(-1).body.conversationUuid, 'conv');
+    await client.disable();
+    await settle();
+    const count = a.requests.length;
+    presence.update(); a.win.tick();
+    assert.equal(a.requests.length, count);
+    assert.deepEqual(a.calls, []);
+    assert.ok(a.requests.every(item => item.path === 'presence'));
+    presence.stop();
+    assert.equal(peers.size, 0);
+    assert.equal(a.listeners.has('storage'), false);
+  });
+}
+
+test('outdated subscription reads cannot revive old endpoints or report after stop', async () => {
+  const b = browser({existing: true});
+  let resolveOld;
+  b.registration.pushManager.getSubscription = () => new Promise(resolve => {resolveOld = resolve;});
+  const presence = installPushPresence(b.win, () => 'conv', b.request);
+  await settle();
+  b.registration.pushManager.getSubscription = async () => b.sub;
+  await b.listeners.get('focus')();
+  resolveOld({...b.sub, endpoint: 'https://stale.example/push'});
+  await settle();
+  presence.update();
+  assert.ok(b.requests.every(item => item.body.endpoint === b.sub.endpoint));
+  b.registration.pushManager.getSubscription = () => new Promise(resolve => {resolveOld = resolve;});
+  const pending = b.listeners.get('focus')();
+  await settle();
+  const count = b.requests.length;
+  presence.update(); // The cached endpoint is invalid while a re-read is pending.
+  assert.equal(b.requests.length, count);
+  presence.stop();
+  resolveOld(b.sub);
+  await pending;
+  assert.equal(b.requests.length, count);
+});
+
+test('presence authentication failure never auto-enables or binds a subscription', async () => {
+  const b = browser({existing: true});
+  const presence = installPushPresence(b.win, () => 'conv', async (...args) => {
+    await b.request(...args);
+    throw new Error('401');
+  });
+  await settle();
+  await b.listeners.get('focus')();
+  b.win.tick();
+  await settle();
+  assert.deepEqual(b.calls, []);
+  assert.ok(b.requests.every(item => item.path === 'presence'));
+  presence.stop();
+});
+
 function serviceWorker() {
   const handlers = {}, notices = [], opened = [], messages = [];
   const existing = {url: 'https://bear.test/chat?id=old', async focus() {messages.push('focus');}, postMessage(data) {messages.push(data);}};
@@ -137,6 +286,16 @@ test('push worker displays user-visible notification and never intercepts fetch/
   await w.event('push', {data: {json: () => ({body: '任务已完成', conversationUuid: 'a&b', tag: 'one'})}});
   assert.equal(w.notices[0].options.data.url, '/chat?id=a%26b');
   assert.equal(w.notices[0].options.body, '任务已完成');
+});
+
+test('existing push worker displays the task title and elapsed body unchanged without an application update', async () => {
+  const w = serviceWorker();
+  const body = '优化通知样式\n任务已完成 · 耗时 3分12秒';
+  await w.event('push', {data: {json: () => ({title: 'OpenBear', body, conversationUuid: 'task-conversation', tag: 'openbear:run:one'})}});
+  assert.equal(w.notices[0].title, 'OpenBear');
+  assert.equal(w.notices[0].options.body, body);
+  assert.equal(w.notices[0].options.data.url, '/chat?id=task-conversation');
+  assert.equal(w.notices[0].options.tag, 'openbear:run:one');
 });
 
 test('notification click reuses the current app without navigating/reloading away from drafts', async () => {

@@ -169,6 +169,8 @@ class State:
             if prior.get("status") == "passed" and prior.get("fingerprint") == key:
                 result = prior["result"]
                 if valid is None or valid(result):
+                    prior["lastReusedAt"] = time.time()
+                    self.save()
                     print(f"[{name}] reuse verified result", flush=True)
                     return result
             attempt = {"status": "running", "fingerprint": key, "startedAt": time.time()}

@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS web_push_deliveries (
   next_attempt_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   state TEXT NOT NULL DEFAULT 'pending',
+  last_status INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
   UNIQUE(subscription_id, event_key)
 );
 CREATE INDEX IF NOT EXISTS idx_web_push_pending ON web_push_deliveries(state, next_attempt_at);

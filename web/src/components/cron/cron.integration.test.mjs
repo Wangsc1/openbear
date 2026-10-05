@@ -256,11 +256,12 @@ test('timezone select lists searchable IANA names, Chinese labels and retains co
   assert.match(read('./CronEditor.vue'),/<Field[^>]*label="规则时区" filterable :options="timezones"/);
   assert.match(read('./CronEditor.vue'),/0 9 \* \* 1-5/);
 });
-test('page Tabs separate jobs/history, preserve filters, and a row history action opens the right tab',async()=>{
+test('page Tabs default to calendar, retain jobs/history and preserve filters',async()=>{
   const io=fixture(),h=harness('../../views/CronView.vue',{props:{folderId:'F1'},Api:{...io.api,cronJobs:async()=>({items:[],total:0})}});
-  h.context.target=io.job;assert.equal(h.run('activeTab.value'),'jobs');assert.equal(h.run('historyVisited.value'),false);
-  h.run("search.value='Keep';openHistory(target)");assert.equal(h.run('activeTab.value'),'history');assert.equal(h.run('historyJob.value.id'),'J1');assert.equal(h.run('historyVisited.value'),true);
-  await h.run("navigatePageTabs({key:'Home',preventDefault(){}})");assert.equal(h.run('activeTab.value'),'jobs');assert.equal(h.run('search.value'),'Keep');
+  h.context.target=io.job;assert.equal(h.run('activeTab.value'),'calendar');assert.equal(h.run('historyVisited.value'),false);
+  h.run("search.value='Keep';openHistory(target)");await flush();assert.equal(h.run('activeTab.value'),'history');assert.equal(h.run('historyJob.value.id'),'J1');assert.equal(h.run('historyVisited.value'),true);
+  await h.run("navigatePageTabs({key:'Home',preventDefault(){}})");assert.equal(h.run('activeTab.value'),'calendar');assert.equal(h.run('search.value'),'Keep');
+  await h.run("navigatePageTabs({key:'ArrowRight',preventDefault(){}})");assert.equal(h.run('activeTab.value'),'jobs');
   await h.run("navigatePageTabs({key:'ArrowRight',preventDefault(){}})");assert.equal(h.run('activeTab.value'),'history');
   const source=read('../../views/CronView.vue');
   assert.match(source,/<section v-show="activeTab==='jobs'"[^>]*role="tabpanel"/);

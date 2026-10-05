@@ -42,12 +42,113 @@ async def add_device(db, *, owner=123, endpoint="https://fcm.googleapis.com/wp/d
     return info
 
 
+async def add_interaction(db, *, iid="question", conversation="conv", expires=None):
+    now = int(time.time() * 1000)
+    await db.conn.execute("""INSERT INTO user_interactions
+        (interaction_id,owner_chat_id,conversation_uuid,expires_at_ms,created_at_ms,payload_json)
+        VALUES(?,123,?,?,?,?)""", (iid, conversation, expires if expires is not None else now + 600000, now, '{"action":"confirm"}'))
+    await db.conn.commit()
+
+
 async def observe(push, kind, **extra):
     await push.observe({"type": kind, "runUuid": "run", "turnUuid": "turn", "conversationUuid": "conv", **extra}, owner_chat_id=123, internal_chat_id=-1)
 
 
 async def deliveries(db):
     return [dict(r) for r in await (await db.conn.execute("SELECT * FROM web_push_deliveries ORDER BY id")).fetchall()]
+
+
+@pytest.mark.parametrize("seconds,expected", [(0, "不到1秒"), (9, "9秒"), (192, "3分12秒"), (3723, "1小时02分03秒")])
+def test_payload_identifies_task_and_formats_known_elapsed(seconds, expected):
+    payload = BrowserPush.payload("completed", "conv", "run:one", task_title="  优化通知\n样式  ", elapsed_seconds=seconds)
+    assert payload["body"] == f"优化通知 样式\n任务已完成 · 耗时 {expected}"
+    assert payload["title"] == "OpenBear" and payload["conversationUuid"] == "conv"
+    assert payload["tag"] == "openbear:run:one"
+
+
+@pytest.mark.parametrize("seconds", [None, -1])
+def test_payload_never_invents_unknown_elapsed_and_bounds_long_title(seconds):
+    payload = BrowserPush.payload("failed", "conv", "one", task_title="长" * 150, elapsed_seconds=seconds)
+    assert payload["body"].splitlines()[0] == "长" * 79 + "…"
+    assert payload["body"].endswith("任务执行失败") and "耗时" not in payload["body"]
+    assert BrowserPush.payload("test", "", "test")["body"] == "本设备的通知测试"
+
+
+@pytest.mark.parametrize("terminal,label", [("done", "任务已完成"), ("error", "任务执行失败")])
+async def test_terminal_uses_latest_owned_title_and_durable_start_not_delivery_time(db, terminal, label):
+    await add_device(db)
+    await db.conn.execute("INSERT INTO web_conversations(conversation_uuid,owner_chat_id,internal_chat_id,title) VALUES('conv',123,-1,'旧标题')")
+    await db.conn.commit()
+    push = BrowserPush(db)
+    started = int(time.time()) - 200
+    await observe(push, "accepted", ts=started * 1000)
+    await observe(push, "accepted", ts=(started + 100) * 1000)  # Duplicate/steering cannot reset start.
+    await db.conn.execute("UPDATE web_conversations SET title='优化通知样式' WHERE conversation_uuid='conv'")
+    await db.conn.commit()
+    push = BrowserPush(db)  # Start time survives process recreation.
+    await observe(push, terminal, ts=(started + 192) * 1000, text="private answer", stats={"durationMs": 500})
+    await observe(push, terminal, ts=(started + 199) * 1000)
+    rows = await deliveries(db)
+    assert len(rows) == 1
+    payload = json.loads(rows[0]["payload_json"])
+    assert payload["body"] == f"优化通知样式\n{label} · 耗时 3分12秒"
+    assert "private" not in rows[0]["payload_json"]
+    push.send = AsyncMock(return_value=503)
+    await push.deliver_one()
+    assert push.send.call_args.args[1] == payload
+    await db.conn.execute("UPDATE web_push_deliveries SET next_attempt_at=0")
+    await db.conn.commit()
+    push.send = AsyncMock(return_value=201)
+    await push.deliver_one()
+    assert push.send.call_args.args[1] == payload
+
+
+async def test_interaction_identifies_conversation_without_exposing_question(db):
+    await add_device(db)
+    await db.conn.execute("INSERT INTO web_conversations(conversation_uuid,owner_chat_id,internal_chat_id,title) VALUES('conv',123,-1,'上线通知改进')")
+    await db.conn.commit()
+    await add_interaction(db)
+    await BrowserPush(db).on_interaction("created", {"interactionId": "question", "ownerChatId": 123, "conversationUuid": "conv", "sensitive": True, "title": "secret question", "body": "secret body"})
+    payload = json.loads((await deliveries(db))[0]["payload_json"])
+    assert payload["body"] == "上线通知改进\n有一项操作需要你确认"
+    assert "secret" not in str(payload) and "耗时" not in payload["body"]
+
+
+async def test_title_lookup_respects_owner_and_unnamed_fallback(db):
+    await add_device(db)
+    await db.conn.execute("INSERT INTO web_conversations(conversation_uuid,owner_chat_id,internal_chat_id,title) VALUES('conv',999,-1,'other owner title'),('empty',123,-2,'')")
+    await db.conn.commit()
+    push = BrowserPush(db)
+    await push.enqueue(123, "conv", "foreign", "completed")
+    await push.enqueue(123, "empty", "empty", "completed")
+    rows = await deliveries(db)
+    assert json.loads(rows[0]["payload_json"])["body"] == "任务已完成"
+    assert json.loads(rows[1]["payload_json"])["body"] == "未命名会话\n任务已完成"
+
+
+@pytest.mark.parametrize("status,label", [("completed", "任务已完成"), ("interrupted", "任务已中断")])
+async def test_webhook_push_uses_chain_end_not_notification_retry_time(db, status, label):
+    from app.webhooks.notifications import deliver
+    from app.webhooks.repository import one
+
+    await add_device(db)
+    started = int(time.time()) - 600
+    await db.conn.execute("INSERT INTO web_conversations(conversation_uuid,owner_chat_id,internal_chat_id,title) VALUES('conv',123,-1,'处理外部消息')")
+    payload = {"rootTurnId": "root", "assignmentId": "assignment", "startedAtMs": started * 1000,
+               "status": status, "postState": "succeeded", "finalText": "private output"}
+    await db.conn.execute("""INSERT INTO web_task_notifications
+        (notification_uuid,notification_key,conversation_uuid,internal_chat_id,owner_chat_id,payload_json,created_at,updated_at)
+        VALUES('notice','webhook:one','conv',-1,123,?,?,?)""", (json.dumps(payload), started + 192, started + 192))
+    await db.conn.commit()
+    host = SimpleNamespace(browser_push=BrowserPush(db), _live_for=lambda conv: SimpleNamespace(publish=AsyncMock()))
+    service = SimpleNamespace(db=db, host=host, clock=lambda: int(time.time() * 1000))
+    notice = await one(db.conn, "SELECT * FROM web_task_notifications WHERE notification_uuid='notice'")
+    await deliver(service, notice)
+    await deliver(service, notice)
+    rows = await deliveries(db)
+    assert len(rows) == 1
+    assert json.loads(rows[0]['payload_json'])['body'] == f'处理外部消息\n{label} · 耗时 3分12秒'
+    assert 'private' not in rows[0]['payload_json']
 
 
 @pytest.mark.parametrize("endpoint", ["http://fcm.googleapis.com/wp/a", "https://127.0.0.1/x", "https://fcm.googleapis.com.evil.test/x", "https://evil.test/x", "https://a:b@web.push.apple.com/x", "https://web.push.apple.com:444/x", "https://web.push.apple.com/x#bad"])
@@ -124,6 +225,7 @@ async def test_no_subscription_and_explicit_stop_do_not_notify(db):
 async def test_interaction_private_content_never_sent_and_resolved_queue_removed(db):
     await add_device(db)
     push = BrowserPush(db)
+    await add_interaction(db)
     item = {"interactionId": "question", "ownerChatId": 123, "conversationUuid": "conv", "sensitive": True, "title": "secret", "body": "secret", "result": {"text": "secret"}}
     await push.on_interaction("created", item)
     await push.on_interaction("created", item)
@@ -168,7 +270,7 @@ async def test_presence_suppresses_only_matching_foreground_device(db):
     await add_device(db, endpoint="https://web.push.apple.com/second")
     push = BrowserPush(db)
     rows = await push.subscriptions(123)
-    push.presence[rows[0]["id"]] = ("conv", time.monotonic() + 45)
+    push.set_presence(rows[0]["id"], "page-a", "conv")
     push.send = AsyncMock(return_value=201)
     await push.enqueue(123, "conv", "one", "completed")
     await push.deliver_one()
@@ -249,3 +351,22 @@ async def test_http_rejects_invalid_keys_and_another_owner(client, db):
     info["keys"]["auth"] = "invalid"
     response = await client.client.post("/api/push/subscription", json={"subscription": info})
     assert response.status == 400
+
+
+async def test_http_presence_is_scoped_to_page_not_whole_subscription(client, db):
+    info = await add_device(db)
+    http, push = client.client, client.server.browser_push
+    for page, conversation in [('a', 'conv'), ('b', ''), ('c', 'other')]:
+        response = await http.post('/api/push/presence', json={
+            'endpoint': info['endpoint'], 'clientId': page, 'conversationUuid': conversation,
+        })
+        assert response.status == 200
+    push.send = AsyncMock(return_value=201)
+    await push.enqueue(123, 'conv', 'viewed', 'completed')
+    await push.deliver_one()
+    push.send.assert_not_called()
+    assert (await deliveries(db))[0]['state'] == 'suppressed'
+    await http.post('/api/push/presence', json={'endpoint': info['endpoint'], 'clientId': 'a', 'conversationUuid': ''})
+    await push.enqueue(123, 'conv', 'left', 'completed')
+    await push.deliver_one()
+    push.send.assert_awaited_once()

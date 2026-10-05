@@ -2983,6 +2983,23 @@ async def test_web_task_notification_budget_wait_does_not_finish_batch(web_env, 
     await live.publish({"type": "final", "turnUuid": "turn-root", "text": "等三个 Agent 完成后汇总"})
     await live.publish({"type": "done", "turnUuid": "turn-root"})
     calls: list[dict] = []
+    worker_finished = asyncio.Event()
+    original_worker = web_env.server._run_web_task_notification_when_idle
+
+    async def observed_worker(**kwargs):
+        try:
+            await original_worker(**kwargs)
+        finally:
+            worker_finished.set()
+
+    async def wait_for_notification_worker():
+        # calls.append only marks turn entry. Wait through renderer close, durable
+        # acknowledgement/requeue and worker cleanup before advancing task state.
+        await asyncio.wait_for(worker_finished.wait(), timeout=1.2)
+        worker_finished.clear()
+        assert row["conversation_uuid"] not in web_env.server._web_task_notification_workers
+
+    monkeypatch.setattr(web_env.server, "_run_web_task_notification_when_idle", observed_worker)
 
     async def fake_run_web_turn(chat_id, user_text, renderer, media=None, *, conversation=None, task_notification=False, task_notification_payload=None, **kwargs):
         calls.append({
@@ -2996,18 +3013,17 @@ async def test_web_task_notification_budget_wait_does_not_finish_batch(web_env, 
 
     monkeypatch.setattr(web_env.server, "_run_web_turn", fake_run_web_turn)
 
-    for task_uuid, content in [("task-a", "A evidence"), ("task-b", "B evidence")]:
-        await web_env.server.agent_dao.update_task(task_uuid, status="completed", finish=True)
-        await web_env.server._schedule_web_task_notification(row, {
-            "taskUuid": task_uuid,
-            "status": "completed",
-            "summary": f"{task_uuid} 完成",
-            "content": content,
-        })
-    for _ in range(60):
-        if web_env.server._web_task_notification_deferred.get(row["conversation_uuid"]):
-            break
-        await asyncio.sleep(0.02)
+    # Enqueue both sibling results before allowing the real worker to drain.
+    async with web_env.server._web_task_notification_lock(chat_id):
+        for task_uuid, content in [("task-a", "A evidence"), ("task-b", "B evidence")]:
+            await web_env.server.agent_dao.update_task(task_uuid, status="completed", finish=True)
+            await web_env.server._schedule_web_task_notification(row, {
+                "taskUuid": task_uuid,
+                "status": "completed",
+                "summary": f"{task_uuid} 完成",
+                "content": content,
+            })
+    await wait_for_notification_worker()
     assert calls == []
     assert {item["taskUuid"] for item in web_env.server._web_task_notification_deferred[row["conversation_uuid"]]} == {"task-a", "task-b"}
 
@@ -3023,10 +3039,7 @@ async def test_web_task_notification_budget_wait_does_not_finish_batch(web_env, 
         "summary": "task-c 等待 OpenBear 裁决",
         "content": "C budget exhausted",
     })
-    for _ in range(60):
-        if calls:
-            break
-        await asyncio.sleep(0.02)
+    await wait_for_notification_worker()
 
     assert len(calls) == 1
     assert calls[0]["task_notification"] is True
@@ -3044,10 +3057,7 @@ async def test_web_task_notification_budget_wait_does_not_finish_batch(web_env, 
         "summary": "task-c 完成",
         "content": "C evidence",
     })
-    for _ in range(60):
-        if len(calls) >= 2:
-            break
-        await asyncio.sleep(0.02)
+    await wait_for_notification_worker()
 
     assert len(calls) == 2
     final_payload = calls[-1]["payload"]

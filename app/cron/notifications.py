@@ -36,7 +36,10 @@ async def deliver(s, row):
         push = getattr(s.host, 'browser_push', None)
         if push and policy.mode in ('inherit', 'push', 'both'):
             if await push.subscriptions(row['owner_chat_id']):
-                await push.enqueue(row['owner_chat_id'], row['conversation_uuid'], root, 'completed' if status == 'completed' else 'failed')
+                elapsed = ((row['finished_at_ms'] - row['started_at_ms']) // 1000
+                           if row.get('finished_at_ms') and row.get('started_at_ms') else None)
+                await push.enqueue(row['owner_chat_id'], row['conversation_uuid'], root, 'completed' if status == 'completed' else 'failed',
+                                   task_title=f'定时任务：{row["job_name"]}', elapsed_seconds=elapsed)
             if await one(s.db.conn, 'SELECT 1 FROM web_push_deliveries WHERE event_key=? LIMIT 1', (root,)):
                 channels += 1
         await patch(s, row['run_id'], notification_state='enqueued' if channels else 'suppressed')

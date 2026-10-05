@@ -10,7 +10,7 @@ import CronDateTime from './CronDateTime.vue';
 import {createCronEditor} from './useCron.js';
 import {TABS,INTERVAL_UNITS,timezoneOptions,intervalUnitFor,overrides,effectiveModel,inheritedModel,changeModel,tabKey,time} from './cronConfig.js';
 import './cron.css';
-const props=defineProps({jobId:{type:String,default:''},folderId:{type:String,default:''}});
+const props=defineProps({jobId:{type:String,default:''},folderId:{type:String,default:''},initial:{type:Object,default:null}});
 const emit=defineEmits(['close','saved']);
 const editor=createCronEditor(Api);
 const {draft,job,loaded,loading,saving,dirty,error,errors,conflict,environment,models,folder,folders,inheritanceLoading,inheritanceError}=editor;
@@ -50,7 +50,7 @@ async function canLeave(){
 async function close(done){if(!await canLeave())return;if(typeof done==='function')done();emit('close');}
 function beforeUnload(event){if(dirty.value || saving.value){event.preventDefault();event.returnValue='';}}
 watch(()=>JSON.stringify(draft.config.schedule),()=>editor.preview.clear());
-editor.load(props.jobId,props.folderId);
+editor.load(props.jobId,props.folderId,props.initial);
 window.addEventListener('beforeunload',beforeUnload);
 onBeforeUnmount(()=>{editor.dispose();window.removeEventListener('beforeunload',beforeUnload);});
 defineExpose({canLeave,saving});
@@ -61,7 +61,7 @@ defineExpose({canLeave,saving});
       <nav class="cron-tabs" role="tablist" aria-label="定时任务配置" @keydown="navigateTabs"><button v-for="[key,title] in TABS" :id="`cron-tab-${key}`" :key="key" type="button" role="tab" :data-tab="key" :aria-selected="tab===key" :aria-controls="`cron-panel-${key}`" :tabindex="tab===key?0:-1" @click="tab=key">{{ title }}</button></nav>
       <div class="cron-editor-scroll" :class="{'is-instructions':tab==='instructions'}">
         <el-skeleton v-if="loading" :rows="7" animated />
-        <div v-if="error" class="cron-alert" role="alert">{{ error }}<el-button v-if="!loaded" link @click="editor.load(jobId,folderId)">重新加载</el-button></div>
+        <div v-if="error" class="cron-alert" role="alert">{{ error }}<el-button v-if="!loaded" link @click="editor.load(jobId,folderId,initial)">重新加载</el-button></div>
         <div v-if="conflict" class="cron-alert" role="alert"><strong>版本冲突，草稿已保留。</strong><p>{{ conflict.mergeReady ? `已读取最新版本 v${conflict.currentRevision}，下次保存将以本地完整草稿覆盖该版本。请对照下方最新内容，再决定保存。` : '不会自动覆盖他人修改。请先读取最新版本，对比后再保存。' }}</p><el-button :disabled="saving" @click="editor.prepareMerge">读取最新版本，保留本地草稿</el-button><details v-if="conflict.current"><summary>查看服务器最新配置</summary><pre>{{ JSON.stringify(conflict.current,null,2) }}</pre></details></div>
         <div v-if="errors.length" class="cron-alert" role="alert"><ul><li v-for="item in errors" :key="item.path">{{ item.message }}</li></ul></div>
         <template v-if="loaded && !loading">
@@ -105,7 +105,13 @@ defineExpose({canLeave,saving});
                 <p><code>0 9 * * *</code> 每天 09:00 · <code>0 9 * * 1-5</code> 周一至周五 09:00</p>
                 <p><code>*/30 * * * *</code> 每 30 分钟；下方可预览实际执行时间。</p>
               </div>
+              <Field v-model="draft.config.schedule.second" label="执行秒（0–59，留空为 0）" type="number" :min="0" :max="59" :disabled="disabled" :error="errorFor('schedule.second')" />
             </template>
+              <div v-if="draft.config.schedule.kind!=='at'" class="cron-grid">
+                <CronDateTime v-model="draft.config.schedule.startAt" label="开始时间（含，可选）" placeholder="不限开始时间" :hint="`本地时区 ${localTimezone}；只在此时之后按规则执行。`" :disabled="disabled" :error="errorFor('schedule.startAt')" />
+                <CronDateTime v-model="draft.config.schedule.endAt" label="结束时间（不含，可选）" placeholder="不限结束时间" hint="到此时间后计划结束。例如执行至 7 日，结束时间设为 8 日 00:00。" :disabled="disabled" :error="errorFor('schedule.endAt')" />
+              </div>
+            <Field label="跳过节假日" hint="中国大陆：周末及法定假日跳过，调休工作日照常执行；需有范围内已公布的调休日历。"><el-switch v-model="draft.config.schedule.skipHolidays" :disabled="disabled" aria-label="跳过节假日" /></Field>
             <div class="cron-preview"><div class="cron-toolbar"><h3>接下来 5 次</h3><el-button :loading="previewLoading" :disabled="disabled" @click="editor.previewNext">预览时间</el-button></div><p class="cron-note">按本地时区 {{ localTimezone }} 显示；间隔起点留空时，预览以当前时间计算。</p><p v-if="previewError" class="cron-error" role="alert">{{ previewError }}</p><ol v-if="previewData?.times?.length"><li v-for="value in previewData.times" :key="value"><time :datetime="value" :title="value">{{ time(value) }}</time></li></ol><p v-else class="cron-note">{{ previewData ? '没有未来执行时点。' : '修改规则后请重新预览。' }}</p></div>
             <p class="cron-note">到点开始，不排队；停机错过直接跳过，不补跑。</p>
           </section>

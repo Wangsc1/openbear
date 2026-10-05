@@ -278,7 +278,7 @@ async def test_fixed_error_digest_is_one_delivery_per_failed_assignment(env):
     from app.webhooks import notifications
     clock=[1791021000000]; env.s.clock=lambda:clock[0]
     deliveries=[]
-    async def enqueue(owner,conversation,key,status): deliveries.append({'key':key,'status':status})
+    async def enqueue(owner,conversation,key,status,**metadata): deliveries.append({'key':key,'status':status,**metadata})
     env.server.browser_push=SimpleNamespace(enqueue=enqueue)
     c=await create(env,batching={'enabled':False},notifications={'policy':'errorsDigest','digestSeconds':60})
     class Backend(FakeStreamBackend):
@@ -298,6 +298,8 @@ async def test_fixed_error_digest_is_one_delivery_per_failed_assignment(env):
     clock[0]+=61000; await notifications.tick(env.s)
     evidence('not_a_digest',outboxRows=(await one(env.db.conn,"SELECT count(*) n FROM web_task_notifications WHERE kind='webhook-result'"))['n'],deliveries=deliveries)
     assert len(deliveries)==1
+    assert deliveries[0]['task_title']=='触发器异常汇总（3项）'
+    assert deliveries[0]['elapsed_seconds'] is None
     row=await one(env.db.conn,"SELECT payload_json FROM web_task_notifications WHERE kind='webhook-result'")
     assert len(json.loads(row['payload_json'])['assignments'])==3
     assert (await one(env.db.conn,'SELECT count(DISTINCT notification_key) n FROM webhook_assignments'))['n']==1

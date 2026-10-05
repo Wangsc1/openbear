@@ -24,7 +24,7 @@ FRONTEND_CHECKS = (
 SHARED_PREFIXES = ("app/web_console/", "app/models/", "app/db/", "app/update/", "scripts/", "tests/", "prompts/")
 SHARED_FILES = {"app/web_admin.py", "app/config.py", "app/references.py", "app/events.py",
                 "pyproject.toml", "uv.lock", "openbear.service"}
-POLICY = 1
+POLICY = 2
 
 
 def normalized(name: str, data: bytes) -> bytes:
@@ -50,11 +50,26 @@ def normalized(name: str, data: bytes) -> bytes:
     return data
 
 
+def frontend_input(name: str) -> bool:
+    # Only standalone Python test modules and non-shared backend implementation
+    # are outside the Node test/build contract. Fixtures, conftest, scripts,
+    # shared APIs, dependencies and all unknown paths remain conservative inputs.
+    if re.fullmatch(r"tests/test_[^/]+\.py", name):
+        return False
+    if name.startswith("app/") and name not in SHARED_FILES and not name.startswith(SHARED_PREFIXES):
+        return False
+    return True
+
+
 def identities(files: dict[str, bytes]) -> dict:
     hashes = {name: sha(normalized(name, data)) for name, data in sorted(files.items())}
     return {"files": hashes,
             "frontend": fingerprint({n: h for n, h in hashes.items() if n.startswith("web/")}),
-            "backend": fingerprint({n: h for n, h in hashes.items() if not n.startswith("web/")})}
+            "backend": fingerprint({n: h for n, h in hashes.items() if not n.startswith("web/")}),
+            "frontendStage": fingerprint({n: h for n, h in hashes.items() if frontend_input(n)}),
+            # The established release policy splits web-dependent Python
+            # coverage into FRONTEND_CHECKS when this non-web matrix is reused.
+            "backendStage": fingerprint({n: h for n, h in hashes.items() if not n.startswith("web/")})}
 
 
 def compare(previous: dict[str, bytes], current: dict[str, bytes], *, previous_commit: str) -> dict:
@@ -69,7 +84,9 @@ def compare(previous: dict[str, bytes], current: dict[str, bytes], *, previous_c
             "frontendChanged": frontend, "backendChanged": backend,
             "shared": shared, "unknown": unknown, "previousCommit": previous_commit,
             "previousFrontendFingerprint": old["frontend"], "previousBackendFingerprint": old["backend"],
+            "previousFrontendStageFingerprint": old["frontendStage"],
             "frontendFingerprint": new["frontend"], "backendFingerprint": new["backend"],
+            "frontendStageFingerprint": new["frontendStage"], "backendStageFingerprint": new["backendStage"],
             "frontendChecks": list(FRONTEND_CHECKS)}
 
 
@@ -93,6 +110,11 @@ def from_checkout(source: Path, candidate: dict, previous_commit: str) -> dict:
     return compare(git_files(source, previous_commit), current, previous_commit=previous_commit)
 
 
+def build_identity(frontend_fingerprint, environment, version):
+    return {"policy": POLICY, "source": frontend_fingerprint, "version": version,
+            "nodeImage": environment["nodeImage"], "nodeKey": environment["nodeKey"]}
+
+
 def verified_result(result: dict) -> bool:
     """A cache miss is safe; missing/corrupt evidence is never a passed test."""
     if not result.get("ok") or result.get("unhandled"):
@@ -101,7 +123,7 @@ def verified_result(result: dict) -> bool:
     if not counts.get("tests") or counts.get("failed") != 0 or counts.get("cancelled", 0) or counts.get("todo", 0):
         return False
     outputs = result.get("outputs", {})
-    if not outputs.get("logSha256"):
+    if not outputs.get("log") or not outputs.get("logSha256"):
         return False
     for name in ("log", "junit"):
         if name not in outputs:

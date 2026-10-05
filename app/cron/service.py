@@ -8,8 +8,8 @@ import logging
 import secrets
 import time
 
-from app.cron.contracts import CronError, JobConfig, Schedule
-from app.cron.schedule import next_time, preview
+from app.cron.contracts import CronError, JobConfig, Schedule, timestamp
+from app.cron.schedule import next_time, preview, validate_calendar_coverage
 from app.webhooks.contracts import digest, dumps, iso
 from app.webhooks.repository import insert, many, one, uid
 from app.webhooks.scripts import resolve_environment
@@ -57,6 +57,7 @@ class CronService:
         return {'items': result}
 
     async def validate(self, owner, folder_id, config, enabled):
+        validate_calendar_coverage(config.schedule, self.clock())
         # Unlike ordinary conversations, Cron cannot target the temporary root.
         if not isinstance(folder_id, str) or not folder_id.strip():
             raise CronError('folder_required', '定时任务必须绑定真实目录')
@@ -105,7 +106,8 @@ class CronService:
     def normalize(self, value, now):
         config = JobConfig.model_validate(value or {})
         if config.schedule.kind == 'every' and not config.schedule.anchor_at:
-            config.schedule.anchor_at = iso(now)
+            config.schedule.anchor_at = config.schedule.start_at or iso(now)
+        validate_calendar_coverage(config.schedule, now)
         # Validate existence of a future match, including rare calendar expressions.
         next_time(config.schedule, now)
         return config
@@ -144,6 +146,10 @@ class CronService:
         folders = await self.host._tree_folders(owner)
         return {'items': [await self.public(self.db.conn, r, folders=folders) for r in rows], 'total': count['n']}
 
+    async def calendar(self, owner, params):
+        from app.cron.calendar import calendar
+        return await calendar(self, owner, params)
+
     @staticmethod
     def pagination(params):
         return min(100, max(1, int(params.get('limit') or 30))), max(0, int(params.get('offset') or 0))
@@ -172,7 +178,7 @@ class CronService:
             await self.validate(owner, folder, config, enabled)
             same_schedule = old and JobConfig.model_validate_json(old['config_json']).schedule == config.schedule
             next_at = old['next_run_at_ms'] if old and enabled and old['enabled'] and same_schedule else next_time(config.schedule, now) if enabled else None
-            state = 'armed' if next_at is not None else 'disabled' if not enabled else 'missed'
+            state = 'armed' if next_at is not None else 'disabled' if not enabled else 'exhausted' if config.schedule.end_at else 'missed'
             if old and enabled and old['enabled'] and same_schedule:
                 state = old['schedule_state']
             job_id = job_id or uid()
@@ -199,7 +205,7 @@ class CronService:
             config = JobConfig.model_validate_json(row['config_json'])
             if enabled: await self.validate(owner, row['folder_id'], config, True)
             next_at = row['next_run_at_ms'] if enabled and row['enabled'] else next_time(config.schedule, self.clock()) if enabled else None
-            state = row['schedule_state'] if enabled and row['enabled'] else 'armed' if next_at else 'missed' if enabled else 'disabled'
+            state = row['schedule_state'] if enabled and row['enabled'] else 'armed' if next_at else ('exhausted' if config.schedule.end_at else 'missed') if enabled else 'disabled'
             await conn.execute('UPDATE cron_jobs SET enabled=?,next_run_at_ms=?,schedule_state=?,revision=revision+1,updated_at_ms=? WHERE job_id=?',
                                (int(enabled), next_at, state, self.clock(), job_id))
             result = {'job': await self.public(conn, await self.row(conn, owner, job_id))}
@@ -275,7 +281,7 @@ class CronService:
             for row in await many(conn, 'SELECT * FROM cron_jobs WHERE enabled=1 AND deleted_at_ms IS NULL AND next_run_at_ms<?', (now,)):
                 cfg = JobConfig.model_validate_json(row['config_json'])
                 next_at = next_time(cfg.schedule, now)
-                await conn.execute('UPDATE cron_jobs SET next_run_at_ms=?,schedule_state=? WHERE job_id=?', (next_at, 'armed' if next_at is not None else 'missed', row['job_id']))
+                await conn.execute('UPDATE cron_jobs SET next_run_at_ms=?,schedule_state=? WHERE job_id=?', (next_at, 'armed' if next_at is not None else 'exhausted' if cfg.schedule.end_at else 'missed', row['job_id']))
         from app.cron.notifications import deliver
         for run in await many(self.db.conn, "SELECT * FROM cron_runs WHERE notification_state='pending' AND phase='finished'"):
             await deliver(self, run)  # Only idempotent channel enqueue, never business replay.
@@ -310,6 +316,9 @@ class CronService:
                     await conn.execute("UPDATE cron_jobs SET next_run_at_ms=NULL,schedule_state='target_missing' WHERE job_id=?", (row['job_id'],)); continue
                 cfg = JobConfig.model_validate_json(row['config_json'])
                 due = row['next_run_at_ms']
+                if cfg.schedule.end_at and now >= timestamp(cfg.schedule.end_at):
+                    await conn.execute("UPDATE cron_jobs SET next_run_at_ms=NULL,schedule_state='exhausted' WHERE job_id=?", (row['job_id'],))
+                    continue
                 run = await self.accept_run(conn, row, due, 'scheduled', f'scheduled:{row["job_id"]}:{due}')
                 next_at = next_time(cfg.schedule, max(now, due))
                 await conn.execute('UPDATE cron_jobs SET next_run_at_ms=?,schedule_state=? WHERE job_id=?', (next_at, 'armed' if next_at is not None else 'exhausted', row['job_id']))
