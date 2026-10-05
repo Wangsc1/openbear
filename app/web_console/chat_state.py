@@ -605,12 +605,26 @@ class WebAdminChatStateMixin:
         *,
         folder_values: tuple[str, str] | None = None,
         strict: bool = False,
+        prompt_policy: dict | None = None,
+        folder_path: str | None = None,
     ) -> str:
+        from app.context.prompt_policy import policy
+        selected = prompt_policy if prompt_policy is not None else (
+            await self._resolved_prompt_policy(conversation_uuid) if conversation_uuid else policy())
         try:
             params = await self._prompt_template_params_live(
                 conversation_uuid,
                 folder_values=folder_values,
+                prompt_policy=selected,
             )
+            if folder_path is not None:
+                params['conversation']['folderPath'] = folder_path
+            if selected['overrideSystemPrompt']:
+                prompt = await BuiltinMemoryClient(self.db, identity=self.config.memory.identity).render_system_prompt(
+                    params, template_content=selected['text'], template_name='Conversation custom system', source='conversation')
+                if not prompt.strip() or '[[ERROR:' in prompt:
+                    raise ValueError('invalid custom system template')
+                return prompt
             if self.config.memory.provider == "builtin":
                 mem = BuiltinMemoryClient(self.db, identity=self.config.memory.identity)
             else:
@@ -626,7 +640,7 @@ class WebAdminChatStateMixin:
                 raise ValueError("empty system prompt")
             return prompt
         except Exception as exc:
-            if strict:
+            if strict or selected['overrideSystemPrompt']:
                 raise
             log.warning("Web 对话拉取系统提示词失败，降级兜底", 错误=str(exc)[:160])
             return "你是 OpenBear，一个单人自用智能助理。请用中文、简洁、专业地完成用户任务。"

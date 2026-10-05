@@ -1,3 +1,4 @@
+import * as promptPolicy from './promptPolicy.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -11,6 +12,7 @@ import postcss from 'postcss';
 import {useRecentConversationRows} from './conversationRecentRows.js';
 import {treeItemId as rowId, treeItemParent, compareTreeItems, resolveTreeDrop} from './conversationTreeInteractions.js';
 import {activityLabel, activityState, activityReadRequests} from '../conversationActivity.js';
+import {REFERENCE_MIME, referenceToken} from '../references/codec.js';
 
 const source = fs.readFileSync(new URL('./ConversationTree.vue', import.meta.url), 'utf8');
 const {descriptor} = parse(source);
@@ -41,8 +43,8 @@ function harness(t, {phone=true, storedView='recent', blockedStorage=false}={}) 
     locateConversationFolderInTree:async id=>{requests.push(['folder',id]);return {folderPath:[id],folderItems:[folder(id)]};},
     locateConversationInTree:async id=>{requests.push(['locate',id]);return {item:conversation(id),folderPath:['F'],folderItems:[folder('F')]};},
   };
-  const ctx=vm.createContext({...icons,computed,nextTick,reactive,ref,watch,useRecentConversationRows,rowId,treeItemParent,compareTreeItems,resolveTreeDrop,activityLabel,activityState,activityReadRequests,
-    props,referenceCatalog:catalog,referenceItem:()=>null,acceptActivityReadReceipt(){},
+  const ctx=vm.createContext({...promptPolicy,...icons,computed,nextTick,reactive,ref,watch,useRecentConversationRows,rowId,treeItemParent,compareTreeItems,resolveTreeDrop,activityLabel,activityState,activityReadRequests,
+    props,referenceCatalog:catalog,referenceItem:()=>null,acceptActivityReadReceipt(){},REFERENCE_MIME,referenceToken,
     defineLazyView:()=>({}),defineProps:()=>props,defineEmits:()=>(...args)=>events.push(args),defineExpose(){},
     onMounted:fn=>mounted.push(fn),onBeforeUnmount:fn=>unmounted.push(fn),Api:api,apiError:String,ElMessage:{error:value=>assert.fail(String(value))},
     window:{matchMedia:()=>({matches:phone}),localStorage:{getItem:key=>{if(blockedStorage)throw Error('blocked');return stored.get(key);},setItem:(key,value)=>{if(blockedStorage)throw Error('blocked');stored.set(key,value);}},addEventListener(){},removeEventListener(){},setInterval:fn=>{intervals.set(1,fn);return 1;},clearInterval:id=>intervals.delete(id)},
@@ -103,7 +105,7 @@ for(const phone of [true,false])test(`${phone?'phone':'desktop'} shows a flat re
   const x=harness(t,{phone});let view=await x.render();
   assert.deepEqual(ids(view),['recent:c']);assert.deepEqual(selected(view),['recent:c']);
   assert.equal(view.nodes.find(n=>classes(n,'tree-list')).props.role,'list');
-  assert.equal(rows(view)[0].props.role,'listitem');assert.equal(rows(view)[0].props.draggable,false);
+  assert.equal(rows(view)[0].props.role,'listitem');assert.equal(rows(view)[0].props.draggable,true);
   assert.match(view.html,/目录 F/);assert.doesNotMatch(view.html,/__recent|activity-folder/);
   await view.nodes.find(n=>n.props?.['data-sidebar-view']==='folders').props.onClick();
   view=await x.render();assert.deepEqual(ids(view),['F','c','__temporary','__archive']);assert.deepEqual(selected(view),['c']);
@@ -148,11 +150,42 @@ for(const phone of [true,false])test(`${phone?'phone':'desktop'} recent activati
   assert.deepEqual(selected(await x.render()),['c']);await x.s.switchSidebarView('recent');assert.deepEqual(selected(await x.render()),['recent:c']);
 });
 
+for(const phone of [true,false])test(`${phone?'phone':'desktop'} recent drag inserts an editor reference but cannot reorder or move a conversation`,async t=>{
+  const x=harness(t,{phone}),view=await x.render(),row=rows(view)[0],data=new Map();
+  const transfer={setData:(key,value)=>data.set(key,value),getData:key=>data.get(key)||'',get types(){return [...data.keys()];}};
+  let prevented=0;
+  row.props.onDragstart({dataTransfer:transfer,preventDefault(){prevented++;}});
+  const reference={kind:'chat',id:'c',label:'c',scope:'full'};
+  assert.equal(row.props.draggable,true);assert.equal(prevented,0);
+  assert.equal(transfer.effectAllowed,'copy');assert.equal(x.s.drag.value.row,null);
+  assert.deepEqual(JSON.parse(data.get(REFERENCE_MIME)),reference);
+  assert.equal(data.get('text/plain'),referenceToken(reference));assert.equal(data.has('application/x-openbear-tree'),false);
+
+  // Feed the actual exported payload through the real editor's receiving handlers.
+  const editorSource=fs.readFileSync(new URL('../references/ReferenceEditor.vue',import.meta.url),'utf8'),inserted=[];
+  const receiver=vm.createContext({REFERENCE_MIME,dragHover:ref(false),lastSelection:null,
+    editor:ref({view:{posAtCoords:()=>({pos:6})}}),insertReference:(value,range)=>inserted.push(JSON.parse(JSON.stringify({value,range}))),
+    event:{dataTransfer:transfer,clientX:30,clientY:40,preventDefault(){prevented++;},stopPropagation(){}}});
+  vm.runInContext(editorSource.slice(editorSource.indexOf('function dragOver('),editorSource.indexOf('function externalInsert(')),receiver);
+  vm.runInContext('dragOver(event);drop(event)',receiver);
+  assert.equal(transfer.dropEffect,'copy');assert.equal(receiver.dragHover.value,false);
+  assert.deepEqual(inserted,[{value:reference,range:{from:6,to:6}}]);
+
+  const event={dataTransfer:transfer,preventDefault(){},stopPropagation(){},clientY:50,currentTarget:{getBoundingClientRect:()=>({top:0,height:100})}};
+  await x.s.drop(event,x.s.displayRows.value[0]);
+  assert.equal(x.requests.length,0);assert.equal(x.events.length,0);
+  row.props.onDragstart({dataTransfer:transfer,preventDefault(){assert.fail('reference drag unexpectedly blocked');}});
+  await x.s.switchSidebarView('folders');
+  assert.equal(x.s.dropIntent(event,folder('F')),null);
+  await x.s.drop(event,folder('F'));await x.s.drop(event,x.s.rootDropTarget);
+  assert.equal(x.requests.length,0);assert.equal(x.s.stateFor('F').items[0].folderId,'F');
+  assert.deepEqual(x.s.recentItems.value.map(item=>item.conversationUuid),['c']);
+});
+
 test('recent context menu keeps original identity and directory drop remains available only in directory view',async t=>{
   const x=harness(t),alias=x.s.displayRows.value[0];
   const event={preventDefault(){},stopPropagation(){},currentTarget:{getBoundingClientRect:()=>({right:200,bottom:100})}};
   await x.s.openMoreMenu(event,alias);assert.equal(x.s.menu.value.row.conversationUuid,'c');assert.equal('recentAlias' in x.s.menu.value.row,false);
-  let prevented=0;x.s.dragStart({preventDefault(){prevented++;}},alias);assert.equal(prevented,1);assert.equal(x.s.drag.value.row,null);
   const other=conversation('other'),destination=folder('destination');
   for(const ratio of [0,.5,1]){assert.equal(resolveTreeDrop(other,alias,ratio,[]),null);assert.equal(resolveTreeDrop(alias,destination,ratio,[]),null);}
   x.s.drag.value.row=other;assert.equal(x.s.dropIntent({},destination),null);

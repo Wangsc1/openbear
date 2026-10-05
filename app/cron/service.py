@@ -7,9 +7,14 @@ import json
 import logging
 import secrets
 import time
+from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from app.cron.contracts import CronError, JobConfig, Schedule, timestamp
-from app.cron.schedule import next_time, preview, validate_calendar_coverage
+from app.cron.schedule import next_state, preview_details
+from app.cron.holidays import MissingCalendar
+from app.cron.holiday_sync import HolidayStore
 from app.webhooks.contracts import digest, dumps, iso
 from app.webhooks.repository import insert, many, one, uid
 from app.webhooks.scripts import resolve_environment
@@ -19,7 +24,7 @@ ACTIVE = ('starting', 'running')
 
 
 class CronService:
-    def __init__(self, db, host, *, clock=None):
+    def __init__(self, db, host, *, clock=None, holiday_store=None):
         self.db, self.host = db, host
         self.clock = clock or (lambda: int(time.time() * 1000))
         self.wake = asyncio.Event()
@@ -27,6 +32,47 @@ class CronService:
         self.loop_task = None
         self.closing = False
         self.confirmations = {}
+        self.holidays = holiday_store or HolidayStore(Path(db._path).expanduser().parent / 'cron-holidays-cn.json', self.clock)
+        self.holiday_loop_task = self.holiday_refresh_task = None
+
+    def holiday_status(self):
+        return {**self.holidays.status(), 'syncing': bool(self.holiday_refresh_task and not self.holiday_refresh_task.done())}
+
+    def request_holiday_sync(self):
+        if not self.holiday_refresh_task or self.holiday_refresh_task.done():
+            self.holiday_refresh_task = asyncio.create_task(self._sync_holidays(), name='cron-holiday-sync')
+        return {'holidayCalendar': self.holiday_status()}
+
+    async def _sync_holidays(self):
+        try:
+            return await self.holidays.refresh(self._apply_calendar)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.holidays.error = f'日历更新失败，保留已有数据：{exc}'
+            log.exception('Cron holiday sync failure')
+
+    async def holiday_loop(self):
+        while not self.closing:
+            self.request_holiday_sync()
+            await asyncio.shield(self.holiday_refresh_task)
+            await asyncio.sleep(86400)
+
+    async def _apply_calendar(self, snapshot):
+        async with self.db.write_transaction(label='cron-holiday-update') as conn:
+            now = self.clock()
+            for row in await many(conn, 'SELECT * FROM cron_jobs WHERE enabled=1 AND deleted_at_ms IS NULL'):
+                schedule = JobConfig.model_validate_json(row['config_json']).schedule
+                if not schedule.skip_holidays or row['schedule_state'] == 'target_missing':
+                    continue
+                next_at, state = next_state(schedule, now, snapshot)
+                await conn.execute('UPDATE cron_jobs SET next_run_at_ms=?,schedule_state=? WHERE job_id=?', (next_at, state, row['job_id']))
+        # No await between publishing the DB schedule and its matching snapshot.
+        self.holidays.snapshot = snapshot
+        self.wake.set()
+
+    def schedule_next(self, schedule, now):
+        return next_state(schedule, now, self.holidays.snapshot, exhausted='exhausted' if schedule.end_at else 'missed')
 
     @property
     def script_environment(self):
@@ -57,7 +103,6 @@ class CronService:
         return {'items': result}
 
     async def validate(self, owner, folder_id, config, enabled):
-        validate_calendar_coverage(config.schedule, self.clock())
         # Unlike ordinary conversations, Cron cannot target the temporary root.
         if not isinstance(folder_id, str) or not folder_id.strip():
             raise CronError('folder_required', '定时任务必须绑定真实目录')
@@ -107,9 +152,8 @@ class CronService:
         config = JobConfig.model_validate(value or {})
         if config.schedule.kind == 'every' and not config.schedule.anchor_at:
             config.schedule.anchor_at = config.schedule.start_at or iso(now)
-        validate_calendar_coverage(config.schedule, now)
-        # Validate existence of a future match, including rare calendar expressions.
-        next_time(config.schedule, now)
+        # An unpublished year is a recoverable wait, not invalid configuration.
+        self.schedule_next(config.schedule, now)
         return config
 
     async def public(self, conn, row, *, folders=None):
@@ -177,10 +221,10 @@ class CronService:
             config = self.normalize(request.get('config'), now)
             await self.validate(owner, folder, config, enabled)
             same_schedule = old and JobConfig.model_validate_json(old['config_json']).schedule == config.schedule
-            next_at = old['next_run_at_ms'] if old and enabled and old['enabled'] and same_schedule else next_time(config.schedule, now) if enabled else None
-            state = 'armed' if next_at is not None else 'disabled' if not enabled else 'exhausted' if config.schedule.end_at else 'missed'
             if old and enabled and old['enabled'] and same_schedule:
-                state = old['schedule_state']
+                next_at, state = old['next_run_at_ms'], old['schedule_state']
+            else:
+                next_at, state = self.schedule_next(config.schedule, now) if enabled else (None, 'disabled')
             job_id = job_id or uid()
             if old:
                 await conn.execute('UPDATE cron_jobs SET name=?,description=?,enabled=?,revision=revision+1,config_json=?,next_run_at_ms=?,schedule_state=?,updated_at_ms=? WHERE job_id=?',
@@ -204,8 +248,10 @@ class CronService:
             if type(enabled) is not bool: raise CronError('invalid_enabled')
             config = JobConfig.model_validate_json(row['config_json'])
             if enabled: await self.validate(owner, row['folder_id'], config, True)
-            next_at = row['next_run_at_ms'] if enabled and row['enabled'] else next_time(config.schedule, self.clock()) if enabled else None
-            state = row['schedule_state'] if enabled and row['enabled'] else 'armed' if next_at else ('exhausted' if config.schedule.end_at else 'missed') if enabled else 'disabled'
+            if enabled and row['enabled']:
+                next_at, state = row['next_run_at_ms'], row['schedule_state']
+            else:
+                next_at, state = self.schedule_next(config.schedule, self.clock()) if enabled else (None, 'disabled')
             await conn.execute('UPDATE cron_jobs SET enabled=?,next_run_at_ms=?,schedule_state=?,revision=revision+1,updated_at_ms=? WHERE job_id=?',
                                (int(enabled), next_at, state, self.clock(), job_id))
             result = {'job': await self.public(conn, await self.row(conn, owner, job_id))}
@@ -278,21 +324,29 @@ class CronService:
         now = self.clock()
         async with self.db.write_transaction(label='cron-startup') as conn:
             await conn.execute("UPDATE cron_runs SET status='interrupted',outcome='interrupted',phase='finished',error='服务重启中断，未自动重跑',finished_at_ms=?,notification_state='pending' WHERE status IN ('starting','running')", (now,))
-            for row in await many(conn, 'SELECT * FROM cron_jobs WHERE enabled=1 AND deleted_at_ms IS NULL AND next_run_at_ms<?', (now,)):
+            for row in await many(conn, 'SELECT * FROM cron_jobs WHERE enabled=1 AND deleted_at_ms IS NULL'):
                 cfg = JobConfig.model_validate_json(row['config_json'])
-                next_at = next_time(cfg.schedule, now)
-                await conn.execute('UPDATE cron_jobs SET next_run_at_ms=?,schedule_state=? WHERE job_id=?', (next_at, 'armed' if next_at is not None else 'exhausted' if cfg.schedule.end_at else 'missed', row['job_id']))
+                if row['schedule_state'] == 'target_missing':
+                    continue
+                if cfg.schedule.skip_holidays or row['next_run_at_ms'] is not None and row['next_run_at_ms'] < now:
+                    next_at, state = self.schedule_next(cfg.schedule, now)
+                    await conn.execute('UPDATE cron_jobs SET next_run_at_ms=?,schedule_state=? WHERE job_id=?', (next_at, state, row['job_id']))
         from app.cron.notifications import deliver
         for run in await many(self.db.conn, "SELECT * FROM cron_runs WHERE notification_state='pending' AND phase='finished'"):
             await deliver(self, run)  # Only idempotent channel enqueue, never business replay.
         self.closing = False
         self.loop_task = asyncio.create_task(self.loop(), name='cron-calendar')
+        self.holiday_loop_task = asyncio.create_task(self.holiday_loop(), name='cron-holiday-daily')
 
     async def close(self):
         self.closing = True; self.wake.set()
         if self.loop_task:
             self.loop_task.cancel()
             with contextlib.suppress(asyncio.CancelledError): await self.loop_task
+        for task in (self.holiday_loop_task, self.holiday_refresh_task):
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError): await task
         for task in list(self.tasks.values()): task.cancel()
         await asyncio.gather(*list(self.tasks.values()), return_exceptions=True)
 
@@ -319,10 +373,19 @@ class CronService:
                 if cfg.schedule.end_at and now >= timestamp(cfg.schedule.end_at):
                     await conn.execute("UPDATE cron_jobs SET next_run_at_ms=NULL,schedule_state='exhausted' WHERE job_id=?", (row['job_id'],))
                     continue
-                run = await self.accept_run(conn, row, due, 'scheduled', f'scheduled:{row["job_id"]}:{due}')
-                next_at = next_time(cfg.schedule, max(now, due))
-                await conn.execute('UPDATE cron_jobs SET next_run_at_ms=?,schedule_state=? WHERE job_id=?', (next_at, 'armed' if next_at is not None else 'exhausted', row['job_id']))
-                accepted.append(run)
+                # Recheck a persisted due time against the current calendar.
+                # Missing next-year data must not roll back today's accepted run.
+                allowed = True
+                if cfg.schedule.skip_holidays:
+                    try:
+                        allowed = not self.holidays.snapshot.is_day_off(datetime.fromtimestamp(due / 1000, ZoneInfo(cfg.schedule.timezone)).date())
+                    except MissingCalendar:
+                        allowed = False
+                if allowed:
+                    run = await self.accept_run(conn, row, due, 'scheduled', f'scheduled:{row["job_id"]}:{due}')
+                    accepted.append(run)
+                next_at, state = next_state(cfg.schedule, max(now, due), self.holidays.snapshot)
+                await conn.execute('UPDATE cron_jobs SET next_run_at_ms=?,schedule_state=? WHERE job_id=?', (next_at, state, row['job_id']))
         for row in accepted: self.launch(row)
 
     @staticmethod
@@ -395,4 +458,5 @@ class CronService:
         return result
 
     def preview(self, request):
-        return {'times': preview(Schedule.model_validate(request.get('schedule')), self.clock(), request.get('count', 5))}
+        return {**preview_details(Schedule.model_validate(request.get('schedule')), self.clock(), request.get('count', 5), self.holidays.snapshot),
+                'holidayCalendar': self.holiday_status()}

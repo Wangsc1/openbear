@@ -114,6 +114,30 @@ async def test_config_store_snapshot_refuses_to_overwrite_newer_change(tmp_path:
     assert raw["ui"]["editThrottleMs"] == 2200
 
 
+async def test_user_message_template_store_roundtrip_and_invalid_save_is_atomic(tmp_path: Path):
+    path = tmp_path / "openbear.json"
+    path.write_text(json.dumps(_sample_config()), encoding="utf-8")
+    store = ConfigStore(path)
+    initial = path.read_bytes()
+    cfg = await store.load_config()
+    assert cfg.user_message_template.enabled is True
+    assert path.read_bytes() == initial  # Defaults are not written into an existing file on load.
+
+    template = "@if message.id\n[[ message.id ]]\n@endif"
+    cfg = await store.update_path("userMessageTemplate.template", template)
+    assert cfg.user_message_template.template == template
+    snapshot, revision = path.read_bytes(), store.revision
+    with pytest.raises(ValueError):
+        await store.update_path("userMessageTemplate.template", "[[ tools.allowlist ]]")
+    assert path.read_bytes() == snapshot
+    assert store.revision == revision
+    cfg = await store.update_path("userMessageTemplate.enabled", False)
+    assert cfg.user_message_template.enabled is False
+    cfg = await store.update_path("userMessageTemplate.template", "")
+    assert cfg.user_message_template.template == ""
+    assert json.loads(path.read_text())["userMessageTemplate"] == {"enabled": False, "template": ""}
+
+
 async def test_config_store_validation_failure_keeps_original_file(tmp_path: Path):
     path = tmp_path / "openbear.json"
     original = _sample_config()

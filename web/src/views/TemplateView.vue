@@ -7,7 +7,7 @@ import hljs from "highlight.js";
 import "highlight.js/styles/github.css";
 import {Api, apiError} from "../api";
 import {mobileSelectOptions} from "../mobileSelect.js";
-import MdEditor from "../components/AdaptiveMdEditor.vue";
+import PromptTemplateEditor from "../components/PromptTemplateEditor.vue";
 import MobileAdminSummary from "../components/MobileAdminSummary.vue";
 
 const templates = ref([]);
@@ -416,7 +416,7 @@ const SAMPLE = `You are OpenBear, a capable AI assistant operating inside a priv
 			<template v-if="editing">
 				<section id="template-editor-pane" class="template-editor-pane flex-[1.18] min-w-0 flex flex-col p-4 gap-3 border-r border-macborder">
 					<div class="flex-1 min-h-0">
-						<MdEditor v-model="editing.content" completion-mode="template"/>
+						<PromptTemplateEditor v-model="editing.content"/>
 					</div>
 				</section>
 				

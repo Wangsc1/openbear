@@ -112,7 +112,8 @@ async def test_failed_run_restores_pending_steer_before_new_input_without_changi
 
         dao = MessageDAO(web_env.db)
         restored = await build_controller_history(dao, chat)
-        restored_old = next(m for m in restored if m.get("content") == old_input)
+        restored_old = next(m for m in restored if str(m.get("content", "")).split("\n\n[⏰", 1)[0] == old_input)
+        assert restored_old["content"] == user_contents[1]
         assert source_of(restored_old)["turn_uuid"] == old_root
         assert source_of(restored_old)["run_root_turn_uuid"] == old_root
         cur = await web_env.db.conn.execute("SELECT id,role,content,turn_uuid,run_root_turn_uuid FROM messages WHERE chat_id=? ORDER BY id", (chat,))
@@ -125,7 +126,7 @@ async def test_failed_run_restores_pending_steer_before_new_input_without_changi
         # A later normal request must neither drain nor persist the old item twice.
         _, third = await send("NEXT ordinary input")
         assert await asyncio.wait_for(third, 3) is True
-        assert sum(m.get("content") == old_input for m in backend.seen_convos[-1]) == 1
+        assert sum(m.get("content") == restored_old["content"] for m in backend.seen_convos[-1]) == 1
         cur = await web_env.db.conn.execute("SELECT COUNT(*) FROM messages WHERE chat_id=? AND content=?", (chat, old_input))
         assert (await cur.fetchone())[0] == 1
     finally:

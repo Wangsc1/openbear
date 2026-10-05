@@ -2,16 +2,22 @@
 
 [system] ← prompt-memory /system-prompt/build（传入 toolNames/skillsPrompt/workspaceDir 等参数）
 [history] ← independent saved window + newer original SQLite messages
-[user]    ← 本轮消息 + [⏰ 当前时间] 后缀
+[user]    ← 本轮消息 + 可配置用户消息尾部模板
 """
 from __future__ import annotations
 
 import os
 import platform
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from app.agent.transcript_repair import repair_tool_pairing
 from app.context.store import ContextOwner, WindowStore
+from app.context.user_message_template import (
+    append_user_message_suffix,
+    build_message_variables,
+    render_user_message_suffix,
+)
 from app.context.window import mark_source
 from app.db.dao import MessageDAO, SummaryDAO
 from app.llm.base import Message
@@ -20,10 +26,10 @@ from app.memory.client import MemoryClient
 from app.agents.controller_projection import project_history_message_for_controller
 from app.tools.base import ToolRegistry
 from app.tools.skills import Skill, render_skills_block
-from app.utils import now_cn
 
 if TYPE_CHECKING:
     from app.agents.dao import AgentDAO
+    from app.config import UserMessageTemplateConfig
 
 log = get_logger("context.builder")
 
@@ -200,7 +206,8 @@ async def build_controller_history(
 class ContextBuilder:
     def __init__(self, mem: MemoryClient, messages: MessageDAO, summaries: SummaryDAO,
                  skills: list[Skill], tools: ToolRegistry, workspace_dir: str,
-                 agent_dao: AgentDAO | None = None, mcp_manager: Any = None) -> None:
+                 agent_dao: AgentDAO | None = None, mcp_manager: Any = None,
+                 user_message_template: UserMessageTemplateConfig | Mapping[str, Any] | None = None) -> None:
         self._mem = mem
         self._messages = messages
         self._summaries = summaries
@@ -209,6 +216,7 @@ class ContextBuilder:
         self._workspace_dir = workspace_dir
         self._agent_dao = agent_dao
         self._mcp_manager = mcp_manager
+        self._user_message_template = user_message_template
 
     async def _available_agents_for_prompt(self) -> list[dict[str, Any]]:
         if self._agent_dao is None:
@@ -271,17 +279,9 @@ class ContextBuilder:
     async def build_history(self, chat_id: int) -> list[Message]:
         return await build_controller_history(self._messages, chat_id)
 
-    def wrap_user(self, text) -> Message:
-        if isinstance(text, list):
-            blocks = [dict(b) if isinstance(b, dict) else b for b in text]
-            now_block = {"type": "text", "text": f"[⏰ 当前时间: {now_cn()}]"}
-            if blocks and isinstance(blocks[-1], dict) and blocks[-1].get("type") == "text":
-                block = dict(blocks[-1])
-                block["text"] = f"{block.get('text') or ''}\n\n{now_block['text']}"
-                blocks[-1] = block
-            else:
-                # 多模态用户消息常以 image block 结尾；补一个末尾 text block，避免
-                # Anthropic prompt-cache 断点被加到图片块上，并保持时间后缀可读。
-                blocks.append(now_block)
-            return {"role": "user", "content": blocks}
-        return {"role": "user", "content": f"{text}\n\n[⏰ 当前时间: {now_cn()}]"}
+    def wrap_user(self, text: str | list[Any], *, variables: Mapping[str, Any] | None = None) -> Message:
+        """封装一次新消息；调用方可传固定变量快照，重试应复用返回消息。"""
+        if variables is None:
+            variables = build_message_variables(workspace=self._workspace_dir)
+        suffix = render_user_message_suffix(self._user_message_template, variables)
+        return {"role": "user", "content": append_user_message_suffix(text, suffix)}

@@ -6,7 +6,7 @@
 
 Job：`{id,folderId,folderName,folderPath,name,description,enabled,revision,config,nextRunAt,scheduleState,activeRuns,lastRun,createdAt,updatedAt}`。
 
-- scheduleState: armed/disabled/exhausted/missed/target_missing/deleted。
+- scheduleState: armed/disabled/exhausted/missed/waiting_calendar/target_missing/deleted。waiting_calendar 表示缺少候选执行日期的调休数据，nextRunAt 为 null；数据补齐后自动计算未来时间，不补跑。
 - activeRuns 是次数，lastRun 为Run摘要或null。folderId创建后不可修改。
 - config：
 ```json
@@ -48,10 +48,22 @@ phase：starting/pre/model/post/finished。trigger scheduled/manual。
 - GET `/api/cron/runs?jobId=&folderId=&status=&start=&end=&limit=30&offset=0` → `{items,total}`。start/end为ISO或毫秒，按startedAt筛选。
 - GET `/api/cron/runs/{id}` → `{run}`。
 - POST `/api/cron/runs/{id}/stop` `{requestId}` → `{run,...stopResult}`。供工具复用对应会话停止；前端打开会话使用已有停止。
-- POST `/api/cron/preview-next` `{schedule,count:5}` → `{times:[ISO...]}`。不执行业务。
+- POST `/api/cron/preview-next` `{schedule,count:5}` → `{times:[ISO...],scheduleState,waitingYears,holidayCalendar,message?}`。不执行业务；跨年缺数据时保留已知的预览日期并返回等待提示，不报配置错误。
+- GET `/api/cron/holidays` → `{holidayCalendar}`；含覆盖年份 years、来源 source/sourceUrl、lastCheckedAt、lastSuccessAt、updatedAt、各年内容 SHA256 versions、公告 papers、lastError、unavailableYears、syncing。
+- POST `/api/cron/holidays/sync` `{}` → `{holidayCalendar}`。仅已登录管理端可触发；后台执行，同步中重复请求复用同一任务，返回成功不代表数据已更新。日历页面定期刷新状态。
 - GET `/api/cron/folders` → `{items:[{id,name,path,parentId}]}`。保留目录现有顺序；目录属性入口使用folderId筛选。
 - GET `/api/cron/environment` → `{runtimes,defaultCwd}`，runtime结构复用Webhook环境查询；模型选项和目录继承继续使用现有Api.rathOptions及conversationFolderProperties。
 - GET `/api/cron/statistics?jobId=&folderId=&start=&end=` → `{runs,completed,failed,cancelled,interrupted,limited,active,totalTokens,costUsd,averageDurationSeconds}`，终态时长平均，不做高级指标。
+
+## 中国大陆调休日历
+
+`skipHolidays:true` 跳过周末与法定休息日，调休补班优先；按规则时区判断日期。重复任务的 `startAt`（含）和 `endAt`（不含）均可选，不再要求结束日期或整个未来范围已有数据。未知日期不按普通周末规则猜测，进入可恢复的等待状态；手动立即运行仍是独立操作。
+
+服务启动后后台同步，此后每 24 小时检查一次 [holiday-cn](https://github.com/NateScarlet/holiday-cn)（社区整理官方公告，MIT 许可，不是政府 API）。首次发现并补齐已公布历年数据，之后重查当前年及相邻年，并补齐发现的缺年。只下载 JSON，不执行远程代码，不调用模型，不创建用户 Cron 任务。
+
+缓存为数据库所在目录的 `cron-holidays-cn.json`，与应用版本独立；内置 `holidays_cn.json` 仅作离线底本。年度字段、政府公告来源、日期范围、布尔值、重复冲突及年度节假日跨度通过校验后，原子写入缓存。404、空占位或下载/校验失败不覆盖有效年度数据。未来公告未公布属于等待；已有年度意外变空会报告错误并保留旧数据。
+
+新增或修订数据会重算启用且使用该日历的任务；页面投影、预览与实际触发共享服务实例快照，更新不需重启。同步只安排更新时刻之后的日期，不补跑已错过日期，不修改任务配置/revision或历史运行。重启先加载本地缓存并修复排程，再在后台联网检查。
 
 ## 界面
 

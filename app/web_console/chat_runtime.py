@@ -7,6 +7,8 @@ from app.agent.native_continuation import deserialize_messages, validate_model_c
 from app.context.configuration import conversation_strategy
 from app.context.editor import branch_settings, EditedToolRegistry
 from app.context.prompts import effective_context_prompt
+from app.context.prompt_policy import PromptToolRegistry, policy_tool_names
+from app.context.user_message_template import build_message_variables, render_user_message_suffix, append_user_message_suffix
 from app.context.resume import restore_controller_run_inputs
 from app.context.runtime import ContextManager
 from app.context.store import ContextOwner, WindowStore
@@ -48,6 +50,7 @@ class WebAdminChatRunMixin:
         background_control_payload: dict[str, Any] | None = None,
         root_turn_uuid: str = "",
         user_op_id: str = "",
+        user_message_source: str = "web",
         reference_bundle_id: str = "",
         webhook_assignment_id: str = "",
         webhook_resume_message_id: int = 0,
@@ -103,16 +106,47 @@ class WebAdminChatRunMixin:
             edited_context = await branch_settings(self.db, conversation_uuid)
             run_tools = EditedToolRegistry(self.tools, edited_context['tools']) if edited_context else self.tools
             prompt_builder = self._build_system_prompt_for_chat
-            # Keep compatibility with focused tests/integrations that replace the
-            # historical no-argument builder while production passes the owning
-            # conversation explicitly for folder inheritance.
-            if edited_context:
-                system_live = edited_context['system']
-            elif "conversation_uuid" in inspect.signature(prompt_builder).parameters:
-                system_live = await prompt_builder(conversation_uuid=conversation_uuid)
+            cached_system = await messages.get_system_snapshot(chat_id)
+            if edited_context or cached_system:
+                system = edited_context['system'] if edited_context else cached_system
+                active_policy = await self._active_prompt_policy(conversation_uuid)
+                system_live = system
             else:
-                system_live = await prompt_builder()
-            system = edited_context['system'] if edited_context else await messages.get_or_set_system_snapshot(chat_id, system_live)
+                # Resolve and freeze one complete policy, not a separately read
+                # template and tool list. Future-only saves cannot affect it.
+                async with self._conversation_tree_lock:
+                    live_policy = await self._resolved_prompt_policy(conversation_uuid)
+                    signature = inspect.signature(prompt_builder).parameters
+                    kwargs = {'conversation_uuid': conversation_uuid} if 'conversation_uuid' in signature else {}
+                    if 'prompt_policy' in signature:
+                        kwargs['prompt_policy'] = live_policy
+                    system_live = await prompt_builder(**kwargs)
+                    system, active_policy = await self._select_prompt_snapshot(chat_id, conversation_uuid, system_live, live_policy)
+            if active_policy['overrideSystemPrompt']:
+                run_tools = PromptToolRegistry(run_tools, policy_tool_names(active_policy))
+            inject_memories = not edited_context and not active_policy['overrideSystemPrompt']
+            inject_suffix = not active_policy['overrideSystemPrompt'] or active_policy['userMessageTemplateEnabled']
+            template_settings = self.config.user_message_template.model_copy(deep=True)
+            folders = await self._tree_context_folders((conversation or {}).get('owner_chat_id', 0)) if conversation else {}
+            folder_id = str((conversation or {}).get('folder_uuid') or '')
+            workspace = self._tree_effective_from_map(folder_id, folders, str(getattr(self, 'workspace_dir', '') or ''))[0]
+            template_conversation = {'id': conversation_uuid, 'title': (conversation or {}).get('title', ''),
+                'folderPath': self._tree_folder_path_text(folder_id or '__temporary', folders)}
+
+            def message_with_suffix(content, *, source='web', message_id='', attachments=None):
+                if not inject_suffix or source not in {'web', 'telegram'}:
+                    return content
+                variables = build_message_variables(source=source, message_id=message_id, conversation=template_conversation,
+                    model=model_label, workspace=workspace, attachments=attachments)
+                return append_user_message_suffix(content, render_user_message_suffix(template_settings, variables))
+
+            def steer_model_text(text, items):
+                humans = [item for item in items if isinstance(item, dict) and item.get('source') in {'web', 'telegram'}]
+                if not humans:
+                    return text
+                return message_with_suffix(text, source=humans[-1]['source'],
+                    message_id=str(humans[-1].get('messageUuid') or humans[-1].get('id') or ''))
+
             if not edited_context:
                 system = effective_context_prompt(system, await conversation_strategy(self.db, conversation_uuid, self.config.context_management.default_strategy))
             # The live render is only a candidate; the frozen value below is the
@@ -231,7 +265,7 @@ class WebAdminChatRunMixin:
                     steering.drain_items(chat_id, item_ids={str(item["id"])})
                     bundles = [str(item["referenceBundleId"])] if item.get("referenceBundleId") else []
                     history.append(mark_source(
-                        {"role": "user", "content": text, **({BUNDLE_FIELD: bundles} if bundles else {})},
+                        {"role": "user", "content": steer_model_text(text, [item]), **({BUNDLE_FIELD: bundles} if bundles else {})},
                         kind="human", source_id=f"message:{message_id}", message_id=message_id,
                         turn_uuid=turn, run_root_turn_uuid=original_root, reference_only=not bundles,
                     ))
@@ -257,7 +291,6 @@ class WebAdminChatRunMixin:
                     + json.dumps(background_control_payload, ensure_ascii=False, indent=2, default=str)
                     + "\n</background-agent-control-context>"
                 )
-            llm_text = f"{llm_text}\n\n[⏰ 当前时间: {now_cn()}]"
             user_msg: Message = {
                 "role": "user",
                 "content": build_llm_content(llm_text, media or []),
@@ -275,7 +308,9 @@ class WebAdminChatRunMixin:
             task_memory_epoch = task_memory_runtime_epoch(history)
 
             async def _refresh_task_memory_request(request_messages: list[Message]) -> list[Message]:
-                if edited_context:
+                if active_policy['overrideSystemPrompt']:
+                    return [m for m in request_messages if not is_task_memory_runtime_message(m)]
+                if not inject_memories:
                     return request_messages
                 return await reconcile_task_memory_runtime_state(
                     request_messages,
@@ -331,6 +366,10 @@ class WebAdminChatRunMixin:
             if not task_notification and not webhook_resume_message_id:
                 await messages.bump_user_turn(chat_id)
             user_saved = True
+            if not task_notification and not webhook_assignment_id and not cron_run_id:
+                user_msg['content'] = message_with_suffix(user_msg['content'], source=user_message_source,
+                    message_id=user_op_id.removeprefix('msg:') or str(user_message_id),
+                    attachments=[{'name': m.file_name, 'type': m.mime_type, 'kind': m.kind, 'size': m.size} for m in media or []])
             if conversation:
                 if not task_notification:
                     await self._maybe_title_web_conversation(conversation, visible_user_text)
@@ -992,6 +1031,7 @@ class WebAdminChatRunMixin:
                 window_runtime=window_runtime,
                 window_request_refresher=_refresh_window_request,
                 steer_drain=lambda: steering.drain_items(chat_id),
+                steer_model_text=steer_model_text,
                 model_request_refresher=_refresh_task_memory_request,
                 model_request_overlay=_reference_request_overlay,
                 model_call_hook=_model_call_hook,

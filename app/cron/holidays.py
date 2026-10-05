@@ -1,10 +1,4 @@
-"""Offline mainland-China days off and display-only date labels.
-
-The bundled data transcribes the State Council's published annual notice; its
-URL, document number, publication date and retrieval date are in holidays_cn.json.
-Only explicitly covered years permit scheduling decisions. Callers supply a date
-in their intended timezone; this module does not convert timestamps or use a clock.
-"""
+"""Offline calendar snapshots; runtime updates replace a whole snapshot at once."""
 from __future__ import annotations
 
 import json
@@ -12,78 +6,83 @@ from datetime import date, timedelta
 from importlib.resources import files
 
 
-def _load_calendar() -> tuple[dict, dict[date, str], set[date]]:
+class MissingCalendar(ValueError):
+    def __init__(self, year: int):
+        self.year = year
+        super().__init__(f"缺少 {year} 年中国大陆放假调休数据，无法判断休息日")
+
+
+class CalendarSnapshot:
+    def __init__(self, records: dict[int, dict], source: str):
+        self.years = frozenset(records)
+        self.source = source
+        self._days = {}
+        # A following year's notice can also arrange the previous December.
+        # Later annual notices take precedence over the earlier annual table.
+        for year in sorted(records):
+            for item in records[year]["days"]:
+                self._days[date.fromisoformat(item["date"])] = (item["name"], item["isOffDay"])
+
+    def coverage(self) -> dict:
+        return {"country": "CN", "years": sorted(self.years), "source": self.source}
+
+    def holiday_info(self, day: date) -> dict:
+        known = day.year in self.years or day in self._days
+        tags = []
+        entry = self._days.get(day)
+        if entry is not None:
+            name, day_off = entry
+            tags.append({"label": name if day_off else "调休班", "kind": "holiday" if day_off else "workday"})
+        else:
+            day_off = day.weekday() >= 5
+            if day_off:
+                tags.append({"label": "周末", "kind": "weekend"})
+        if day.month == 11:
+            first = date(day.year, 11, 1)
+            black_friday = first + timedelta(days=(3 - first.weekday()) % 7 + 21 + 1)
+            if day == black_friday:
+                tags.append({"label": "黑五", "kind": "special"})
+        if (day.month, day.day) == (12, 25):
+            tags.append({"label": "圣诞节", "kind": "special"})
+        return {"date": day.isoformat(), "known": known, "isDayOff": day_off if known else None, "tags": tags}
+
+    def is_day_off(self, day: date) -> bool:
+        result = self.holiday_info(day)["isDayOff"]
+        if result is None:
+            raise MissingCalendar(day.year)
+        return result
+
+
+def _bundled():
     data = json.loads(files(__package__).joinpath("holidays_cn.json").read_text(encoding="utf-8"))
-    holidays: dict[date, str] = {}
-    workdays: set[date] = set()
-    for entries in data["years"].values():
+    records = {}
+    for year, entries in data["years"].items():
+        days = []
         for entry in entries:
             start, end = date.fromisoformat(entry["start"]), date.fromisoformat(entry["end"])
-            for offset in range((end - start).days + 1):
-                holidays[start + timedelta(days=offset)] = entry["label"]
-            workdays.update(date.fromisoformat(value) for value in entry["workdays"])
-    return data, holidays, workdays
+            days.extend({"date": (start + timedelta(days=n)).isoformat(), "name": entry["label"], "isOffDay": True}
+                        for n in range((end - start).days + 1))
+            days.extend({"date": value, "name": entry["label"], "isOffDay": False} for value in entry["workdays"])
+        records[int(year)] = {"year": int(year), "papers": [data["source"]["url"]], "days": days}
+    source = data["source"]
+    label = (f'{source["publisher"]}《{source["title"]}》'
+             f'（{source["documentNumber"]}，{source["publishedOn"]}） {source["url"]}')
+    return records, label
 
 
-_DATA, _HOLIDAYS, _WORKDAYS = _load_calendar()
-_YEARS = frozenset(int(year) for year in _DATA["years"])
+BUNDLED_RECORDS, _SOURCE = _bundled()
+DEFAULT_CALENDAR = CalendarSnapshot(BUNDLED_RECORDS, _SOURCE)
 
 
-def coverage() -> dict:
-    """Return the bundled (not predicted) calendar's country, years and source."""
-    source = _DATA["source"]
-    return {
-        "country": "CN",
-        "years": sorted(_YEARS),
-        "source": (
-            f'{source["publisher"]}《{source["title"]}》'
-            f'（{source["documentNumber"]}，{source["publishedOn"]}） {source["url"]}'
-        ),
-    }
+# Pure callers and packaged/offline use retain the bundled baseline. Each live
+# CronService supplies its own snapshot rather than mutating these module globals.
+def coverage():
+    return DEFAULT_CALENDAR.coverage()
 
 
-def holiday_info(day: date) -> dict:
-    """Return date, known, isDayOff and independent display tags.
-
-    Official makeup workdays override weekends. Only ordinary weekends get a
-    weekend tag (holiday/workday tags take precedence). In uncovered years a
-    weekend tag is still a calendar fact, but isDayOff remains None. Black Friday
-    and Christmas are display-only and never affect the scheduling decision.
-    """
-    known = day.year in _YEARS
-    tags = []
-    if day in _WORKDAYS:
-        day_off = False
-        tags.append({"label": "调休班", "kind": "workday"})
-    elif day in _HOLIDAYS:
-        day_off = True
-        tags.append({"label": _HOLIDAYS[day], "kind": "holiday"})
-    else:
-        day_off = day.weekday() >= 5
-        if day_off:
-            tags.append({"label": "周末", "kind": "weekend"})
-
-    if day.month == 11:
-        first = date(day.year, 11, 1)
-        # US Thanksgiving is the fourth Thursday; its following Friday can be
-        # November's FIFTH Friday (e.g. 2024-11-29), not always the fourth.
-        black_friday = first + timedelta(days=(3 - first.weekday()) % 7 + 21 + 1)
-        if day == black_friday:
-            tags.append({"label": "黑五", "kind": "special"})
-    if (day.month, day.day) == (12, 25):
-        tags.append({"label": "圣诞节", "kind": "special"})
-
-    return {
-        "date": day.isoformat(),
-        "known": known,
-        "isDayOff": day_off if known else None,
-        "tags": tags,
-    }
+def holiday_info(day: date):
+    return DEFAULT_CALENDAR.holiday_info(day)
 
 
-def is_day_off(day: date) -> bool:
-    """Return a confirmed day-off decision, or refuse an uncovered year."""
-    result = holiday_info(day)["isDayOff"]
-    if result is None:
-        raise ValueError(f"缺少 {day.year} 年中国大陆放假调休数据，无法判断休息日")
-    return result
+def is_day_off(day: date):
+    return DEFAULT_CALENDAR.is_day_off(day)

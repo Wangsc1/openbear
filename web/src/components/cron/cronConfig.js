@@ -40,7 +40,7 @@ export function pickerDate(value) {
 export function pickerIso(value) {
   return value && Number.isFinite(value.getTime?.()) ? value.toISOString() : null;
 }
-const labels = {starting:'启动中', running:'运行中', completed:'已完成', failed:'失败', timed_out:'执行超时', tokens_exceeded:'Tokens 超限', cost_exceeded:'金额超限', cancelled:'已取消', interrupted:'已中断', post_failed:'后置失败', missed:'已错过', armed:'已就绪', disabled:'已停用', exhausted:'计划已结束', target_missing:'目录不可用', deleted:'已删除', pre:'前置脚本', model:'模型执行', post:'后置脚本', finished:'结束', scheduled:'定时', manual:'手动'};
+const labels = {starting:'启动中', running:'运行中', completed:'已完成', failed:'失败', timed_out:'执行超时', tokens_exceeded:'Tokens 超限', cost_exceeded:'金额超限', cancelled:'已取消', interrupted:'已中断', post_failed:'后置失败', missed:'已错过', armed:'已就绪', disabled:'已停用', exhausted:'计划已结束', waiting_calendar:'等待日历数据', target_missing:'目录不可用', deleted:'已删除', pre:'前置脚本', model:'模型执行', post:'后置脚本', finished:'结束', scheduled:'定时', manual:'手动'};
 export const label = value => labels[value] || value || '—';
 export const clone = value => JSON.parse(JSON.stringify(value));
 export const message = error => error?.response?.data?.message || error?.message || '请求失败，请重试';
@@ -100,7 +100,6 @@ export function scheduleErrors(schedule) {
     if (String(schedule.expression || '').trim().split(/\s+/).length !== 5) add('expression','Cron 表达式须为五段；具体规则由服务器预览校验');
     if(schedule.second!=null && (!Number.isInteger(schedule.second) || schedule.second<0 || schedule.second>59))add('second','秒数须为 0–59 的整数');
   }
-  if(schedule.skipHolidays && schedule.kind!=='at' && !schedule.endAt)add('endAt','跳过休息日需要设置结束时间');
   if(schedule.kind!=='at') {
     for (const [field,title] of [['startAt','开始时间'],['endAt','结束时间']]) if(schedule[field] && !validDate(schedule[field]))add(field,`请选择有效的${title}`);
     if(schedule.startAt && schedule.endAt && Date.parse(schedule.startAt)>=Date.parse(schedule.endAt))add('endAt','结束时间必须晚于开始时间');

@@ -2,7 +2,7 @@
 import pytest
 
 from app.cron.contracts import Schedule, timestamp
-from app.cron.schedule import next_time, preview
+from app.cron.schedule import next_time, preview, preview_details
 from tests.test_cron_calendar import env, job, params, base_env  # noqa: F401
 
 
@@ -36,8 +36,11 @@ def test_interval_skips_days_without_resetting_anchor():
 
 
 def test_unknown_year_and_all_skipped_range_are_explicit():
-    with pytest.raises(ValueError, match='2027'):
-        preview(Schedule.model_validate(rule(skipHolidays=True, endAt='2027-01-03T00:00:00+08:00')), timestamp('2026-10-05T00:00:00Z'))
+    schedule = Schedule.model_validate(rule(skipHolidays=True, endAt='2027-01-03T00:00:00+08:00'))
+    assert preview(schedule, timestamp('2026-10-05T00:00:00Z'))  # Known dates do not depend on a future year's notice.
+    waiting = preview_details(schedule, timestamp('2026-12-30T13:00:00+08:00'))
+    assert waiting['times'] == ['2026-12-31T04:00:23Z']
+    assert waiting['waitingYears'] == [2027]
     assert preview(Schedule.model_validate(rule(skipHolidays=True, endAt='2026-10-08T00:00:00+08:00')), timestamp('2026-10-05T00:00:00Z')) == []
 
 

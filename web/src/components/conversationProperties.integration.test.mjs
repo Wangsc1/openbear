@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import * as Vue from 'vue';
 import {parse} from '@vue/compiler-sfc';
+import * as promptPolicy from './promptPolicy.js';
 import {updateRunDefault,runDefaultOption} from './folderRunDefaults.js';
 import {tabKey} from './webhooks/webhookConfig.js';
 import {runConfigFromResponse} from '../views/consoleView/runConfigState.js';
@@ -14,10 +15,10 @@ const flush=async()=>{for(let i=0;i<6;i++) await Promise.resolve();};
 function harness(overrides={}) {
   const props=Vue.reactive({modelValue:true,conversation:{conversationUuid:'C1',title:'one'},initialTab:'context'});
   const calls=[],toasts=[];
-  const ctx={...Vue,watch:()=>{},onBeforeUnmount:()=>{},defineProps:()=>props,defineEmits:()=>()=>{},defineExpose:()=>{},inject:(_key,fallback)=>async(id,request)=>{calls.push(['queue',id]);return request();},
+  const ctx={...Vue,...promptPolicy,watch:()=>{},onBeforeUnmount:()=>{},defineProps:()=>props,defineEmits:()=>()=>{},defineExpose:()=>{},inject:(_key,fallback)=>async(id,request)=>{calls.push(['queue',id]);return request();},
     modelThinkingLevels:()=>['off','high'],thinkingLabel:x=>x,tabKey,updateRunDefault,runDefaultOption,runConfigFromResponse,apiError:e=>e.message,
     ElMessage:{success:s=>toasts.push(s)},ElMessageBox:{confirm:async()=>{throw 'close';}},
-    Api:{conversationProperties:async id=>({properties:{contextMode:'inherit',contextText:'',inheritedContext:id},runConfig:runConfig(id,'M1')}),conversationState:async()=>{throw new Error('Property dialogs must not load conversation history');},rathOptions:async()=>({models:[{key:'M1'}]}),
+    Api:{conversationPropertiesImpact:async()=>({affectedCount:0}),conversationProperties:async id=>({properties:{contextMode:'inherit',contextText:'',inheritedContext:id},runConfig:runConfig(id,'M1')}),conversationState:async()=>{throw new Error('Property dialogs must not load conversation history');},rathOptions:async()=>({models:[{key:'M1'}]}),
       conversationSetModel:async(id,model)=>{calls.push(['model',id,model]);return {runConfig:runConfig(id,model)};},
       updateConversationProperties:async(id,data)=>{calls.push(['context',id,data]);return {properties:data};},...overrides},console};
   vm.createContext(ctx);vm.runInContext(source,ctx);return {props,calls,toasts,run:code=>vm.runInContext(code,ctx)};
@@ -99,7 +100,7 @@ test('unset main thinking displays the effective level without writing a setting
 test('F02 actual conversation model mutation uses the composer injection and adopts the returned state',async()=>{
   const h=harness();await h.run('load()');await h.run("mutate('model','M2')");assert.deepEqual(h.calls.slice(0,2),[['queue','C1'],['model','C1','M2']]);assert.equal(h.run('model.value.model'),'M2');
 });
-test('F02 local context save never updates a frozen prompt snapshot',async()=>{
+test('context save with no impacted sessions defaults to no snapshot update',async()=>{
   const h=harness();await h.run('load()');h.run("context.value.contextMode='override';context.value.contextText='project only'");assert.equal(await h.run('saveContext()'),true);assert.equal(h.calls.length,1);assert.equal(h.calls[0][0],'context');assert.equal(h.calls[0][2].contextText,'project only');assert.equal(h.run('dirtyContext.value'),false);
 });
 test('F12 a late context save for the previous conversation cannot overwrite the new one',async()=>{
@@ -113,4 +114,36 @@ test('shared selectors save conversation Fast=false and compression through the 
  const requests=[];const h=harness({conversationSetFast:async(id,value)=>{requests.push(['fast',id,value]);return {runConfig:{...runConfig(id,'M1'),fastRequested:value}};},conversationSetContextStrategy:async(id,value)=>{requests.push(['strategy',id,value]);return {runConfig:{...runConfig(id,'M1'),contextStrategy:value}};}});
  await h.run('load()');await h.run("changeModelSetting('mainFastMode',runDefaultOption(false))");assert.deepEqual(requests[0],['fast','C1',false]);assert.equal(h.run('modelSettings.value.mainFastMode'),false);
  await h.run("changeModelSetting('contextStrategy',runDefaultOption('model_summary'))");assert.deepEqual(requests[1],['strategy','C1','model_summary']);assert.equal(h.run('modelSettings.value.contextStrategy'),'model_summary');assert.match(h.toasts.at(-1),/安全边界/);assert.equal(h.calls.filter(x=>x[0]==='queue').length,2);
+});
+
+for (const choice of [false,true,null]) {
+  test(`conversation policy impact choice ${choice} sends flags without legacy contextMode and preserves cancel draft`,async()=>{
+    const impacts=[];
+    const h=harness({conversationPropertiesImpact:async(id,payload)=>{impacts.push([id,JSON.parse(JSON.stringify(payload))]);return {affectedCount:1,updatableCount:1,runningCount:0};}});
+    await h.run('load()');
+    h.run("contextPolicy.value={text:'Custom [[ conversation.id ]]',overrideSystemPrompt:true,toolsEnabled:true,toolNames:['Read','removed'],userMessageTemplateEnabled:true}");
+    const payload={contextText:'Custom [[ conversation.id ]]',overrideSystemPrompt:true,toolsEnabled:true,toolNames:['Read','removed'],userMessageTemplateEnabled:true};
+    const pending=h.run('saveContext()');await flush();assert.equal(h.run('impactDialog.value'),true);assert.equal(h.calls.length,0);assert.deepEqual(impacts,[['C1',payload]]);
+    h.run(`finishImpact(${JSON.stringify(choice)})`);await pending;
+    if(choice===null){assert.equal(h.calls.length,0);assert.equal(h.run('dirtyContext.value'),true);}
+    else {assert.deepEqual(JSON.parse(JSON.stringify(h.calls[0][2])),{...payload,updateSnapshots:choice});assert.equal(h.run('dirtyContext.value'),false);}
+  });
+}
+
+test('conversation blank local policy never adopts inherited text or inherited flags on load or save',async()=>{
+  const inherited={text:'parent',overrideSystemPrompt:true,toolsEnabled:true,toolNames:['Read'],userMessageTemplateEnabled:true};
+  const local=promptPolicy.normalizePromptPolicy({text:'saved local'});
+  const h=harness({conversationProperties:async()=>({properties:{contextText:'saved local',promptPolicy:{local,inherited,effective:local,inheritedSourcePath:'/parent'}},runConfig:runConfig('C1','M1')})});
+  await h.run('load()');h.run(`contextEditorText.value=${JSON.stringify(" \n ")}`);
+  assert.equal(h.run('contextEditorText.value'),' \n ');assert.equal(h.run('inheritedPolicy.value.text'),'parent');
+  await h.run('saveContext()');assert.deepEqual(JSON.parse(JSON.stringify(h.calls[0][2])),{contextText:' \n ',...promptPolicy.promptPolicyFlags(),updateSnapshots:false});
+});
+
+test('late policy save keeps every subsequently changed field, not just text',async()=>{
+  const pending=defer();const h=harness({updateConversationProperties:()=>pending.promise});await h.run('load()');
+  h.run("contextPolicy.value={text:'submitted',overrideSystemPrompt:true,toolsEnabled:false,toolNames:[],userMessageTemplateEnabled:false}");
+  const saving=h.run('saveContext()');await flush();
+  h.run("contextPolicy.value={text:'later',overrideSystemPrompt:true,toolsEnabled:true,toolNames:['removed'],userMessageTemplateEnabled:true}");
+  pending.resolve({properties:{contextText:'submitted',overrideSystemPrompt:true,toolsEnabled:false,toolNames:[],userMessageTemplateEnabled:false}});
+  assert.equal(await saving,false);assert.deepEqual(JSON.parse(JSON.stringify(h.run('contextPolicy.value'))),{text:'later',overrideSystemPrompt:true,toolsEnabled:true,toolNames:['removed'],userMessageTemplateEnabled:true});assert.equal(h.run('dirtyContext.value'),true);
 });

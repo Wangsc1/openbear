@@ -122,8 +122,8 @@ async def test_conversation_properties_no_snapshot_computation_or_mutation(env, 
     assert initial['inheritedContext'] == initial['effectiveContext'] == 'Inherited context'
     assert 'snapshotFrozen' not in initial and 'snapshotUpdateRequired' not in initial
     cookies = {'openbear_web_session': await _login_cookie(env)}
-    for mode, text, effective in [('override', 'Local text', 'Local text'), ('inherit', 'Unsaved override retained', 'Inherited context')]:
-        response = await env.client.put(url, json={'contextMode': mode, 'contextText': text}, cookies=cookies)
+    for mode, text, effective in [('override', 'Local text', 'Local text'), ('inherit', '', 'Inherited context')]:
+        response = await env.client.put(url, json={'contextText': text}, cookies=cookies)
         assert response.status == 200
         saved = (await response.json())['properties']
         assert saved['contextMode'] == mode and saved['contextText'] == text and saved['effectiveContext'] == effective

@@ -207,6 +207,53 @@ async def test_webhook_capacity_settings_mb_contract_and_storage(admin_env):
     assert response.status == 200 and (await response.json())['value'] is None
 
 
+async def test_user_message_template_settings_preview_and_save(admin_env):
+    from app.context.user_message_template import DEFAULT_USER_MESSAGE_TEMPLATE, USER_MESSAGE_TEMPLATE_VARIABLES
+
+    spec_response = await admin_env.client.get("/api/settings/specs", cookies=admin_env.cookie)
+    spec = (await spec_response.json())["specs"]["userMessageTemplate.template"]
+    assert spec["editor"] == "template"
+    assert spec["defaultValue"] == DEFAULT_USER_MESSAGE_TEMPLATE
+    assert spec["variables"] == list(USER_MESSAGE_TEMPLATE_VARIABLES)
+    current = await admin_env.client.get("/api/settings", cookies=admin_env.cookie)
+    values = (await current.json())["values"]
+    assert values["userMessageTemplate.enabled"] is True
+    assert values["userMessageTemplate.template"] == DEFAULT_USER_MESSAGE_TEMPLATE
+
+    original = admin_env.cfg_path.read_bytes()
+    preview = await admin_env.client.post(
+        "/api/settings/prompt-preview", cookies=admin_env.cookie,
+        json={"path": "userMessageTemplate.template", "value": "[[ time.now ]] [[ message.source ]] {literal}",
+              "variables": {"time": {"now": "fixed-time"}, "message": {"source": "webhook"}}},
+    )
+    assert preview.status == 200
+    assert await preview.json() == {"ok": True, "path": "userMessageTemplate.template", "rendered": "fixed-time webhook {literal}"}
+    assert admin_env.cfg_path.read_bytes() == original  # Preview is read-only.
+    for template in ("[[ unsupported ]]", "@if time.now", "[[ time.typo ]]", "[[ time.now + ]]"):
+        bad = await admin_env.client.post("/api/settings/prompt-preview", cookies=admin_env.cookie,
+            json={"path": "userMessageTemplate.template", "value": template})
+        assert bad.status == 400
+        bad_save = await admin_env.client.patch("/api/settings/userMessageTemplate.template", cookies=admin_env.cookie,
+            json={"value": template})
+        assert bad_save.status == 400
+        assert admin_env.cfg_path.read_bytes() == original
+    for template in ("[[ time.date ]]", ""):
+        saved = await admin_env.client.patch("/api/settings/userMessageTemplate.template", cookies=admin_env.cookie,
+            json={"value": template})
+        assert saved.status == 200
+        assert (await saved.json())["value"] == template
+    disabled = await admin_env.client.patch("/api/settings/userMessageTemplate.enabled", cookies=admin_env.cookie,
+        json={"value": False})
+    assert disabled.status == 200 and (await disabled.json())["value"] is False
+    current = await admin_env.client.get("/api/settings", cookies=admin_env.cookie)
+    payload = await current.json()
+    assert payload["values"]["userMessageTemplate.template"] == ""
+    assert payload["usingBuiltin"]["userMessageTemplate.template"] is False
+    empty = await admin_env.client.post("/api/settings/prompt-preview", cookies=admin_env.cookie,
+        json={"path": "userMessageTemplate.template", "value": ""})
+    assert await empty.json() == {"ok": True, "path": "userMessageTemplate.template", "rendered": ""}
+
+
 async def test_web_settings_specs_get_and_patch_masks_sensitive_values(admin_env):
     specs = await admin_env.client.get("/api/settings/specs", cookies=admin_env.cookie)
     assert specs.status == 200
@@ -217,7 +264,7 @@ async def test_web_settings_specs_get_and_patch_masks_sensitive_values(admin_env
     ]
     agent_sections = next(domain for domain in specs_data["domains"] if domain["key"] == "agent")["sections"]
     assert [section["key"] for section in agent_sections] == [
-        "agent", "retry", "timeouts", "compaction", "rath", "rath_prompts",
+        "agent", "user_message_template", "retry", "timeouts", "compaction", "rath", "rath_prompts",
     ]
     assert "agent.retryMaxDelayS" in next(section for section in agent_sections if section["key"] == "retry")["paths"]
     assert specs_data["specs"]["memory.accessKey"]["sensitive"] is True

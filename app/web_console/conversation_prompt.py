@@ -103,6 +103,7 @@ class WebAdminConversationPromptMixin:
                         "UPDATE context_editor_branches SET settings_json=json_set(settings_json,'$.system',?) WHERE conversation_uuid=?",
                         (candidate, conv_uuid),
                     )
+                    await self._write_prompt_snapshot_policy(conn, row, await self._resolved_prompt_policy(conv_uuid), candidate)
                     # Opaque provider continuation can carry the old system. Do
                     # not touch transcript, summaries, files, or TaskMemory.
                     await conn.execute("DELETE FROM controller_model_contexts WHERE chat_id=?", (chat_id,))

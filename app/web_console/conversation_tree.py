@@ -17,6 +17,8 @@ from typing import Any
 from aiohttp import web
 
 from app.db.engine import now_ts
+from app.context.prompt_policy import folder_policy, policy, read_json, snapshot_key, write_json
+from app.web_console.prompt_policy import folder_policy_key
 from app.tools import processes
 from app.web_console.activity import activity_fields
 from app.web_console.core import _WEB_SESSION_KEY, WebSession
@@ -76,6 +78,12 @@ class WebAdminConversationTreeMixin:
         # APIs must never expose it as a real folder or a move/create target.
         folders = await self._tree_folders(owner_chat_id, include_properties=True)
         folders[_TEMPORARY_PROPERTIES_ID] = await self._tree_temporary_properties(owner_chat_id)
+        prefix = f'folder_prompt_policy:{int(owner_chat_id)}:'
+        cur = await self.db.conn.execute('SELECT key,value FROM app_state WHERE key LIKE ?', (prefix + '%',))
+        for item in await cur.fetchall():
+            folder_id = item['key'][len(prefix):]
+            if folder_id in folders:
+                folders[folder_id]['prompt_policy'] = json.loads(item['value'])
         return folders
 
     @staticmethod
@@ -1147,6 +1155,7 @@ class WebAdminConversationTreeMixin:
                 "sourceFolderId": workspace_source,
                 "sourcePath": self._tree_folder_path_text(workspace_source, folders) if workspace_source else "默认 workspace",
             },
+            "promptPolicy": self._folder_prompt_policy_public(folder_id, folders),
             "prompt": {
                 "local": str(row.get("prompt_markdown") or ""),
                 "effective": prompt,
@@ -1189,6 +1198,7 @@ class WebAdminConversationTreeMixin:
         target_folder_id: str = "",
         workspace_dir: str | None = None,
         prompt_markdown: str | None = None,
+        prompt_policy: dict | None = None,
         force_snapshot: bool = False,
     ) -> dict[str, Any]:
         folders_before = await self._tree_context_folders(owner_chat_id)
@@ -1201,6 +1211,8 @@ class WebAdminConversationTreeMixin:
                 folders_after[item_id]["workspace_dir"] = workspace_dir
             if prompt_markdown is not None:
                 folders_after[item_id]["prompt_markdown"] = prompt_markdown
+            if prompt_policy is not None:
+                folders_after[item_id]['prompt_policy'] = prompt_policy
             candidates = {""} if item_id == _TEMPORARY_PROPERTIES_ID else self._tree_descendants(item_id, folders_before)
         elif kind == "folder":
             if item_id not in folders_after:
@@ -1223,10 +1235,17 @@ class WebAdminConversationTreeMixin:
             old_values = self._tree_effective_from_map(folder_id, folders_before, str(getattr(self, "workspace_dir", "") or ""))[:2]
             new_folder = target_folder_id if kind == "conversation" else folder_id
             new_values = self._tree_effective_from_map(new_folder, folders_after, str(getattr(self, "workspace_dir", "") or ""))[:2]
-            if old_values == new_values and not (force_snapshot and kind == "conversation"):
-                continue
-            item = {**row, "old_values": old_values, "new_values": new_values}
-            is_running = await self._web_conversation_has_active_runtime(row)
+            local = await self._local_conversation_prompt_policy(row['conversation_uuid'])
+            old_policy = local if local['text'].strip() else folder_policy(folder_id, folders_before)[0]
+            new_policy = local if local['text'].strip() else folder_policy(new_folder, folders_after)[0]
+            if old_values[0] == new_values[0] and old_policy == new_policy and not (force_snapshot and kind == "conversation"):
+                owns_prompt = kind == 'properties' and not local['text'].strip() and folder_policy(new_folder, folders_after)[1] == item_id
+                frozen = await read_json(self.db.conn, snapshot_key(row['conversation_uuid'])) if owns_prompt else None
+                if frozen is None or policy(frozen) == new_policy:
+                    continue
+            item = {**row, "old_values": old_values, "new_values": new_values, 'new_policy': new_policy,
+                'new_folder_path': self._tree_folder_path_text(new_folder or _TEMPORARY_PROPERTIES_ID, folders_after)}
+            is_running = bool(self._web_starting_turns.get(row['conversation_uuid'])) or await self._web_conversation_has_active_runtime(row)
             item["running_now"] = is_running
             changed.append(item)
             archived += 1 if int(row.get("archived_at") or 0) > 0 else 0
@@ -1260,10 +1279,11 @@ class WebAdminConversationTreeMixin:
         workspace, prompt, _run_defaults = await self._tree_run_property_payload(
             int(session.chat_id), str(request.match_info.get("folder_uuid") or ""), body,
         )
+        value = await self._folder_policy_from_body(int(session.chat_id), str(request.match_info.get('folder_uuid') or ''), body, prompt)
         impact = await self._tree_change_impact(
             int(session.chat_id), kind="properties",
             item_id=str(request.match_info.get("folder_uuid") or ""),
-            workspace_dir=workspace, prompt_markdown=prompt,
+            workspace_dir=workspace, prompt_markdown=prompt, prompt_policy=value,
         )
         return web.json_response({"ok": True, **self._tree_public_impact(impact)})
 
@@ -1294,15 +1314,13 @@ class WebAdminConversationTreeMixin:
                 fresh = await self._conversation_row(
                     int(row.get("owner_chat_id") or 0), str(row.get("conversation_uuid") or ""), require=True
                 )
-                if await self._web_conversation_has_active_runtime(fresh):
+                if self._web_starting_turns.get(str(row.get('conversation_uuid') or '')) or await self._web_conversation_has_active_runtime(fresh):
                     skipped += 1
                     continue
                 conv_uuid = str(row.get("conversation_uuid") or "")
-                rendered[conv_uuid] = await self._build_system_prompt_for_chat(
-                    conv_uuid,
-                    folder_values=tuple(row["new_values"]),
-                    strict=True,
-                )
+                selected = row.get('new_policy') or await self._resolved_prompt_policy(conv_uuid)
+                row['new_policy'] = selected
+                rendered[conv_uuid] = await self._build_policy_prompt(conv_uuid, selected, tuple(row['new_values']), row.get('new_folder_path'))
                 update_rows.append(row)
             async with self.db.conn.transaction(label="conversation-tree-change-and-snapshots") as conn:
                 await mutate(conn)
@@ -1312,6 +1330,7 @@ class WebAdminConversationTreeMixin:
                         "UPDATE sessions SET system_snapshot=?, updated_at=? WHERE chat_id=?",
                         (rendered[str(row.get("conversation_uuid") or "")], ts, int(row.get("internal_chat_id") or 0)),
                     )
+                    await self._write_prompt_snapshot_policy(conn, row, row['new_policy'], rendered[row['conversation_uuid']])
                     # Provider continuation caches contain the previous system input.
                     # Removing only this sidecar forces a clean next request; transcript,
                     # summaries, files and TaskMemory remain untouched.
@@ -1329,12 +1348,14 @@ class WebAdminConversationTreeMixin:
         update_snapshots = body.get("updateSnapshots") is True
         async with self._conversation_tree_lock:
             workspace, prompt, run_defaults = await self._tree_run_property_payload(owner, folder_id, body)
+            value = await self._folder_policy_from_body(owner, folder_id, body, prompt)
             impact = await self._tree_change_impact(
                 owner, kind="properties", item_id=folder_id,
-                workspace_dir=workspace, prompt_markdown=prompt,
+                workspace_dir=workspace, prompt_markdown=prompt, prompt_policy=value,
             )
 
             async def mutate(conn: Any) -> None:
+                await write_json(conn, folder_policy_key(owner, folder_id), {k: v for k, v in value.items() if k != 'text'})
                 if folder_id == _TEMPORARY_PROPERTIES_ID:
                     await conn.execute(
                         """INSERT INTO web_temporary_conversation_properties

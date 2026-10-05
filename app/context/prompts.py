@@ -43,21 +43,9 @@ A summary is fallible context, not authority. Continue directly when evidence is
 
 
 def effective_context_prompt(text: str, strategy: str = "sliding_window") -> str:
-    """Adapt a frozen/custom snapshot in memory without changing its stored body.
+    """Keep the chosen prompt exact; context strategies no longer inject prose.
 
-    Unknown custom text stays intact. The versioned runtime policy states actual
-    mechanics only; whole-snapshot refresh still uses the existing diff/hash UI.
+    Runtime-only policies from earlier calls were not stored in system snapshots.
+    Literal text in user templates must not be stripped or migrated here.
     """
-    text = text.replace(LEGACY_WINDOW_SYSTEM_POLICY.strip(), "")
-    text = text.replace(WINDOW_SYSTEM_POLICY.strip(), "").replace(SUMMARY_SYSTEM_POLICY.strip(), "")
-    text = migrate_context_prompt(text)
-    known_strategy_phrases = {
-        "Context windows retain original user/task instructions, decisions and recent complete execution batches.":
-            "Sliding windows pin current-execution instructions and feedback; older rounds are optional recent history.",
-        "Your context window preserves task instructions, accepted controls and recent complete execution batches.":
-            "Your sliding window pins this task's instructions and controls, not all prior Agent rounds' inputs.",
-    }
-    for general, sliding in known_strategy_phrases.items():
-        text = text.replace(sliding, general) if strategy == "model_summary" else text.replace(general, sliding)
-    policy = SUMMARY_SYSTEM_POLICY if strategy == "model_summary" else WINDOW_SYSTEM_POLICY
-    return text.rstrip() + "\n\n" + policy
+    return text

@@ -55,7 +55,7 @@ async def test_controller_model_return_compacts_after_closed_batch_and_after_fin
         async def stream(self, messages, **kwargs):
             self.calls += 1
             assert validate_model_context(messages)
-            assert "Context summary runtime" in kwargs["system"]
+            assert kwargs["system"] == "Bounded task"
             if self.calls == 1 and not final_only:
                 yield StreamEvent(kind="tool_call", tool_calls=[ToolCall("new", "Read", "{}")])
                 yield StreamEvent(kind="usage", usage=Usage(input_tokens=8000, output_tokens=3))
@@ -142,7 +142,8 @@ async def test_real_agent_summary_then_continue_switches_shared_strategy_without
     assert len(completed) == 1 and completed[0].detail["summary"] == SUMMARY
     assert completed[0].detail["compactionId"] == started[0].detail["compactionId"]
     assert len(executions) == 4 and len(summaries) == 1
-    assert "Context summary runtime" in request_copies[-1][1]["system"]
+    assert request_copies[-1][1]["system"] == request_copies[0][1]["system"]
+    assert "## Context summary runtime" not in request_copies[-1][1]["system"]
     task = await dao.get_task(tid)
     assert task.model_call_count == 5 and task.tool_call_count == 3
     await dao.db.conn.execute("UPDATE web_conversations SET context_strategy='sliding_window' WHERE internal_chat_id=123")
@@ -152,7 +153,8 @@ async def test_real_agent_summary_then_continue_switches_shared_strategy_without
     assert second["agentSession"]["agentId"] == sid
     retained, options = request_copies[-1]
     assert any(source_of(m).get("kind") == "summary" for m in retained)
-    assert "No model generates a new compaction summary" in options["system"]
+    assert "## Context window runtime" not in options["system"]
+    assert "## Context summary runtime" not in options["system"]
     assert not options["tools"] or "Write" not in {t["name"] for t in options["tools"]}
     assert writes == [1, 2, 3] and len(summaries) == 1
     assert (await dao.get_task(tid)).output == first["result"]

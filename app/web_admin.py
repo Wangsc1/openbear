@@ -28,6 +28,7 @@ from app.web_console.chat_state import WebAdminChatStateMixin
 from app.web_console.config_api import WebAdminSettingsChannelsMixin
 from app.web_console.conversation_overview import WebAdminConversationOverviewMixin
 from app.web_console.conversation_prompt import WebAdminConversationPromptMixin
+from app.web_console.prompt_policy import PromptPolicyMixin
 from app.web_console.context_editor import WebAdminContextEditorMixin
 from app.web_console.conversation_tree import WebAdminConversationTreeMixin
 from app.web_console.conversations import WebAdminConversationsMixin
@@ -83,6 +84,7 @@ from app.web_telegram_replies import WebTelegramReplies
 
 
 class WebAdminServer(
+    PromptPolicyMixin,
     WebhookPropertiesMixin,
     WebAdminPushMixin,
     WebAdminAppMixin,

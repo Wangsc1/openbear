@@ -2,11 +2,12 @@
 import {computed, inject, nextTick, onBeforeUnmount, ref, watch} from 'vue';
 import {ElMessage, ElMessageBox} from 'element-plus';
 import {Api, apiError} from '../api.js';
-import AdaptiveMdEditor from './AdaptiveMdEditor.vue';
+import PromptPolicyEditor from './PromptPolicyEditor.vue';
+import PromptImpactDialog from './PromptImpactDialog.vue';
+import {normalizePromptPolicy, promptPolicyFlags, conversationPromptPolicy, conversationPolicyPayload} from './promptPolicy.js';
 import ModelSettings from './ModelSettings.vue';
 import {updateRunDefault} from './folderRunDefaults.js';
 import WebhookEditor from './webhooks/WebhookEditor.vue';
-import WebhookField from './webhooks/WebhookField.vue';
 import {tabKey} from './webhooks/webhookConfig.js';
 import {runConfigFromResponse} from '../views/consoleView/runConfigState.js';
 import './conversationTreeProperties.css';
@@ -16,18 +17,35 @@ const saveRunConfig = inject('openbear:property-run-config', (_uuid, request) =>
 const tab = ref('context'), loading = ref(false), saving = ref(false), error = ref('');
 const contextReady = ref(false), modelReady = ref(false), modelsReady = ref(false), modelsLoading = ref(false);
 const modelError = ref(''), modelsError = ref('');
-const context = ref({contextMode:'inherit',contextText:''}), baseline = ref(''), model = ref({}), models = ref([]), modelSaving = ref(false);
+const context = ref({contextText:'',...promptPolicyFlags()}), baseline = ref(''), model = ref({}), models = ref([]), modelSaving = ref(false);
 const trigger = ref(null), triggerVisited = ref(false);
 const uuid = computed(() => props.conversation?.conversationUuid || '');
 const local = computed(() => !uuid.value || uuid.value.startsWith('local:'));
-const dirtyContext = computed(() => contextReady.value && JSON.stringify({contextMode:context.value.contextMode,contextText:context.value.contextText}) !== baseline.value);
+const dirtyContext = computed(() => contextReady.value && JSON.stringify(conversationPolicyPayload(context.value)) !== baseline.value);
 const busy = computed(() => saving.value || modelSaving.value || trigger.value?.saving);
 const canSaveContext = computed(() => props.modelValue && !local.value && contextReady.value && !busy.value && dirtyContext.value);
 const canEditModel = computed(() => props.modelValue && !local.value && modelReady.value && modelsReady.value && !loading.value && !modelsLoading.value && !busy.value);
 const contextEditorText = computed({
-  get: () => context.value.contextMode === 'inherit' ? context.value.inheritedContext || '' : context.value.contextText || '',
-  set: value => { if (contextReady.value && context.value.contextMode === 'override') context.value.contextText = value; },
+  get: () => context.value.contextText || '',
+  set: value => { if (contextReady.value) context.value.contextText = value; },
 });
+const contextPolicy = computed({
+  get: () => normalizePromptPolicy({...context.value, text: contextEditorText.value}),
+  set: value => { if (contextReady.value) Object.assign(context.value, {contextText: value.text, ...promptPolicyFlags(value)}); },
+});
+const inheritedPolicy = computed(() => normalizePromptPolicy(context.value.promptPolicy?.inherited || {text: context.value.inheritedContext}));
+function adoptContext(properties) {
+  const policy = conversationPromptPolicy(properties);
+  return {...properties, contextText: policy.text, ...promptPolicyFlags(policy)};
+}
+const impactDialog = ref(false), impact = ref(null);
+let resolveImpact = null;
+function finishImpact(choice) { impactDialog.value = false; const resolve = resolveImpact; resolveImpact = null; resolve?.(choice); }
+function chooseImpact(value) {
+  if (!Number(value?.affectedCount || 0)) return Promise.resolve(false);
+  impact.value = value; impactDialog.value = true;
+  return new Promise(resolve => { resolveImpact = resolve; });
+}
 const modelSettings = computed(() => ({mainModel:model.value.model,mainThinkingLevel:model.value.thinkingLevel || model.value.effectiveThinkingLevel || model.value.defaultThinkingLevel || 'off',mainFastMode:model.value.fastRequested ?? model.value.fastMode,
   agentModel:model.value.agentRunConfig?.model || '',agentThinkLevel:model.value.agentRunConfig?.thinkLevel || '',agentFastMode:model.value.agentRunConfig?.fastMode ?? null,contextStrategy:model.value.contextStrategy || 'sliding_window'}));
 function changeModelSetting(field,selection) {
@@ -39,10 +57,11 @@ const tabs = [['context','上下文配置'],['model','模型配置'],['trigger',
 let generation = 0;
 async function load() {
   const run = ++generation;
+  finishImpact(null);
   error.value = ''; modelError.value = ''; modelsError.value = '';
   loading.value = false; modelsLoading.value = false; saving.value = false; modelSaving.value = false;
   contextReady.value = false; modelReady.value = false; modelsReady.value = false;
-  context.value = {contextMode:'inherit',contextText:''}; baseline.value = JSON.stringify(context.value); model.value = {}; models.value = [];
+  context.value = {contextText:'',...promptPolicyFlags()}; baseline.value = JSON.stringify(conversationPolicyPayload(context.value)); model.value = {}; models.value = [];
   if (!props.modelValue || local.value) return;
   // Each reader publishes its own result; a slow/failed model catalog must not
   // hold the context editor (or the trigger tab) behind a shared loading mask.
@@ -58,10 +77,10 @@ async function loadProperties(run = generation, refreshContext = true) {
     if (run !== generation || !props.modelValue) return;
     if (refreshContext) {
       const properties = response.properties;
-      if (!properties || !['inherit','override'].includes(properties.contextMode) || typeof properties.contextText !== 'string') {
+      if (!properties || typeof properties.contextText !== 'string') {
         error.value = '未取得完整上下文，未开放编辑';
       } else {
-        context.value = properties; baseline.value = JSON.stringify({contextMode:properties.contextMode,contextText:properties.contextText});
+        context.value = adoptContext(properties); baseline.value = JSON.stringify(conversationPolicyPayload(context.value));
         contextReady.value = true;
       }
     }
@@ -90,20 +109,27 @@ async function retryModel() {
 }
 watch(() => [props.modelValue,uuid.value], () => { tab.value = props.initialTab; triggerVisited.value = tab.value === 'trigger'; load(); }, {immediate:true});
 watch(tab, value => { if (value === 'trigger') triggerVisited.value = true; });
-onBeforeUnmount(() => generation++);
+onBeforeUnmount(() => { generation++; finishImpact(null); });
 async function saveContext() {
   if (!canSaveContext.value) return false;
   const id = uuid.value, run = generation;
-  const submitted = {contextMode:context.value.contextMode,contextText:context.value.contextText};
+  const submitted = conversationPolicyPayload(context.value);
   saving.value = true; error.value = '';
   try {
-    const response = await Api.updateConversationProperties(id,submitted);
+    const affected = await Api.conversationPropertiesImpact(id,submitted);
     if (run !== generation || !props.modelValue) return false;
-    const current = {contextMode:context.value.contextMode,contextText:context.value.contextText};
+    const choice = await chooseImpact(affected);
+    if (choice === null || run !== generation || !props.modelValue) return false;
+    const response = await Api.updateConversationProperties(id,{...submitted,updateSnapshots:choice === true});
+    if (run !== generation || !props.modelValue) return false;
+    if (!response.properties || typeof response.properties.contextText !== 'string') throw new Error('保存响应缺少完整上下文，请保留草稿并重新读取');
+    const current = conversationPolicyPayload(context.value);
     const later = JSON.stringify(current) !== JSON.stringify(submitted);
-    baseline.value = JSON.stringify({contextMode:response.properties.contextMode,contextText:response.properties.contextText});
-    context.value = {...response.properties,...(later ? current : {})};
-    ElMessage.success(later ? '提交的上下文已保存；后续输入仍未保存，已保留草稿' : '局部上下文已保存');
+    const saved = adoptContext(response.properties);
+    baseline.value = JSON.stringify(conversationPolicyPayload(saved));
+    context.value = {...saved,...(later ? current : {})};
+    const message = choice === true ? `局部上下文已保存，更新 ${response.updatedCount || 0} 个快照；运行中跳过 ${response.skippedRunningCount || 0} 个` : '局部上下文已保存；已有快照保持不变';
+    ElMessage.success(message + (later ? '；后续输入仍未保存，已保留草稿' : ''));
     return !dirtyContext.value; // Save-and-leave must not discard input typed during the request.
   } catch (exception) { if (run === generation) error.value = apiError(exception); return false; }
   finally { if (run === generation) saving.value = false; }
@@ -140,11 +166,12 @@ defineExpose({canLeave});
     <div v-if="local" class="property-section"><h3>这是尚未持久保存的草稿</h3><p>没有有效触发地址。创建为真实会话后才能配置入口，不会自动运行模型、启用入口或发送消息。</p><el-button type="primary" @click="emit('persist')">保存为真实会话后继续</el-button></div>
     <div v-else class="property-form"><div class="property-panels" style="width:100%">
       <section v-show="tab === 'context'" v-loading="loading && !contextReady" id="conversation-property-panel-context" role="tabpanel" aria-labelledby="conversation-property-tab-context" class="property-tab-panel" style="width:100%">
-        <p v-if="error" class="wh-alert" role="alert">{{ error }}<el-button :disabled="busy || loading || dirtyContext" @click="loadProperties()">重新读取</el-button><span v-if="dirtyContext">未保存的上下文仍保留，请先保存或放弃更改。</span></p><div class="property-section"><WebhookField v-model="context.contextMode" :disabled="!contextReady" label="会话局部上下文" :options="[{value:'inherit',label:'继承目录上下文'}, {value:'override',label:'自定义覆盖（不追加）'}]" /><div class="folder-prompt-editor"><AdaptiveMdEditor v-model="contextEditorText" :read-only="!contextReady || context.contextMode === 'inherit'" language="markdown" completion-mode="none" /></div></div>
+        <p v-if="error" class="wh-alert" role="alert">{{ error }}<el-button :disabled="busy || loading || dirtyContext" @click="loadProperties()">重新读取</el-button><span v-if="dirtyContext">未保存的上下文仍保留，请先保存或放弃更改。</span></p><div class="property-section"><PromptPolicyEditor v-model="contextPolicy" :disabled="!contextReady" :conversation-id="uuid" :inherited-policy="inheritedPolicy" :inherited-source-path="context.promptPolicy?.inheritedSourcePath || ''" /></div>
       </section>
       <section v-show="tab === 'model'" v-loading="loading || modelsLoading" id="conversation-property-panel-model" role="tabpanel" aria-labelledby="conversation-property-tab-model" class="property-tab-panel" style="width:100%"><p v-if="modelError || modelsError" class="wh-alert" role="alert">{{ [modelError,modelsError].filter(Boolean).join('；') }}<el-button :disabled="busy || loading || modelsLoading" @click="retryModel">重新读取模型配置</el-button></p><ModelSettings :model-value="modelSettings" :models="models" :disabled="!canEditModel" @change="changeModelSetting" /><p class="property-note">逐项保存，下一次运行生效；不会改变当前运行。</p></section>
       <section v-if="triggerVisited && modelValue" v-show="tab === 'trigger'" id="conversation-property-panel-trigger" role="tabpanel" aria-labelledby="conversation-property-tab-trigger" class="wh-fill"><WebhookEditor ref="trigger" :scope="{type:'conversation',id:uuid}" :title="conversation?.title" :active="tab === 'trigger'" @cancel="close" /></section>
     </div></div>
     <template #footer><div class="property-footer"><span class="property-footer-note">{{ tab === 'model' && modelReady && modelsReady ? '模型设置已逐项保存' : dirtyContext ? '有未保存的上下文' : '' }}</span><div class="property-footer-buttons"><el-button :disabled="busy" @click="close">关闭</el-button><el-button v-if="tab === 'context' && !local" type="primary" :loading="saving" :disabled="!canSaveContext" @click="saveContext">保存上下文配置</el-button></div></div></template>
   </el-dialog>
+  <PromptImpactDialog :model-value="impactDialog" :impact="impact" @choose="finishImpact" />
 </template>

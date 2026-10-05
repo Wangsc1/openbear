@@ -67,7 +67,7 @@ async def test_web_current_root_steering_and_notification_resume_preserve_bounde
             assert len([m for m in messages if is_task_memory_runtime_message(m)]) == 1
             if len(requests) > 1:
                 assert "CURRENT FEEDBACK" in text
-                feedback = next(m for m in messages if m.get("content") == "CURRENT FEEDBACK: keep the font size.")
+                feedback = next(m for m in messages if str(m.get("content", "")).split("\n\n[⏰", 1)[0] == "CURRENT FEEDBACK: keep the font size.")
                 assert source_of(feedback)["run_root_turn_uuid"] == "active-root"
             if len(requests) <= 4:
                 yield StreamEvent(kind="content", text="CURRENT QUESTION: preserve the same UI?")

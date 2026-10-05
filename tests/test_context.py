@@ -195,3 +195,32 @@ async def test_wrap_user_has_time(db, tmp_path):
     assert msg["role"] == "user"
     assert "帮我查个东西" in msg["content"]
     assert "当前时间" in msg["content"]
+
+
+def test_wrap_user_uses_config_and_fixed_variables():
+    from datetime import datetime
+
+    from app.config import UserMessageTemplateConfig
+    from app.context.user_message_template import build_message_variables
+
+    settings = UserMessageTemplateConfig(template="[[ time.iso ]] / [[ message.id ]] / [[ folderWorkspaceDir ]]")
+    cb = ContextBuilder(None, None, None, [], _tools(), "/work", user_message_template=settings)
+    variables = build_message_variables(at=datetime(2026, 10, 6, 1, 23), message_id="m1", workspace="/folder")
+    first = cb.wrap_user("hello", variables=variables)
+    assert first == {"role": "user", "content": "hello\n\n2026-10-06T01:23:00+08:00 / m1 / /folder"}
+    assert cb.wrap_user("hello", variables=variables) == first
+    settings.template = "[[ folderWorkspaceDir ]]"
+    assert cb.wrap_user("hello")["content"] == "hello\n\n/work"
+
+
+def test_wrap_user_disabled_and_blank_template_preserve_multimodal_content():
+    from app.config import UserMessageTemplateConfig
+
+    content = [{"type": "image", "source": {"data": "original"}}]
+    for settings in (UserMessageTemplateConfig(enabled=False), UserMessageTemplateConfig(template="")):
+        cb = ContextBuilder(None, None, None, [], _tools(), "/work", user_message_template=settings)
+        assert cb.wrap_user("hello") == {"role": "user", "content": "hello"}
+        message = cb.wrap_user(content)
+        assert message == {"role": "user", "content": content}
+        message["content"][0]["source"]["data"] = "mutated"
+        assert content[0]["source"]["data"] == "original"

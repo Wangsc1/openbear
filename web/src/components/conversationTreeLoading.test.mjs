@@ -1,3 +1,4 @@
+import * as promptPolicy from './promptPolicy.js';
 import test from 'node:test';
 import {useRecentConversationRows} from './conversationRecentRows.js';
 import assert from 'node:assert/strict';
@@ -14,7 +15,7 @@ function deferred() { let resolve, reject; const promise = new Promise((a, b) =>
 function harness(Api = {}) {
   const errors = [], notifications = [];
   let closedNotices = 0;
-  const context = vm.createContext({ useRecentConversationRows, computed, nextTick, reactive, ref, rowId, treeItemParent, compareTreeItems, resolveTreeDrop, Api, apiError: String, referenceCatalog: { connected: false, ready: false },
+  const context = vm.createContext({...promptPolicy, useRecentConversationRows, computed, nextTick, reactive, ref, rowId, treeItemParent, compareTreeItems, resolveTreeDrop, Api, apiError: String, referenceCatalog: { connected: false, ready: false },
     // Imports are seams in this loader-only fixture; lazy UI rendering is exercised in lazyView.test.mjs.
     defineLazyView: () => ({}),
     defineProps: () => ({ activeConversationUuid: '', draftConversation: null }), defineEmits: () => () => {}, defineExpose() {},

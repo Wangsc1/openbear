@@ -60,6 +60,6 @@ def test_window_prompt_preserves_custom_policy_and_authorization_boundaries():
     custom = "CUSTOM user rules: approval is bounded; no deployment."
     assert migrate_context_prompt(custom) == custom
     effective = effective_context_prompt(custom)
-    assert custom in effective
-    assert "do not change user instructions or authorization" in effective
+    assert effective == custom
+    assert effective_context_prompt(effective, "model_summary") == custom
     assert effective_context_prompt(effective) == effective

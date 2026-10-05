@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -545,7 +546,8 @@ def test_installer_upgrade_main_resolves_web_port_outside_install_cwd(
         ROOT / "app", stage / "app",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
-    (stage / "app" / "__init__.py").write_text('__version__ = "2.0.0"\n', encoding="utf-8")
+    init_path = stage / "app" / "__init__.py"
+    init_path.write_text(re.sub(r'(?m)^__version__\s*=.*$', '__version__ = "2.0.0"', init_path.read_text(encoding="utf-8")), encoding="utf-8")
     (stage / ".venv").symlink_to(ROOT / ".venv", target_is_directory=True)
 
     library = install_library(tmp_path)

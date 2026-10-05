@@ -100,13 +100,13 @@ async def test_window_then_summary_then_window_preserves_state_and_originals(env
     assert env.events[-1]["usage"]["inputTokens"] == 321
     assert env.events[-1]["estimateOnly"] is True
     assert env.manager.last_estimate.tokens < 8000
-    assert SUMMARY_SYSTEM_POLICY.strip() in env.manager.system
+    assert env.manager.system == 'Task system'
     assert WINDOW_SYSTEM_POLICY.strip() not in env.manager.system
     env.selected["strategy"] = "sliding_window"
     third = await env.manager.prepare(second + batch(7) + batch(8), system=env.manager.system, tools=[], force=True)
     assert any(source_of(m).get("kind") == "summary" for m in third)
     assert len(env.calls) == 1
-    assert WINDOW_SYSTEM_POLICY.strip() in env.manager.system
+    assert env.manager.system == 'Task system'
     assert SUMMARY_SYSTEM_POLICY.strip() not in env.manager.system
     assert await env.store.restore_messages() == third
     old = await env.store.index(query="old A evidence")
@@ -219,8 +219,8 @@ def test_strategy_prompt_is_idempotent_and_bidirectional():
     window = effective_context_prompt(prompt)
     summary = effective_context_prompt(window, "model_summary")
     assert effective_context_prompt(summary, "model_summary") == summary
-    assert effective_context_prompt(summary, "sliding_window").count(WINDOW_SYSTEM_POLICY.strip()) == 1
-    assert "Custom unmodified user rules." in summary
+    assert effective_context_prompt(summary, "sliding_window") == prompt
+    assert summary == prompt
 
 
 async def test_summary_keeps_original_decisions_antecedents_and_whole_tool_batches(env):
@@ -269,11 +269,7 @@ async def test_summary_larger_than_threshold_rolls_back_without_silent_window_fa
     assert len(env.calls) == 1 and not env.events
 
 
-def test_frozen_window_only_prompt_becomes_strategy_correct_in_both_directions():
-    original = "Custom constraint: no production changes. No summary model or forced memory-writing checkpoint is used."
-    summary = effective_context_prompt(original, "model_summary")
-    assert "No summary model" not in summary and SUMMARY_SYSTEM_POLICY.strip() in summary
-    window = effective_context_prompt(summary, "sliding_window")
-    assert SUMMARY_SYSTEM_POLICY.strip() not in window and WINDOW_SYSTEM_POLICY.strip() in window
-    assert "Custom constraint: no production changes." in window
-    assert effective_context_prompt(window, "model_summary") == summary
+def test_user_authored_runtime_text_is_not_rewritten_or_stripped():
+    original = 'Custom constraint. No summary model or forced memory-writing checkpoint is used.\n' + WINDOW_SYSTEM_POLICY
+    assert effective_context_prompt(original, 'model_summary') == original
+    assert effective_context_prompt(original, 'sliding_window') == original

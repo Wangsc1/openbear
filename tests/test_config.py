@@ -34,6 +34,23 @@ def test_example_config_loads_and_matches_visible_defaults():
     assert cfg.validate_for_startup() == []
 
 
+def test_user_message_template_defaults_alias_and_validation():
+    from app.context.user_message_template import DEFAULT_USER_MESSAGE_TEMPLATE
+
+    cfg = Config.model_validate(_base_cfg())
+    assert cfg.user_message_template.enabled is True
+    assert cfg.model_dump(by_alias=True)["userMessageTemplate"] == {
+        "enabled": True, "template": DEFAULT_USER_MESSAGE_TEMPLATE,
+    }
+    for field in ("user_message_template", "userMessageTemplate"):
+        cfg = Config.model_validate({**_base_cfg(), field: {"enabled": False, "template": ""}})
+        assert cfg.user_message_template.enabled is False
+        assert cfg.user_message_template.template == ""
+    for template in ("[[ unknown ]]", "@if time.now", "[[ time.typo ]]", "[[ time.now + ]]"):
+        with pytest.raises(ValueError):
+            Config.model_validate({**_base_cfg(), "userMessageTemplate": {"template": template}})
+
+
 def test_deprecated_settings_are_accepted_but_omitted_on_write_back():
     data = _base_cfg()
     data["agent"] = {"interruptOnNew": True}

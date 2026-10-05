@@ -10,6 +10,8 @@ import { settingDisplayValue, settingStorageValue, settingRangeLabel } from "./s
 const webhookEnvironment = ref(null);
 const webhookSettingFailures = reactive({});
 const MdEditor = defineAsyncComponent(() => import("../components/AdaptiveMdEditor.vue"));
+const PromptTemplateEditor = defineAsyncComponent(() => import("../components/PromptTemplateEditor.vue"));
+const userMessageTemplateCompletionRoots = ['time', 'message', 'conversation', 'runtimeInfo.model', 'runtimeInfo.host', 'runtimeInfo.os', 'folderWorkspaceDir'];
 
 function builtinPrompt(spec) {
   return spec?.defaultValue || "";
@@ -35,6 +37,7 @@ const editingPromptPath = ref("");
 const promptPreviewOpen = ref(false);
 const promptPreviewText = ref("");
 const promptPreviewTitle = ref("");
+const promptPreviewIsTemplate = ref(false);
 const previewingPrompt = ref("");
 const testingNotification = ref(false);
 const testingBrowser = ref(false);
@@ -123,9 +126,9 @@ function optionsFor(spec) {
 }
 function hasOptions(spec) { return spec?.kind !== "multi" && optionsFor(spec).length > 0; }
 function isMulti(spec) { return spec?.kind === "multi"; }
-function isPromptEditorSpec(spec) { return spec?.editor === "prompt"; }
+function isPromptEditorSpec(spec) { return spec?.editor === "prompt" || spec?.editor === "template"; }
 function isPromptEditing(spec) { return editingPromptPath.value === spec?.path; }
-function promptVariableLabel(name) { return `{${name}}`; }
+function promptVariableLabel(name, spec) { return spec?.editor === 'template' ? `[[ ${name} ]]` : `{${name}}`; }
 function isLongText(spec) { return spec?.kind === "str" && /prompt|提示词/i.test(`${spec.path} ${spec.title}`); }
 function optionLabel(spec, value) {
   return optionsFor(spec).find((item) => item.value === value)?.label || value;
@@ -146,7 +149,7 @@ function namingCallPlan() {
 function normalizeDraftValue(spec, value) {
   if (spec?.kind === "bool") return Boolean(value);
   if (spec?.kind === "multi") return Array.isArray(value) ? [...value] : [];
-  if (isPromptEditorSpec(spec) && (value === undefined || value === null || value === "")) return builtinPrompt(spec);
+  if (isPromptEditorSpec(spec) && (value == null || (spec.editor === 'prompt' && value === ""))) return builtinPrompt(spec);
   if (value === undefined || value === null) return "";
   return settingDisplayValue(spec, value);
 }
@@ -164,7 +167,7 @@ function displayedValue(spec) {
     if (!selected.length) return "未选择事件";
     return selected.map((item) => optionLabel(spec, item)).join("、");
   }
-  if (isPromptEditorSpec(spec) && (value === undefined || value === null || value === "")) return builtinPrompt(spec);
+  if (isPromptEditorSpec(spec) && (value == null || (spec.editor === 'prompt' && value === ""))) return builtinPrompt(spec);
   if (value === undefined || value === null || value === "") return spec.path.startsWith('webhooks.') ? (spec.path.includes('retention.') ? '不自动清理' : '使用服务器默认') : "未设置";
   if (hasOptions(spec)) return optionLabel(spec, value);
   return `${settingDisplayValue(spec, value)}${spec.unit || ""}`;
@@ -172,7 +175,7 @@ function displayedValue(spec) {
 function isDirty(spec) {
   if (!spec) return false;
   if (isPromptEditorSpec(spec)) {
-    return String(draft[spec.path] || "") !== String(values.value[spec.path] || builtinPrompt(spec));
+    return String(draft[spec.path] || "") !== String(normalizeDraftValue(spec, values.value[spec.path]));
   }
   const original = spec.displayScale > 1 || spec.path.startsWith('webhooks.') ? normalizeDraftValue(spec, values.value[spec.path]) : values.value[spec.path];
   return JSON.stringify(draft[spec.path]) !== JSON.stringify(original);
@@ -250,6 +253,7 @@ async function save(spec, overrideValue = undefined) {
   saving[spec.path] = true;
   try {
     const input = overrideValue === undefined ? draft[spec.path] : overrideValue;
+    const templateDrafts = Object.values(specs.value).filter(item => item.editor === 'template').map(item => ({path: item.path, value: draft[item.path], dirty: isDirty(item)}));
     delete webhookSettingFailures[spec.path];
     const emptyWebhook = spec.path.startsWith('webhooks.') && (input == null || (typeof input === 'string' && !input.trim()));
     const data = await Api.updateSetting(spec.path, emptyWebhook ? null : settingStorageValue(spec, input));
@@ -261,14 +265,20 @@ async function save(spec, overrideValue = undefined) {
     usingBuiltin.value = fresh.usingBuiltin || {};
     revision.value = fresh.revision || data.revision || revision.value;
     if (spec.path.startsWith('webhooks.')) draft[spec.path] = normalizeDraftValue(spec, values.value[spec.path]);
-    else hydrateDraft();
+    else {
+      const currentTemplates = Object.fromEntries(templateDrafts.map(item => [item.path, draft[item.path]]));
+      hydrateDraft();
+      for (const item of templateDrafts) {
+        if ((item.path !== spec.path && item.dirty) || currentTemplates[item.path] !== item.value) draft[item.path] = currentTemplates[item.path];
+      }
+    }
     if (editingPath.value === spec.path) editingPath.value = "";
-    if (isPromptEditorSpec(spec)) editingPromptPath.value = "";
+    if (isPromptEditorSpec(spec) && !isDirty(spec) && editingPromptPath.value === spec.path) editingPromptPath.value = "";
     ElMessage.success(`${spec.title} 已保存`);
     return true;
   } catch (error) {
     if (spec.path.startsWith('webhooks.') && spec.kind !== 'bool') webhookSettingFailures[spec.path] = apiError(error);
-    else draft[spec.path] = normalizeDraftValue(spec, values.value[spec.path]);
+    else if (spec.editor !== 'template') draft[spec.path] = normalizeDraftValue(spec, values.value[spec.path]);
     ElMessage.error(apiError(error));
     return false;
   } finally {
@@ -315,7 +325,7 @@ async function toggleMulti(spec, value) {
 async function useBuiltinPrompt(spec) {
   if (!spec || saving[spec.path]) return;
   draft[spec.path] = builtinPrompt(spec);
-  await save(spec, "");
+  await save(spec, spec.editor === 'template' ? builtinPrompt(spec) : "");
 }
 async function previewPrompt(spec) {
   if (!spec || previewingPrompt.value) return;
@@ -323,6 +333,7 @@ async function previewPrompt(spec) {
   try {
     const data = okOrThrow(await Api.previewSettingPrompt(spec.path, draft[spec.path]));
     promptPreviewTitle.value = `${spec.title} · 渲染预览`;
+    promptPreviewIsTemplate.value = spec.editor === 'template';
     promptPreviewText.value = data.rendered || "";
     promptPreviewOpen.value = true;
   } catch (error) {
@@ -492,12 +503,14 @@ onMounted(load);
                     </div>
                   </div>
                   <div v-if="isPromptEditing(spec)" class="settings-prompt-editor mt-4">
-                    <MdEditor mobile-flow v-model="draft[spec.path]" completion-mode="none" square />
+                    <PromptTemplateEditor v-if="spec.editor === 'template'" mobile-flow v-model="draft[spec.path]" :completion-roots="spec.path === 'userMessageTemplate.template' ? userMessageTemplateCompletionRoots : null" square />
+                    <MdEditor v-else mobile-flow v-model="draft[spec.path]" completion-mode="none" square />
                   </div>
                   <div class="settings-technical is-open">
                     <code>{{ spec.path }}</code>
                     <span v-if="usingBuiltin[spec.path]" class="settings-builtin">跟随内置默认</span>
-                    <span v-if="spec.variables?.length">变量：<code v-for="name in spec.variables" :key="name">{{ promptVariableLabel(name) }} </code></span>
+                    <span v-if="spec.variables?.length">变量：<code v-for="name in spec.variables" :key="name">{{ promptVariableLabel(name, spec) }} </code></span>
+                    <span v-else-if="spec.editor === 'template'">输入 [[ 补全变量，行首 @ 补全模板指令</span>
                     <span v-else>无可用占位符</span>
                   </div>
                 </div>
@@ -633,7 +646,7 @@ onMounted(load);
     </div>
 
     <el-dialog v-model="promptPreviewOpen" class="admin-dialog mac-dialog" :title="promptPreviewTitle" width="860px" top="7vh" append-to-body>
-      <div class="prompt-preview-note">使用示例变量渲染；保存时仍会再次执行相同的占位符校验。</div>
+      <div class="prompt-preview-note">{{ promptPreviewIsTemplate ? '使用模板引擎和示例参数渲染当前草稿；不保存、不运行模型。' : '使用示例变量渲染；保存时仍会再次执行相同的占位符校验。' }}</div>
       <pre class="prompt-preview-output">{{ promptPreviewText }}</pre>
       <template #footer>
         <button type="button" class="mac-text-button is-primary" @click="promptPreviewOpen = false">关闭</button>

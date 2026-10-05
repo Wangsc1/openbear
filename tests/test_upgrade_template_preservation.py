@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.context.prompts import REPLACEMENTS, SUMMARY_SYSTEM_POLICY, effective_context_prompt
-from app.context.window import WINDOW_SYSTEM_POLICY
+from app.context.prompts import REPLACEMENTS, effective_context_prompt
 from app.db.dao import MessageDAO
 from app.memory.builtin import BuiltinMemoryClient
 from tests.test_memory_builtin import db as shared_db
@@ -13,7 +12,7 @@ db = shared_db
 
 
 @pytest.mark.parametrize("strategy", ["sliding_window", "model_summary"])
-async def test_bootstrap_preserves_old_and_custom_versions_while_request_view_adapts(db, strategy):
+async def test_bootstrap_and_request_view_preserve_old_and_custom_versions(db, strategy):
     old_paragraphs = "\n\n".join(REPLACEMENTS)
     # Inactive old built-ins and active user variants containing framework text
     # must both remain byte-for-byte unchanged, including identifiers and flags.
@@ -43,9 +42,7 @@ async def test_bootstrap_preserves_old_and_custom_versions_while_request_view_ad
         assert await rows() == before
         assert await dao.get_system_snapshot(123) == frozen
     request = effective_context_prompt(frozen, strategy)
-    expected = SUMMARY_SYSTEM_POLICY if strategy == "model_summary" else WINDOW_SYSTEM_POLICY
-    assert request.startswith("FROZEN_USER_CONSTRAINT\n")
-    assert expected.strip() in request
-    assert all(old not in request for old in REPLACEMENTS)
+    assert request == frozen
+    assert all(old in request for old in REPLACEMENTS)
     assert await rows() == before
     assert await dao.get_system_snapshot(123) == frozen

@@ -202,6 +202,8 @@ test('API methods use only Cron endpoints, encoded IDs, DELETE body, and exact p
   for(const name of ['cronJob','updateCronJob','controlCronJob','runCronJob','cronDeleteImpact','deleteCronJob','cronRun'])await vm.runInContext(`Api.${name}('id/encoded',{requestId:'r',confirmationToken:'token'})`,context);
   assert.ok(calls.slice(1).every(call=>call[1].includes('id%2Fencoded')));const deletion=calls.find(call=>call[0]==='delete');assert.equal(deletion[2].data.confirmationToken,'token');
   await vm.runInContext("Api.cronPreview({schedule:{kind:'every',everySeconds:60},count:5})",context);assert.equal(calls.at(-1)[1],'/cron/preview-next');assert.equal(calls.at(-1)[2].count,5);
+  await vm.runInContext('Api.cronHolidays()',context);assert.deepEqual(calls.at(-1).slice(0,2),['get','/cron/holidays']);
+  await vm.runInContext('Api.syncCronHolidays()',context);assert.deepEqual(calls.at(-1).slice(0,2),['post','/cron/holidays/sync']);
 });
 test('Tokens shorthand is case-insensitive, decimal-scaled and sent as numeric budget',async()=>{
   const cases=[['10m',10000000],['100M',100000000],['1024k',1024000],['2K',2000],['1b',1000000000],['1.5B',1500000000],['1.001k',1001],['.5m',500000],[' 10 M ',10000000],['1200',1200],[1234,1234],['',null],['   ',null],[null,null]];

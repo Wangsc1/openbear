@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import * as defaults from './folderRunDefaults.js';
+import * as promptPolicy from './promptPolicy.js';
 
 // Run the actual SFC's property load/change/validate/save functions in Node.
 // No DOM, browser, animation sleeps or duplicate implementation of those rules.
@@ -31,7 +32,7 @@ function harness({local = {}, inherited = {}, getProperties, failOptions = false
   const response = id => ({name:id,path:id,workspace:{local:'/project'},prompt:{local:'original'},
     runDefaults:{local:clone(stored.local),inherited:clone(inherited),fallback:clone(fallback),resolved:{},sources:{}}});
   const state = {
-    ...defaults, ref, computed: getter => ({get value() {return getter();}}), watch: () => {}, nextTick: async () => {},
+    ...defaults, ...promptPolicy, ref, computed: getter => ({get value() {return typeof getter === 'function' ? getter() : getter.get();},set value(value) {getter.set(value);}}), watch: () => {}, nextTick: async () => {},
     thinkingLabel: value => value, apiError: error => error.message,
     propertiesDialog:ref(false), propertiesLoading:ref(false), propertiesSaving:ref(false), propertiesTab:ref('context'),
     webhookEditor:ref(null), webhookVisited:ref(false), webhookFocused:ref(false),
@@ -141,4 +142,22 @@ test('closing a dialog while impact is pending prevents a stale save',async()=>{
   const saving=h.run('saveProperties()');await flush();h.run('closeProperties()');
   pending.resolve({affectedCount:0});await saving;
   assert.equal(h.lastUpdate(),undefined);assert.deepEqual(h.events,[]);
+});
+
+for (const id of ['project','__temporary']) {
+  test(`${id}: policy loads only local values and sends complete flags with existing folder payload`,async()=>{
+    const inherited=promptPolicy.normalizePromptPolicy({text:'parent',overrideSystemPrompt:true,toolsEnabled:true,toolNames:['parent.tool'],userMessageTemplateEnabled:true});
+    const h=harness({getProperties:async(id,response)=>({...response(id),promptPolicy:{local:promptPolicy.normalizePromptPolicy(),inherited,effective:inherited,inheritedSourcePath:'/parent'}})});
+    await h.open(id);assert.equal(h.state.propertiesForm.promptMarkdown,'');assert.equal(h.run('folderPromptPolicy.value.overrideSystemPrompt'),false);
+    assert.equal(h.state.propertiesForm.inheritedPromptPolicy.text,'parent');
+    h.run("folderPromptPolicy.value={text:'local',overrideSystemPrompt:true,toolsEnabled:true,toolNames:['Read','unavailable'],userMessageTemplateEnabled:true}");
+    await h.run('saveProperties()');assert.deepEqual(h.lastUpdate().payload.promptPolicy,{overrideSystemPrompt:true,toolsEnabled:true,toolNames:['Read','unavailable'],userMessageTemplateEnabled:true});assert.equal(h.lastUpdate().payload.promptMarkdown,'local');assert.equal(Object.hasOwn(h.lastUpdate().payload,'workspaceDir'),id!=='__temporary');
+  });
+}
+
+test('folder save keeps edits typed while impact/PUT is pending instead of closing the draft',async()=>{
+  const impact=deferred();const h=harness({impact:()=>impact.promise});await h.open();h.state.propertiesForm.promptMarkdown='submitted';
+  const save=h.run('saveProperties()');await flush();h.state.propertiesForm.promptMarkdown='typed later';h.state.propertiesForm.promptPolicy={overrideSystemPrompt:true,toolsEnabled:false,toolNames:['removed'],userMessageTemplateEnabled:true};
+  impact.resolve({affectedCount:0});await save;
+  assert.equal(h.lastUpdate().payload.promptMarkdown,'submitted');assert.equal(h.state.propertiesDialog.value,true);assert.equal(h.state.propertiesForm.promptMarkdown,'typed later');assert.equal(h.state.propertiesForm.promptPolicy.userMessageTemplateEnabled,true);
 });

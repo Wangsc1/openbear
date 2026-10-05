@@ -104,13 +104,16 @@ class WebAdminMemoryMixin:
         conversation_uuid: str = "",
         *,
         folder_values: tuple[str, str] | None = None,
+        prompt_policy: dict | None = None,
     ) -> dict[str, Any]:
+        from app.context.prompt_policy import filter_prompt_tools, policy
         model = ""
+        row = None
         values = folder_values
         conv_uuid = str(conversation_uuid or "").strip()
         if conv_uuid:
             cur = await self.db.conn.execute(
-                "SELECT owner_chat_id, folder_uuid, model FROM web_conversations WHERE conversation_uuid=? LIMIT 1",
+                "SELECT owner_chat_id, folder_uuid, model, title FROM web_conversations WHERE conversation_uuid=? LIMIT 1",
                 (conv_uuid,),
             )
             row = await cur.fetchone()
@@ -121,13 +124,11 @@ class WebAdminMemoryMixin:
                         int(row["owner_chat_id"] or 0), str(row["folder_uuid"] or "")
                     )
         workspace, prompt = values or (str(getattr(self, "workspace_dir", "") or ""), "")
-        if conv_uuid:
-            cur = await self.db.conn.execute("SELECT value FROM app_state WHERE key=?", ("conversation_context:" + conv_uuid,))
-            local = await cur.fetchone()
-            if local:
-                context_properties = json.loads(local["value"])
-                if context_properties.get("contextMode") == "override":
-                    prompt = context_properties.get("contextText", "")
+        selected = prompt_policy
+        if selected is None and conv_uuid:
+            selected = await self._resolved_prompt_policy(conv_uuid)
+        selected = selected or policy(text=prompt)
+        prompt = selected['text']
         params = self._prompt_template_params(
             available_agents=await self._available_agents_for_prompt(),
             current_model=model,
@@ -137,7 +138,15 @@ class WebAdminMemoryMixin:
         runtime = params.setdefault("runtimeInfo", {})
         if isinstance(runtime, dict):
             runtime.setdefault("channel", "web")
-        return params
+        from app.context.user_message_template import build_message_variables
+        folders = await self._tree_context_folders(row['owner_chat_id']) if row else {}
+        variables = build_message_variables(model=model, workspace=workspace, conversation={
+            'id': conv_uuid, 'title': row['title'] if row else '',
+            'folderPath': self._tree_folder_path_text(row['folder_uuid'] or '__temporary', folders) if row else '',
+        })
+        for key in ('time', 'message', 'conversation'):
+            params[key] = variables[key]
+        return filter_prompt_tools(params, selected)
 
     def _prompt_template_param_samples(self) -> list[dict[str, Any]]:
         base = self._prompt_template_params()

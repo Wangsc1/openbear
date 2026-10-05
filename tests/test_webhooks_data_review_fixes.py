@@ -279,7 +279,7 @@ async def test_runtime_R12_unknown_terminal_still_uses_capacity(env,capacity):
 
 async def test_UI05_wait_filters_before_independent_cursor(env):
     from tests.test_webhooks_query_business import endpoint
-    a=await endpoint(env,'F1'); b=await endpoint(env,'F2'); hidden=await endpoint(env,'hidden',owner=999)
+    a=await endpoint(env,'wait-folder-one'); b=await endpoint(env,'wait-folder-two'); hidden=await endpoint(env,'hidden',owner=999)
     aid=uid()
     async with env.db.webhook_transaction() as conn:
         await insert(conn,'webhook_assignments',assignment_id=aid,origin_kind='human_wait',conversation_uuid='wait-fixture',internal_chat_id=-100,root_turn_uuid='r',task_start_cursor=0,authorization_snapshot_json='{}',created_at_ms=env.s.clock())
@@ -290,13 +290,13 @@ async def test_UI05_wait_filters_before_independent_cursor(env):
     async def page(**params):
         r=await env.client.get('/api/webhooks/waits',params=params,cookies={'openbear_web_session':cookie})
         assert r.status==200; return await r.json()
-    params={'active':'true','scopeType':'folder','scopeId':'F1','search':' f1 ','effectiveStatus':'receiving','limit':2}
+    params={'active':'true','scopeType':'folder','scopeId':'wait-folder-one','search':' WAIT-FOLDER-ONE ','effectiveStatus':'receiving','limit':2}
     first=await page(**params); second=await page(**params,cursor=first['nextCursor'])
     assert [x['waitId'] for x in first['items']]==['W31','W32']
     assert [x['waitId'] for x in second['items']]==['W33','W34'] and second['nextCursor'] is None
-    assert not (await page(**{**params,'search':'F2'}))['items']
+    assert not (await page(**{**params,'search':'wait-folder-two'}))['items']
     assert not (await page(**{**params,'effectiveStatus':'paused'}))['items']
-    historical=await page(active='false',scopeType='folder',scopeId='F1',limit=100)
+    historical=await page(active='false',scopeType='folder',scopeId='wait-folder-one',limit=100)
     assert len(historical['items'])==30
     out('wait_filtered_pages',{'first':[x['waitId'] for x in first['items']],'second':[x['waitId'] for x in second['items']],'historical':len(historical['items'])})
 

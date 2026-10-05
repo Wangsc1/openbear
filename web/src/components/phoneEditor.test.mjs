@@ -103,7 +103,8 @@ test('Monaco receives readonly on creation and updates it without losing parent 
   const source = parse(fs.readFileSync(new URL('MdEditor.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content;
   const props = Vue.reactive({modelValue:'inherited',readOnly:true,language:'markdown'});
   const mounts=[],cleanups=[],events=[],updates=[]; let content,change,created;
-  const instance={getValue:()=>content,setValue:v=>{content=v;change?.();},updateOptions:v=>updates.push({...v}),onDidFocusEditorWidget(){},onDidChangeModelContent:fn=>{change=fn;},getPosition:()=>null,dispose(){}};
+  const model={};
+  const instance={getModel:()=>model,getValue:()=>content,setValue:v=>{content=v;change?.();},updateOptions:v=>updates.push({...v}),onDidFocusEditorWidget(){},onDidChangeModelContent:fn=>{change=fn;},getPosition:()=>null,dispose(){}};
   const ctx=vm.createContext({...Vue,defineProps:()=>props,defineEmits:()=> (...args)=>events.push(args),onMounted:fn=>mounts.push(fn),onBeforeUnmount:fn=>cleanups.push(fn),
     window:{__mdCompletionRegistered:true},document:{documentElement:{}},getComputedStyle:()=>({getPropertyValue:()=>''}),editorTheme:()=>({}),isDarkTheme:()=>false,subscribeTheme:()=>()=>{},bindMobileEditorFontSize:()=>()=>{},
     monaco:{editor:{defineTheme(){},create:(_el,options)=>{created=options;content=options.value;return instance;}}}});

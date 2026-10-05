@@ -294,15 +294,14 @@ async def test_summary_policy_unchanged_and_switches_do_not_reload_history(strat
     assert (await env.store.index(query="OLD USER 0"))["events"]
 
 
-def test_frozen_previous_window_policy_is_replaced_only_in_request_view():
+def test_frozen_previous_window_policy_remains_exact_in_request_view():
     stored = "Custom rule remains.\n\n" + LEGACY_WINDOW_SYSTEM_POLICY
     rendered = effective_context_prompt(stored)
+    assert rendered == stored
     assert rendered.count("## Context window runtime") == 1
-    assert "current execution round" in rendered and "optional history" in rendered
-    assert "Custom rule remains." in rendered
-    assert LEGACY_WINDOW_SYSTEM_POLICY in stored
-    assert effective_context_prompt(rendered) == rendered
-    assert WINDOW_SYSTEM_POLICY.strip() in effective_context_prompt(effective_context_prompt(rendered, "model_summary"))
+    assert LEGACY_WINDOW_SYSTEM_POLICY in rendered
+    assert effective_context_prompt(rendered) == stored
+    assert effective_context_prompt(effective_context_prompt(rendered, "model_summary")) == stored
 
 
 def test_legacy_agent_control_metadata_keeps_current_feedback_antecedent():

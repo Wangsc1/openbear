@@ -1,3 +1,4 @@
+import * as promptPolicy from '../promptPolicy.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -16,12 +17,12 @@ const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {
 const clone=value=>JSON.parse(JSON.stringify(value));
 const message={success(){},warning(){},error(){}};
 const shell={inheritAttrs:false,setup(_,{slots}){return ()=>h('div',[slots.default?.(),slots.footer?.()]);}};
-const components={AdaptiveMdEditor:shell,WebhookKey:shell,WebhookField:shell,WebhookScriptEditor:shell,WebhookCollectionSettings:shell,WebhookStatistics:shell,WebhookEventDialog:shell,WebhookStatisticsConfig:shell,ModelSettings:shell,WebhookAdvancedSettings:shell,WebhookEditor:shell};
+const components={PromptPolicyEditor:shell,PromptImpactDialog:shell,AdaptiveMdEditor:shell,WebhookKey:shell,WebhookField:shell,WebhookScriptEditor:shell,WebhookCollectionSettings:shell,WebhookStatistics:shell,WebhookEventDialog:shell,WebhookStatisticsConfig:shell,ModelSettings:shell,WebhookAdvancedSettings:shell,WebhookEditor:shell};
 let seq=0;
 function harness(name,{props={},api={},live=false,extra={},confirm=async()=>{}}={}) {
  const descriptor=parse(fs.readFileSync(new URL(name,import.meta.url),'utf8')).descriptor;
  const cleanup=[],inputs=reactive(props),scope=effectScope();
- const ctx={...Vue,...cfg,...runDefaults,modelThinkingLevels,thinkingLabel,...components,watch:live?watch:()=>{},AbortController,crypto:{randomUUID:()=>`ui-intent-${++seq}`},
+ const ctx={...Vue,...promptPolicy,...cfg,...runDefaults,modelThinkingLevels,thinkingLabel,...components,watch:live?watch:()=>{},AbortController,crypto:{randomUUID:()=>`ui-intent-${++seq}`},
  window:{addEventListener(){},removeEventListener(){}},navigator:{},console,onBeforeUnmount:fn=>cleanup.push(fn),
  inject:(_key,fallback)=>fallback,defineProps:()=>inputs,defineEmits:()=>extra.onEmit || (()=>{}),defineExpose(){},
  ElMessage:message,ElMessageBox:{confirm},Api:api,apiError:e=>e.message,createWebhookEditor,...extra};
@@ -56,13 +57,13 @@ test('UI06/07 target mode emits null; folder leaf disabled through actual Elemen
 test('UI04 saving folder properties calls the trigger leave guard and retains dialog if declined',async()=>{
  const source=parse(fs.readFileSync(new URL('../ConversationTree.vue',import.meta.url),'utf8')).descriptor.scriptSetup.content;
  const save=source.slice(source.indexOf('async function saveProperties()'),source.indexOf('async function loadAllFolders()'));
- let guards=0,writes=0;const ctx={propertyModelsLoaded:ref(false),runDefaultsChanged:ref(false),propertiesRequestGeneration:1,propertiesSaveGeneration:1,propertiesSaving:ref(false),propertiesDialog:ref(true),propertiesForm:{folderId:'F1',temporary:false,workspaceDir:'',promptMarkdown:'changed'},webhookEditor:ref({dirty:true,canLeave:async()=>{guards++;return false;}}),ElMessage:message,apiError:e=>e.message,Api:{conversationFolderPropertiesImpact:async()=>({affectedCount:0}),updateConversationFolderProperties:async()=>{writes++;return {folder:{}};}},chooseImpact:async()=>false,window:{dispatchEvent(){}},CustomEvent:class{},mergeLocatedFolders(){},emitRows(){}};
+ let guards=0,writes=0;const ctx={...promptPolicy,propertyModelsLoaded:ref(false),runDefaultsChanged:ref(false),propertiesRequestGeneration:1,propertiesSaveGeneration:1,propertiesSaving:ref(false),propertiesDialog:ref(true),propertiesForm:{folderId:'F1',temporary:false,workspaceDir:'',promptMarkdown:'changed'},webhookEditor:ref({dirty:true,canLeave:async()=>{guards++;return false;}}),ElMessage:message,apiError:e=>e.message,Api:{conversationFolderPropertiesImpact:async()=>({affectedCount:0}),updateConversationFolderProperties:async()=>{writes++;return {folder:{}};}},chooseImpact:async()=>false,window:{dispatchEvent(){}},CustomEvent:class{},mergeLocatedFolders(){},emitRows(){}};
  vm.createContext(ctx);vm.runInContext(save,ctx);await vm.runInContext('saveProperties()',ctx);assert.equal(guards,1);assert.equal(writes,1);assert.equal(ctx.propertiesDialog.value,true);
  ctx.webhookEditor.value.canLeave=async()=>true;await vm.runInContext('saveProperties()',ctx);assert.equal(ctx.propertiesDialog.value,false);
 });
 
 test('UI13 context edits during save remain dirty and cannot satisfy save-and-leave',async()=>{
- const pending=deferred();const ed=harness('../ConversationPropertiesDialog.vue',{props:{modelValue:true,conversation:{conversationUuid:'C1'}},api:{updateConversationProperties:()=>pending.promise},extra:{runConfigFromResponse:()=>({}),modelThinkingLevels:()=>[],thinkingLabel:x=>x}});
+ const pending=deferred();const ed=harness('../ConversationPropertiesDialog.vue',{props:{modelValue:true,conversation:{conversationUuid:'C1'}},api:{conversationPropertiesImpact:async()=>({affectedCount:0}),updateConversationProperties:()=>pending.promise},extra:{runConfigFromResponse:()=>({}),modelThinkingLevels:()=>[],thinkingLabel:x=>x}});
  ed.run("contextReady.value=true;context.value={contextMode:'override',contextText:'submitted'};baseline.value=JSON.stringify({contextMode:'inherit',contextText:''})");const save=ed.run('saveContext()');ed.run("context.value.contextText='typed later'");pending.resolve({properties:{contextMode:'override',contextText:'submitted'}});
  assert.equal(await save,false);assert.equal(ed.run('context.value.contextText'),'typed later');assert.equal(ed.run('dirtyContext.value'),true);ed.close();
 });
@@ -149,8 +150,8 @@ test('property template disables context and model controls plus save after a fa
  await ed.run('load()');
  const control=name=>({inheritAttrs:false,setup(_,{attrs}){captured[name]={...attrs};return ()=>h('div');}});
  const button={inheritAttrs:false,setup(_,{attrs,slots}){return ()=>h('button',attrs,slots.default?.());}};
- const html=await ed.html({WebhookField:control('context'),AdaptiveMdEditor:control('editor'),ModelSettings:control('models'),ElButton:button});
- assert.equal(captured.context.disabled,true);assert.equal(captured.editor['read-only'],true);assert.equal(captured.models.disabled,true);assert.match(html,/<button[^>]*disabled[^>]*>保存上下文配置<\/button>/);ed.close();
+ const html=await ed.html({PromptPolicyEditor:control('context'),ModelSettings:control('models'),ElButton:button});
+ assert.equal(captured.context.disabled,true);assert.equal(captured.models.disabled,true);assert.match(html,/<button[^>]*disabled[^>]*>保存上下文配置<\/button>/);ed.close();
 });
 
 test('shared thinking selector renders effective main level and truthful Agent follow label without changing inheritance values',async()=>{
@@ -160,12 +161,12 @@ test('shared thinking selector renders effective main level and truthful Agent f
  assert.equal(ed.run("options('agent','Thinking')[0].value"),'');assert.equal(ed.run("label('agentThinkLevel','')"),'跟随主会话（不支持时用模型默认）');assert.equal(ed.run("current('agentThinkLevel')"),'value:""');assert.equal(ed.run("inheritText('agentThinkLevel')"),'继承目录 · 跟随主会话（不支持时用模型默认）');ed.close();
 });
 
-test('S05 context has one actual Adaptive editor; inheritance is read-only and override keeps its own draft',async()=>{
+test('S05 local text stays editable and inherited preview is passed separately to the policy editor',async()=>{
  const captured=[];const ed=harness('../ConversationPropertiesDialog.vue',{props:{modelValue:true,conversation:{conversationUuid:'C1'}},extra:{runConfigFromResponse:()=>({})}});
- ed.run("contextReady.value=true;context.value={contextMode:'inherit',contextText:'my saved draft',inheritedContext:'parent text'}");
- const editor={inheritAttrs:false,setup(_,{attrs}){captured.push({...attrs});return ()=>h('textarea',{readonly:attrs['read-only']},attrs.modelValue);}};
- let html=await ed.html({AdaptiveMdEditor:editor});assert.equal(captured.length,1);assert.equal(captured[0].modelValue,'parent text');assert.equal(captured[0]['read-only'],true);assert.ok(!html.includes('当前系统快照'));assert.ok(!html.includes('继承来源'));
- ed.run("contextEditorText.value='must not alter';context.value.contextMode='override'");assert.equal(ed.run('contextEditorText.value'),'my saved draft');captured.length=0;await ed.html({AdaptiveMdEditor:editor});assert.equal(captured[0]['read-only'],false);ed.run("contextEditorText.value='new draft';context.value.contextMode='inherit';context.value.contextMode='override'");assert.equal(ed.run('contextEditorText.value'),'new draft');ed.close();
+ ed.run("contextReady.value=true;context.value={contextText:'',inheritedContext:'parent text'}");
+ const editor={inheritAttrs:false,setup(_,{attrs}){captured.push({...attrs});return ()=>h('textarea',attrs.modelValue.text);}};
+ let html=await ed.html({PromptPolicyEditor:editor});assert.equal(captured.length,1);assert.equal(captured[0].modelValue.text,'');assert.equal(captured[0].disabled,false);assert.equal(captured[0]['inherited-policy'].text,'parent text');assert.ok(!html.includes('当前系统快照'));
+ ed.run("contextEditorText.value='new draft'");assert.equal(ed.run('contextEditorText.value'),'new draft');captured.length=0;await ed.html({PromptPolicyEditor:editor});assert.equal(captured[0].modelValue.text,'new draft');assert.equal(captured[0]['inherited-policy'].text,'parent text');ed.close();
 });
 
 test('S06 real advanced and collection fields round-trip MB decimals, null, errors and retained advanced capabilities',async()=>{

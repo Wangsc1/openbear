@@ -42,6 +42,8 @@ def install(app, host):
 
     async def listing(r, o): return await service().list(o, dict(r.query))
     async def calendar(r, o): return await service().calendar(o, dict(r.query))
+    async def holiday_status(r, o): return {'holidayCalendar': service().holiday_status()}
+    async def holiday_sync(r, o): return service().request_holiday_sync()
     async def create(r, o): return await service().save(o, await body(r))
     async def get(r, o): return await service().get(o, r.match_info['job_id'])
     async def update(r, o): return await service().save(o, await body(r), r.match_info['job_id'])
@@ -62,6 +64,7 @@ def install(app, host):
     for method, path, handler in [
         ('GET', '/jobs', listing), ('POST', '/jobs', create), ('GET', '/folders', folders),
         ('GET', '/calendar', calendar),
+        ('GET', '/holidays', holiday_status), ('POST', '/holidays/sync', holiday_sync),
         ('GET', '/environment', env), ('POST', '/preview-next', preview), ('GET', '/statistics', statistics),
         ('GET', '/runs', runs), ('GET', '/runs/{run_id}', run_detail), ('POST', '/runs/{run_id}/stop', stop),
         ('GET', '/jobs/{job_id}', get), ('PATCH', '/jobs/{job_id}', update), ('DELETE', '/jobs/{job_id}', delete),

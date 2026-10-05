@@ -1,4 +1,5 @@
 import {useRecentConversationRows} from './components/conversationRecentRows.js';
+import {normalizePromptPolicy, promptPolicyFlags} from './components/promptPolicy.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -222,7 +223,7 @@ test("real tree alias opens the same row without moving/expanding folders; stale
   const emitted = [], sent = [];
   let resolve;
   const catalog = {connected: false, ready: false, activityReadVersions: new Map()};
-  const ctx = vm.createContext({useRecentConversationRows, computed, nextTick, reactive, ref, rowId, treeItemParent, compareTreeItems, resolveTreeDrop, activityLabel, activityState, activityReadRequests,
+  const ctx = vm.createContext({normalizePromptPolicy, promptPolicyFlags, useRecentConversationRows, computed, nextTick, reactive, ref, rowId, treeItemParent, compareTreeItems, resolveTreeDrop, activityLabel, activityState, activityReadRequests,
     // UI import seam only; alias navigation and read-receipt behavior remain real.
     defineLazyView: () => ({}),
     clearTimeout, defineProps: () => ({activeConversationUuid: "", draftConversation: null}), defineEmits: () => (...args) => emitted.push(args), defineExpose() {},

@@ -25,6 +25,7 @@ from pydantic import (
 
 from app.browser.config import BrowserConfig
 from app.context.configuration import migrate_context_config
+from app.context.user_message_template import DEFAULT_USER_MESSAGE_TEMPLATE, validate_user_message_template
 from app.models.thinking import (
     configured_default_think_level,
     normalize_think_level,
@@ -355,6 +356,19 @@ class MemoryConfig(BaseModel):
         return v
 
 
+class UserMessageTemplateConfig(BaseModel):
+    enabled: bool = True
+    template: str = DEFAULT_USER_MESSAGE_TEMPLATE
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    @field_validator("template")
+    @classmethod
+    def _validate_template(cls, value: str) -> str:
+        validate_user_message_template(value)
+        return value
+
+
 class ContextManagementConfig(BaseModel):
     """Shared Controller/Agent context policy; summary settings retain their original paths."""
     default_strategy: Literal["sliding_window", "model_summary"] = Field(default="sliding_window", alias="defaultStrategy")
@@ -669,6 +683,7 @@ class Config(BaseModel):
     models: ModelsConfig
     memory: MemoryConfig
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    user_message_template: UserMessageTemplateConfig = Field(default_factory=UserMessageTemplateConfig, alias="userMessageTemplate")
     context_management: ContextManagementConfig = Field(default_factory=ContextManagementConfig, alias="contextManagement")
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)

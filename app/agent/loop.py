@@ -328,6 +328,7 @@ class Agent:
         window_runtime: WindowRuntime | None = None,
         window_request_refresher: Callable[[list[Message]], Awaitable[list[Message]]] | None = None,
         steer_drain: Callable[[], list[str]] | None = None,
+        steer_model_text: Callable[[str, list[Any]], str] | None = None,
         model_request_refresher: Callable[[list[Message]], Awaitable[list[Message]]] | None = None,
         model_request_overlay: Callable[[list[Message]], Awaitable[list[Message]]] | None = None,
         model_call_hook: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
@@ -600,7 +601,8 @@ class Agent:
             for index, steer_text in enumerate(injected_texts):
                 source_items = steers if len(injected_texts) == 1 else [steers[index]]
                 reference_bundles = [str(item.get("referenceBundleId")) for item in source_items if isinstance(item, dict) and item.get("referenceBundleId")]
-                convo.append({"role": "user", "content": steer_text, **({"openbear_reference_bundle": reference_bundles} if reference_bundles else {})})
+                model_text = steer_model_text(steer_text, source_items) if steer_model_text else steer_text
+                convo.append({"role": "user", "content": model_text, **({"openbear_reference_bundle": reference_bundles} if reference_bundles else {})})
                 if persister is not None:
                     message_uuids = [
                         str(item.get("messageUuid") or item.get("message_uuid") or "").strip()

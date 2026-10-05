@@ -8,6 +8,7 @@ from typing import Literal
 
 from app.browser.settings import build_specs as _browser_specs
 from app.context.summary_prompt import DEFAULT_SUMMARY_PROMPT
+from app.context.user_message_template import DEFAULT_USER_MESSAGE_TEMPLATE, USER_MESSAGE_TEMPLATE_VARIABLES
 from app.conversation_titles import DEFAULT_NAMING_PROMPT
 from app.agents.prompts import PROMPT_SPECS
 
@@ -27,7 +28,7 @@ class SettingSpec:
     max_value: float | None = None
     unit: str = ""
     choices: tuple[tuple[str, str], ...] = ()
-    editor: Literal["default", "prompt"] = "default"
+    editor: Literal["default", "prompt", "template"] = "default"
     variables: tuple[str, ...] = ()
     default_value: str = ""
     # API/config values stay in storage units; editors apply this display-only scale.
@@ -107,6 +108,17 @@ def _s(*args, **kwargs) -> SettingSpec:
 
 
 SPECS: dict[str, SettingSpec] = {
+    "userMessageTemplate.enabled": _s(
+        "userMessageTemplate.enabled", "启用用户消息尾部模板",
+        "为新用户消息追加模板；关闭后不追加。已进入上下文的历史消息保持原样。",
+        "bool", "user_message_template", "下一轮生效",
+    ),
+    "userMessageTemplate.template": _s(
+        "userMessageTemplate.template", "用户消息尾部提示词模板",
+        "使用 [[ 变量 ]]、@if、@each 和 @raw 语法；留空不追加。时间在消息首次进入时固定，重试不刷新。",
+        "str", "user_message_template", "下一轮生效", editor="template",
+        variables=USER_MESSAGE_TEMPLATE_VARIABLES, default_value=DEFAULT_USER_MESSAGE_TEMPLATE,
+    ),
     "agent.maxRunWallSeconds": _s(
         "agent.maxRunWallSeconds",
         "单轮最长运行时间",
@@ -800,6 +812,10 @@ GROUPS: dict[str, tuple[str, list[str]]] = {
         "agent.namingPrompt",
         ],
     ),
+    "user_message_template": (
+        "用户消息尾部模板",
+        ["userMessageTemplate.enabled", "userMessageTemplate.template"],
+    ),
     "retry": (
         "模型失败恢复",
         [
@@ -933,6 +949,7 @@ WEB_DOMAINS: dict[str, tuple[str, str, list[str]]] = {
         "运行、恢复、上下文与子任务协作",
         [
             "agent",
+            "user_message_template",
             "retry",
             "timeouts",
             "compaction",

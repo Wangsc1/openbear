@@ -7,7 +7,6 @@ from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.cron.contracts import CronError, JobConfig, timestamp
-from app.cron.holidays import coverage, holiday_info, is_day_off
 from app.cron.schedule import next_time
 from app.webhooks.contracts import iso
 from app.webhooks.repository import many
@@ -159,7 +158,8 @@ class _ProjectionLimit(Exception):
 
 
 class _CronBudget:
-    def __init__(self):
+    def __init__(self, snapshot):
+        self.snapshot = snapshot
         self.remaining = MAX_CRON_STEPS
 
     async def next(self, schedule, after):
@@ -168,12 +168,13 @@ class _CronBudget:
         self.remaining -= 1
         if self.remaining % 256 == 0:
             await asyncio.sleep(0)
-        return next_time(schedule, after)
+        return next_time(schedule, after, self.snapshot)
 
 
 async def calendar(service, owner, params):
     start, end, tz = _parameters(params)
     now, conn = service.clock(), service.db.conn
+    snapshot, holiday_status = service.holidays.snapshot, service.holiday_status()
     folders = await service.host._tree_folders(owner)
     paths = {fid: service.host._tree_folder_path_text(fid, folders) for fid in folders}
     clause, args = _filters(params)
@@ -201,7 +202,7 @@ async def calendar(service, owner, params):
     finally:
         await cursor.close()
 
-    warnings, budget = [], _CronBudget()
+    warnings, budget = [], _CronBudget(snapshot)
     for row in rows:
         lower = max(start, now, row['created_at_ms'])
         if lower >= end:
@@ -211,9 +212,12 @@ async def calendar(service, owner, params):
             schedule = JobConfig.model_validate_json(row['config_json']).schedule
             if schedule.kind == 'at' and row['schedule_state'] in ('exhausted', 'missed'):
                 continue
+            if schedule.kind != 'at':
+                # Do not consult an unknown year beyond the requested projection.
+                schedule = schedule.model_copy(update={'end_at': iso(min(end, timestamp(schedule.end_at)) if schedule.end_at else end)})
             status = 'target_missing' if row['folder_id'] not in folders else 'disabled' if not row['enabled'] else 'waiting'
             if schedule.kind in ('at', 'every'):
-                first = next_time(schedule, lower - 1)
+                first = next_time(schedule, lower - 1, snapshot)
                 if first is None or first >= end:
                     continue
                 if schedule.kind == 'at':
@@ -226,7 +230,7 @@ async def calendar(service, owner, params):
                 upper = min(end, timestamp(schedule.end_at)) if schedule.end_at else end
                 # Decide rest days in the rule timezone, then group in the display timezone.
                 for rule_day, rule_lo, rule_hi in _days(max(lower, first), upper, ZoneInfo(schedule.timezone)):
-                    if schedule.skip_holidays and is_day_off(date.fromisoformat(rule_day)):
+                    if schedule.skip_holidays and snapshot.is_day_off(date.fromisoformat(rule_day)):
                         continue
                     for day, lo, hi in _days(rule_lo, rule_hi, tz):
                         spans = _every_day(first, period, lo, hi, occupied[row['job_id'], day])
@@ -239,7 +243,8 @@ async def calendar(service, owner, params):
                 # never masquerade as an exact aggregate. Earlier days remain valid.
                 pending, after = _Group(), lo - 1
                 while True:
-                    at = await budget.next(schedule, after)
+                    day_schedule = schedule.model_copy(update={'end_at': iso(min(hi, timestamp(schedule.end_at)))})
+                    at = await budget.next(day_schedule, after)
                     if at is None or at >= hi:
                         break
                     after = at
@@ -254,5 +259,5 @@ async def calendar(service, owner, params):
     items = [item for group in groups.values() for item in group.items()]
     items.sort(key=lambda item: (_bound(item['at']), item['id']))
     return dict(items=items, jobs=jobs, now=iso(now), totalJobs=len(jobs), warnings=warnings,
-                annotations=[holiday_info(date.fromisoformat(day)) for day, _, _ in _days(start, end, tz)],
-                holidayCalendar=coverage())
+                annotations=[snapshot.holiday_info(date.fromisoformat(day)) for day, _, _ in _days(start, end, tz)],
+                holidayCalendar={**holiday_status, 'missingYears': sorted({date.fromisoformat(day).year for day, _, _ in _days(start, end, tz)} - snapshot.years)})

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import {useRecentConversationRows} from './conversationRecentRows.js';
+import {normalizePromptPolicy, promptPolicyFlags} from './promptPolicy.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -12,7 +13,7 @@ const treeSource=fs.readFileSync(new URL('./ConversationTree.vue',import.meta.ur
 const strip=source=>source.match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import[\s\S]*?;\n/gm,'');
 function hoverHarness(){
  let time=0,serial=0;const timers=new Map();
- const env={useRecentConversationRows,referenceCatalog:{},computed,nextTick,reactive,ref,compareTreeItems,rowId,watch(){},onMounted(){},onBeforeUnmount(){},defineProps:()=>({}),defineEmits:()=>()=>{},defineExpose(){},
+ const env={normalizePromptPolicy,promptPolicyFlags,useRecentConversationRows,referenceCatalog:{},computed,nextTick,reactive,ref,compareTreeItems,rowId,watch(){},onMounted(){},onBeforeUnmount(){},defineProps:()=>({}),defineEmits:()=>()=>{},defineExpose(){},
   // UI import seam only; keep the real hover/timer handlers and assertions.
   defineLazyView:()=>({}),
   setTimeout:(fn,ms)=>{timers.set(++serial,{fn,at:time+ms});return serial;},clearTimeout:id=>timers.delete(id),

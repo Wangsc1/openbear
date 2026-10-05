@@ -16,10 +16,13 @@ from tests.test_webhooks_backend import env as base_env
 
 
 @pytest.fixture
-async def env(base_env):  # noqa: F811 - pytest fixture dependency
+async def env(base_env, monkeypatch):  # noqa: F811 - pytest fixture dependency
     e = base_env
     e.now = timestamp('2026-10-05T12:00:00Z')
     e.cron = CronService(e.db, e.server, clock=lambda: e.now)
+    async def offline_fetch(session, url):
+        raise OSError('isolated test: network unavailable')
+    monkeypatch.setattr(e.cron.holidays, 'fetch', offline_fetch)
     e.server.cron = e.cron
     yield e
     await e.cron.close()

@@ -21,9 +21,12 @@ from tests.test_webhooks_backend import env as base_env
 
 
 @pytest.fixture
-async def cron_env(base_env):
+async def cron_env(base_env, monkeypatch):
     e = base_env
     e.cron = CronService(e.db, e.server)
+    async def offline_fetch(session, url):
+        raise OSError('isolated test: network unavailable')
+    monkeypatch.setattr(e.cron.holidays, 'fetch', offline_fetch)
     e.server.cron = e.cron
     register_cron_tool(e.server.tools, e.cron)
     try:
@@ -173,7 +176,7 @@ async def test_parallel_ticks_and_manual_request_id(cron_env):
     assert len(e.cron.tasks) == 2
     await asyncio.gather(*list(e.cron.tasks.values()))
     runs = (await e.cron.runs(123, {}))['items']
-    assert len(runs) == 2 and all(r['status'] == 'completed' for r in runs), runs
+    assert len(runs) == 2 and all(r['status'] == 'completed' for r in runs), json.dumps(runs, ensure_ascii=False, indent=2)
     assert len({r['conversationId'] for r in runs}) == 2
 
 

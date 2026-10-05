@@ -1,3 +1,4 @@
+import * as promptPolicy from './promptPolicy.js';
 import test from 'node:test';
 import {useRecentConversationRows} from './conversationRecentRows.js';
 import assert from 'node:assert/strict';
@@ -25,7 +26,7 @@ function treeHarness(t) {
   const props = reactive({activeConversationUuid: '', draftConversation: null});
   const catalog = reactive({connected: false, ready: false, activityReadVersions: new Map()});
   const emitted = [], timers = new Map(); let time = 0, serial = 0;
-  const ctx = vm.createContext({...icons, referenceItem: () => null, useRecentConversationRows, computed, nextTick, reactive, ref, watch, rowId, treeItemParent, compareTreeItems, resolveTreeDrop,
+  const ctx = vm.createContext({...promptPolicy,...icons, referenceItem: () => null, useRecentConversationRows, computed, nextTick, reactive, ref, watch, rowId, treeItemParent, compareTreeItems, resolveTreeDrop,
     activityLabel, activityState, activityReadRequests, referenceCatalog: catalog,
     defineLazyView: () => ({}), defineProps: () => props, defineEmits: () => (...args) => emitted.push(args), defineExpose() {}, onMounted() {}, onBeforeUnmount() {},
     Api: {}, apiError: String, ElMessage: {error(value) {assert.fail(String(value));}},

@@ -11,11 +11,12 @@ from app.db.engine import DB
 from app.operation_locks import ChatOperationLocks
 from app.agents.agent_prompt import agent_system_prompt_params
 from app.web_console.conversation_tree import WebAdminConversationTreeMixin
+from app.web_console.prompt_policy import PromptPolicyMixin
 from app.web_console.conversations import WebAdminConversationsMixin
 from app.web_console.core import _WEB_SESSION_KEY, WebSession
 
 
-class _TreeHarness(WebAdminConversationTreeMixin, WebAdminConversationsMixin):
+class _TreeHarness(PromptPolicyMixin, WebAdminConversationTreeMixin, WebAdminConversationsMixin):
     def __init__(self, db: DB) -> None:
         self.db = db
         self.workspace_dir = "/shared/workspace"

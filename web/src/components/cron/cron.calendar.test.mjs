@@ -223,6 +223,27 @@ test('past days cannot create by direct action, keyboard or drag; history remain
   h.run("beginSelection({},'2000-01-01','dates')");assert.equal(h.run('drag.value'),null);
   h.run("selectDay('2000-01-01')");assert.equal(h.run('selectedDay.value'),'2000-01-01');h.close();
 });
+test('holiday skipping permits an unbounded schedule and labels missing data separately',()=>{
+  for(const schedule of [{kind:'cron',expression:'0 9 * * *',timezone:'Asia/Shanghai',skipHolidays:true}, {kind:'every',everySeconds:3600,timezone:'Asia/Shanghai',skipHolidays:true}]) {
+    assert.deepEqual(config.scheduleErrors(schedule),[]);
+    assert.equal(config.schedulePayload(schedule).skipHolidays,true);
+    assert.equal(Object.hasOwn(config.schedulePayload(schedule),'endAt'),false);
+  }
+  assert.equal(config.label('waiting_calendar'),'等待日历数据');
+});
+test('calendar holiday sync refreshes displayed status, blocks duplicates and reports request failure',async()=>{
+  let synced=0,loads=0,fail=false;
+  const h=harness('./CronCalendar.vue',{props:calendarProps(),Api:{cronCalendar:async()=>{loads++;return {...data(),holidayCalendar:{years:[2026],syncing:false}};},syncCronHolidays:async()=>{synced++;if(fail)throw Error('offline');}}});await flush();
+  const old=loads;assert.equal(await h.run('syncHolidays()'),true);assert.equal(synced,1);assert.equal(loads,old+1);
+  h.run('data.value.holidayCalendar.syncing=true');assert.equal(await h.run('syncHolidays()'),false);assert.equal(synced,1);
+  h.run('data.value.holidayCalendar.syncing=false');fail=true;assert.equal(await h.run('syncHolidays()'),false);assert.equal(h.run('holidayError.value'),'offline');assert.equal(h.run('holidaySyncing.value'),false);h.close();
+});
+test('quick create allows missing-calendar wait but does not claim a date is scheduled',async()=>{
+  const io=fixture(),notices=[];io.api.cronPreview=async()=>({times:[],scheduleState:'waiting_calendar',waitingYears:[2099]});
+  const h=harness('./CronQuickCreate.vue',{props:{at:new Date(2099,9,5,12).toISOString(),endDate:'2099-10-07',folderId:'F'},Api:io.api,ElMessage:{success:text=>notices.push(text)}});await flush();
+  h.run("draft.name='Future';draft.config.instructions='Fixture only';draft.enabled=true;skipHolidays.value=true");await flush();
+  assert.equal(await h.run('save()'),true);assert.equal(io.calls.length,1);assert.match(notices[0],/等待日历数据/);h.close();
+});
 test('shortening a range removes weekly selection; all-skipped preview cannot save',async()=>{
   const io=fixture(),h=harness('./CronQuickCreate.vue',{props:{at:new Date(2099,9,5,12).toISOString(),endDate:'2099-10-20',folderId:'F'},Api:io.api});await flush();
   h.run("repeat.value='weekly'");await flush();assert.equal(h.run('repeat.value'),'weekly');

@@ -127,6 +127,8 @@ export const Api = {
   statistics: (params = {}) => api.get("/statistics", { params }).then(unwrap),
 
   cronCalendar: (params = {}) => api.get('/cron/calendar', { params }).then(unwrap),
+  cronHolidays: () => api.get('/cron/holidays').then(unwrap),
+  syncCronHolidays: () => api.post('/cron/holidays/sync', {}).then(unwrap),
   cronJobs: (params = {}) => api.get('/cron/jobs', { params }).then(unwrap),
   cronJob: (id) => api.get(`/cron/jobs/${encodeURIComponent(id)}`).then(unwrap),
   createCronJob: (data) => api.post('/cron/jobs', data).then(unwrap),
@@ -163,6 +165,9 @@ export const Api = {
   webhookWaits: (params = {}, options = {}) => api.get('/webhooks/waits', { params, signal: options.signal }).then(unwrap),
   controlWebhookWait: (id, data) => api.post(`/webhooks/waits/${encodeURIComponent(id)}/control`, data).then(unwrap),
   webhookStatistics: (params = {}, options = {}) => api.get('/webhooks/statistics', { params, signal: options.signal }).then(unwrap),
+  promptTools: () => api.get('/prompt-tools').then(unwrap),
+  previewPromptTemplate: (data) => api.post('/prompt-template/preview', data).then(unwrap),
+  conversationPropertiesImpact: (uuid, data) => api.post(`/conversations/${encodeURIComponent(uuid)}/properties/impact`, data).then(unwrap),
   conversationProperties: (uuid) => api.get(`/conversations/${encodeURIComponent(uuid)}/properties`).then(unwrap),
   updateConversationProperties: (uuid, data) => api.put(`/conversations/${encodeURIComponent(uuid)}/properties`, data).then(unwrap),
 
@@ -189,7 +194,7 @@ export const Api = {
   settingsSpecs: () => api.get("/settings/specs").then(unwrap),
   settings: () => api.get("/settings").then(unwrap),
   updateSetting: (path, value) => api.patch(`/settings/${encodeURIComponent(path)}`, { value }, { timeout: path.startsWith('browser.') ? 130000 : undefined }).then(unwrap),
-  previewSettingPrompt: (path, value, variables = {}) => api.post("/settings/prompt-preview", { path, value, variables }).then(unwrap),
+  previewSettingPrompt: (path, value, variables) => api.post("/settings/prompt-preview", { path, value, ...(variables === undefined ? {} : {variables}) }).then(unwrap),
   testWebTaskNotification: () => api.post("/settings/web-task-notifications/test").then(unwrap),
   testBrowserConnection: (endpoint) => api.post("/settings/browser/test", { endpoint }, { timeout: 130000 }).then(unwrap),
 

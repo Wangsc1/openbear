@@ -9,7 +9,9 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { Api, apiError } from "../api";
 import { MOBILE_VIEWPORT_QUERY } from "../mobileViewport.js";
 import ModelSettings from "./ModelSettings.vue";
-import AdaptiveMdEditor from "./AdaptiveMdEditor.vue";
+import PromptPolicyEditor from "./PromptPolicyEditor.vue";
+import PromptImpactDialog from "./PromptImpactDialog.vue";
+import {normalizePromptPolicy, promptPolicyFlags} from "./promptPolicy.js";
 import "./conversationTreeProperties.css";
 import ConversationPromptDialog from "./ConversationPromptDialog.vue";
 import WebhookEditor from "./webhooks/WebhookEditor.vue";
@@ -121,6 +123,7 @@ const propertyModelOptions = ref([]);
 const propertiesRunDefaultsBaseline = ref({});
 const propertiesForm = reactive({
   folderId: "", parentId: "", name: "", path: "", temporary: false, workspaceDir: "", promptMarkdown: "",
+  promptPolicy: promptPolicyFlags(), inheritedPromptPolicy: normalizePromptPolicy(), inheritedPromptSourcePath: "",
   runDefaults: {}, runInherited: {}, runFallback: {}, runResolved: {},
 });
 let propertiesRequestGeneration = 0;
@@ -1092,7 +1095,10 @@ async function showProperties(row, initialTab = 'context') {
     }
     Object.assign(propertiesForm, {
       folderId, parentId: String(row.parentId || ""), name: data.name, path: data.path,
-      workspaceDir: data.workspace?.local || "", promptMarkdown: data.prompt?.local || "",
+      workspaceDir: data.workspace?.local || "", promptMarkdown: data.promptPolicy?.local?.text ?? data.prompt?.local ?? "",
+      promptPolicy: promptPolicyFlags(data.promptPolicy?.local),
+      inheritedPromptPolicy: normalizePromptPolicy(data.promptPolicy?.inherited || {text: data.prompt?.inherited}),
+      inheritedPromptSourcePath: data.promptPolicy?.inheritedSourcePath || "",
       runDefaults: sparseRunDefaults(data.runDefaults?.local),
       runInherited: sparseRunDefaults(data.runDefaults?.inherited),
       runFallback: sparseRunDefaults(data.runDefaults?.fallback),
@@ -1106,6 +1112,10 @@ async function showProperties(row, initialTab = 'context') {
     if (request === propertiesRequestGeneration) propertiesLoading.value = false;
   }
 }
+const folderPromptPolicy = computed({
+  get: () => normalizePromptPolicy({...propertiesForm.promptPolicy, text: propertiesForm.promptMarkdown}),
+  set: value => { if (!propertiesLoading.value) { propertiesForm.promptMarkdown = value.text; propertiesForm.promptPolicy = promptPolicyFlags(value); } },
+});
 const propertyModelsLoaded = ref(false);
 const runDefaultsChanged = computed(() => JSON.stringify(sparseRunDefaults(propertiesForm.runDefaults))
   !== JSON.stringify(propertiesRunDefaultsBaseline.value));
@@ -1218,6 +1228,7 @@ function resetPropertiesForm(row) {
     temporary: row.systemNode === "temporary",
     parentId: String(row.parentId || ""), name: String(row.name || ""), path: String(row.path || ""),
     workspaceDir: "", promptMarkdown: "",
+    promptPolicy: promptPolicyFlags(), inheritedPromptPolicy: normalizePromptPolicy(), inheritedPromptSourcePath: "",
     runDefaults: {}, runInherited: {}, runFallback: {}, runResolved: {},
   });
 }
@@ -1274,8 +1285,10 @@ async function saveProperties() {
   const payload = {
     ...(!temporary ? { workspaceDir: propertiesForm.workspaceDir } : {}),
     promptMarkdown: propertiesForm.promptMarkdown,
+    promptPolicy: promptPolicyFlags(propertiesForm.promptPolicy),
     ...(saveRunDefaults ? { runDefaults: sparseRunDefaults(propertiesForm.runDefaults) } : {}),
   };
+  const draftAtSubmit = JSON.stringify(propertiesForm);
   try {
     const impact = await Api.conversationFolderPropertiesImpact(folderId, payload);
     if (request !== propertiesRequestGeneration || !propertiesDialog.value) return;
@@ -1286,7 +1299,7 @@ async function saveProperties() {
     // Saving another tab must not destroy trigger edits (or an in-flight Key response).
     if (request === propertiesRequestGeneration) {
       const leave = !webhookEditor.value || await webhookEditor.value.canLeave();
-      if (leave && request === propertiesRequestGeneration) propertiesDialog.value = false;
+      if (leave && request === propertiesRequestGeneration && JSON.stringify(propertiesForm) === draftAtSubmit) propertiesDialog.value = false;
     }
     if (!temporary) {
       if (result.folder) mergeLocatedFolders([result.folder]);
@@ -1298,7 +1311,8 @@ async function saveProperties() {
       emitRows();
     }
     const skipped = Number(result.skippedRunningCount || 0);
-    ElMessage.success(choice === true ? `属性已保存，更新 ${result.updatedCount || 0} 个快照${skipped ? `；运行中跳过 ${skipped} 个` : ""}` : "属性已保存；已有快照保持不变");
+    const later = request === propertiesRequestGeneration && JSON.stringify(propertiesForm) !== draftAtSubmit;
+    ElMessage.success((choice === true ? `属性已保存，更新 ${result.updatedCount || 0} 个快照${skipped ? `；运行中跳过 ${skipped} 个` : ""}` : "属性已保存；已有快照保持不变") + (later ? "；后续修改仍未保存，已保留草稿" : ""));
   } catch (error) { ElMessage.error(apiError(error)); }
   finally { if (save === propertiesSaveGeneration) propertiesSaving.value = false; }
 }
@@ -1451,11 +1465,12 @@ async function runMenuAction(action) {
 
 function dragStart(event, row) {
   closeOverview();
-  if (moveInFlight.value || row.recentAlias || !["folder", "conversation"].includes(row.kind) || row.local || (row.kind === 'folder' && (query.value || row.archived))) { event.preventDefault(); return; }
+  if (moveInFlight.value || !["folder", "conversation"].includes(row.kind) || row.local || (row.kind === 'folder' && (query.value || row.archived))) { event.preventDefault(); return; }
   closeMenu();
-  const canMove = !query.value && !row.archived;
+  // Recent aliases can export a reference, never become a tree-move source.
+  const canMove = !row.recentAlias && !query.value && !row.archived;
   drag.value = { row: canMove ? row : null, target: null, zone: "", busy: false };
-  event.dataTransfer.setData('application/x-openbear-tree', row.kind);
+  if (!row.recentAlias) event.dataTransfer.setData('application/x-openbear-tree', row.kind);
   if (row.kind === 'conversation') {
     const reference = {kind:'chat',id:row.conversationUuid,label:row.title || '新会话',scope:'full'};
     event.dataTransfer.effectAllowed = canMove ? 'copyMove' : 'copy';
@@ -1611,7 +1626,7 @@ onBeforeUnmount(() => {
           :role="isDirectoryView ? 'treeitem' : 'listitem'" :aria-level="isDirectoryView ? Number(row.depth || 0) + 1 : undefined" :aria-busy="rowLoading(row) || isTitleGenerating(row)"
           :aria-expanded="['folder','system'].includes(row.kind) ? String(isExpanded(row.kind === 'system' ? row.id : row.folderId)) : undefined"
           :tabindex="['folder','conversation','system'].includes(row.kind) ? 0 : -1"
-          :draggable="!row.recentAlias && !row.local && !moveInFlight && (row.kind === 'conversation' || (row.kind === 'folder' && !query && !row.archived))"
+          :draggable="!row.local && !moveInFlight && (row.kind === 'conversation' || (row.kind === 'folder' && !query && !row.archived))"
           @keydown="rowKeydown($event, row)" @contextmenu="openMenu($event, row)"
           @pointerenter="enterOverview($event, row)" @pointerleave="leaveOverview"
           @dragstart="dragStart($event, row)" @dragover="dragOver($event, row)" @drop="drop($event, row)" @dragend="clearDrag"
@@ -1728,13 +1743,8 @@ onBeforeUnmount(() => {
                 </label>
 
               </section>
-              <section class="property-section" aria-labelledby="folder-prompt-label">
-                <!-- Monaco owns its input focus. A wrapping label redirects clicks to its hidden IME textarea. -->
-                <div class="property-field" role="group" aria-labelledby="folder-prompt-label">
-                  <span id="folder-prompt-label">{{ propertiesForm.temporary ? '注入上下文（Markdown）' : '本节点注入提示词（Markdown）' }} <em>{{ propertiesForm.temporary ? '仅用于临时会话；清空即不注入' : '清空即继承；就近覆盖，不累加' }}</em></span>
-                  <div class="folder-prompt-editor"><AdaptiveMdEditor v-model="propertiesForm.promptMarkdown" language="markdown" completion-mode="none" /></div>
-                </div>
-
+              <section class="property-section" aria-label="提示词配置">
+                <PromptPolicyEditor v-model="folderPromptPolicy" :disabled="propertiesLoading" :folder-id="propertiesForm.folderId" :inherited-policy="propertiesForm.inheritedPromptPolicy" :inherited-source-path="propertiesForm.inheritedPromptSourcePath" />
               </section>
 
             </div>
@@ -1774,14 +1784,7 @@ onBeforeUnmount(() => {
       <template #footer><el-button @click="moveDialog = false">取消</el-button><el-button type="primary" :loading="moveBusy" @click="submitMove">{{ moveMode === 'delete' ? '下一步' : '移动' }}</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="impactDialog" class="mobile-viewport-dialog" width="min(600px, calc(100vw - 24px))" append-to-body :show-close="false" :close-on-click-modal="false" :close-on-press-escape="false" title="是否同时更新已有会话的系统提示词？">
-      <div class="impact-copy">
-        <p>此次{{ impactState.action }}影响 <strong>{{ impactState.impact?.affectedCount || 0 }}</strong> 个已有会话：可更新 {{ impactState.impact?.updatableCount || 0 }} 个；运行中 {{ impactState.impact?.runningCount || 0 }} 个，本次将跳过。<span v-if="impactState.impact?.archivedCount">其中已归档 {{ impactState.impact.archivedCount }} 个。</span></p>
-        <p>更新会用当前模板和各会话自己的当前参数重新组装完整系统提示词。这会使对应提示词/Provider continuation 缓存失效，可能增加后续输入开销和延迟。</p>
-        <p>聊天历史、TaskMemory 和文件不会删除。Agent 模板与快照不受影响。运行中目标在提交锁内重查，跳过后不会自动延后更新。</p>
-      </div>
-      <template #footer><el-button @click="finishImpact(null)">取消</el-button><el-button @click="finishImpact(false)">仅{{ impactState.action }}，不更新</el-button><el-button type="primary" @click="finishImpact(true)">{{ impactState.action }}并更新可更新会话</el-button></template>
-    </el-dialog>
+    <PromptImpactDialog :model-value="impactDialog" :action="impactState.action" :impact="impactState.impact" @choose="finishImpact" />
   </section>
 </template>
 

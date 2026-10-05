@@ -939,6 +939,13 @@ class WebAdminConversationsMixin:
                         "task_uuid": task_map.get(str(row.get("task_uuid") or ""), str(row.get("task_uuid") or "")),
                     },
                 )
+            # Prompt settings and their frozen activation state travel together.
+            # Keep old sessions explicitly in normal mode when no sidecar existed.
+            from app.context.prompt_policy import read_json, write_json, snapshot_key
+            local_prompt = await read_json(self.db.conn, 'conversation_context:' + old_uuid)
+            if local_prompt is not None:
+                await write_json(self.db.conn, 'conversation_context:' + new_uuid, local_prompt)
+            await write_json(self.db.conn, snapshot_key(new_uuid), await self._active_prompt_policy(old_uuid))
             # An edited branch keeps its explicit system/tools and injection
             # policy when copied. The creation document remains an immutable
             # provenance record, not the duplicate's active window.

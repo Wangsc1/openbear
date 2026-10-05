@@ -16,6 +16,8 @@ const props = defineProps({
   // - template: 提示词模板编辑,补 [[变量/函数]] + @if/@each 等模板指令
   // - none: 关闭自定义补全
   completionMode: { type: String, default: "memory" },
+  // null keeps all system-template suggestions; roots/leaf paths constrain other template contexts.
+  completionRoots: { type: Array, default: null },
   // 引用补全数据:{ mem:[{key,name,note}], secret:[{key,note}], doc:[{key,title}] }
   refData: { type: Object, default: () => ({ mem: [], secret: [], doc: [] }) },
 });
@@ -39,21 +41,36 @@ function syncEditorTheme(state) {
 }
 
 if (typeof window !== "undefined") {
-  window.__mdCompletionContext = window.__mdCompletionContext || {
-    mode: "memory",
-    refData: { mem: [], secret: [], doc: [] },
-  };
+  window.__mdCompletionContexts = window.__mdCompletionContexts || new WeakMap();
 }
 
 function syncCompletionContext() {
-  if (typeof window === "undefined") return;
-  window.__mdCompletionContext = {
+  const model = editor?.getModel();
+  if (typeof window === "undefined" || !model) return;
+  window.__mdCompletionContexts.set(model, {
     mode: props.completionMode || "memory",
+    completionRoots: props.completionRoots,
     refData: props.refData || { mem: [], secret: [], doc: [] },
-  };
+  });
 }
 
 const TEMPLATE_EXPRESSIONS = [
+  { expr: "time.now", detail: "当前本地时间" },
+  { expr: "time.iso", detail: "当前时间（ISO）" },
+  { expr: "time.date", detail: "当前日期" },
+  { expr: "time.clock", detail: "当前时分秒" },
+  { expr: "time.weekday", detail: "当前星期" },
+  { expr: "time.timezone", detail: "当前时区" },
+  { expr: "time.utcOffset", detail: "UTC 偏移" },
+  { expr: "time.timestamp", detail: "当前时间戳" },
+  { expr: "message.id", detail: "当前消息标识" },
+  { expr: "message.source", detail: "当前消息来源" },
+  { expr: "message.sentAt", detail: "消息发送时间" },
+  { expr: "message.attachmentCount", detail: "消息附件数量" },
+  { expr: "message.attachments", detail: "消息附件列表" },
+  { expr: "conversation.id", detail: "当前会话标识" },
+  { expr: "conversation.title", detail: "当前会话标题" },
+  { expr: "conversation.folderPath", detail: "当前会话目录路径" },
   // 当前 build_system_prompt_params() 提供的运行时变量
   { expr: "workspaceDir", detail: "OpenBear 公共 workspace（工具与产物根保持不变）" },
   { expr: "folderWorkspaceDir", detail: "当前主会话目录继承后的工作目录；无设置时回退 workspaceDir" },
@@ -158,14 +175,18 @@ const TEMPLATE_DIRECTIVES = [
   { label: "@endraw", detail: "结束原样输出块", insert: "@endraw" },
 ];
 
-function getCompletionContext() {
-  return (typeof window !== "undefined" && window.__mdCompletionContext) || {
-    mode: "memory",
+function getCompletionContext(model) {
+  return (typeof window !== "undefined" && window.__mdCompletionContexts?.get(model)) || {
+    mode: "none",
     refData: { mem: [], secret: [], doc: [] },
   };
 }
 
-function buildTemplateExpressionSuggestions(monacoApi, position, line) {
+function allowedExpression(expr, roots) {
+  return !Array.isArray(roots) || roots.some(root => expr === root || expr.startsWith(root + '.'));
+}
+
+function buildTemplateExpressionSuggestions(monacoApi, position, line, roots) {
   const open = line.lastIndexOf("[[");
   if (open < 0) return null;
 
@@ -189,7 +210,7 @@ function buildTemplateExpressionSuggestions(monacoApi, position, line) {
     endColumn: position.column,
   };
   const suggestions = TEMPLATE_EXPRESSIONS
-    .filter((it) => !typed || it.expr.toLowerCase().includes(typed))
+    .filter((it) => allowedExpression(it.expr, roots) && (!typed || it.expr.toLowerCase().includes(typed)))
     .map((it, idx) => ({
       label: `[[ ${it.expr} ]]`,
       kind: it.expr.includes("(") ? monacoApi.languages.CompletionItemKind.Function : monacoApi.languages.CompletionItemKind.Variable,
@@ -202,7 +223,7 @@ function buildTemplateExpressionSuggestions(monacoApi, position, line) {
   return { suggestions, incomplete: false };
 }
 
-function buildTemplateDirectiveSuggestions(monacoApi, position, line) {
+function buildTemplateDirectiveSuggestions(monacoApi, position, line, roots) {
   const m = line.match(/^(\s*)@(\S*)$/);
   if (!m) return null;
   const indent = m[1] || "";
@@ -214,6 +235,7 @@ function buildTemplateDirectiveSuggestions(monacoApi, position, line) {
     endColumn: position.column,
   };
   const suggestions = TEMPLATE_DIRECTIVES
+    .filter((it) => (it.insert.match(/\bmemory\.[\w.]+/g) || []).every(expr => allowedExpression(expr, roots)))
     .filter((it) => !typed || it.label.toLowerCase().replace(/^@/, "").startsWith(typed))
     .map((it, idx) => ({
       label: it.label,
@@ -294,12 +316,12 @@ function registerCompletion() {
     triggerCharacters: ["[", "@", "＠", "/", "."],
     provideCompletionItems(model, position) {
       const line = model.getValueInRange({ startLineNumber: position.lineNumber, startColumn: 1, endLineNumber: position.lineNumber, endColumn: position.column });
-      const { mode, refData } = getCompletionContext();
+      const { mode, refData, completionRoots } = getCompletionContext(model);
       if (mode === "none") return { suggestions: [] };
 
       if (mode === "template") {
-        return buildTemplateExpressionSuggestions(monaco, position, line)
-          || buildTemplateDirectiveSuggestions(monaco, position, line)
+        return buildTemplateExpressionSuggestions(monaco, position, line, completionRoots)
+          || buildTemplateDirectiveSuggestions(monaco, position, line, completionRoots)
           || { suggestions: [] };
       }
 
@@ -310,7 +332,6 @@ function registerCompletion() {
 }
 
 onMounted(() => {
-  syncCompletionContext();
   stopThemeSubscription = subscribeTheme(syncEditorTheme);
   registerCompletion();
   editor = monaco.editor.create(el.value, {
@@ -340,6 +361,7 @@ onMounted(() => {
     suggest: { showWords: false, filterGraceful: true, snippetsPreventQuickSuggestions: false },
     tabCompletion: "on",
   });
+  syncCompletionContext();
   stopFontSubscription = bindMobileEditorFontSize(editor);
   editor.onDidFocusEditorWidget(syncCompletionContext);
   editor.onDidChangeModelContent(() => {
@@ -363,7 +385,7 @@ onMounted(() => {
   });
 });
 
-watch(() => [props.refData, props.completionMode], syncCompletionContext, { deep: true });
+watch(() => [props.refData, props.completionMode, props.completionRoots], syncCompletionContext, { deep: true });
 
 watch(() => props.readOnly, readOnly => editor?.updateOptions({ readOnly }));
 
@@ -374,6 +396,7 @@ watch(() => props.modelValue, (v) => {
 onBeforeUnmount(() => {
   stopThemeSubscription?.();
   stopFontSubscription?.();
+  if (editor) window.__mdCompletionContexts?.delete(editor.getModel());
   editor?.dispose();
 });
 </script>

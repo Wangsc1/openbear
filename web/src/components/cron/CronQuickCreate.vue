@@ -37,8 +37,8 @@ async function save(){
   syncSchedule();checking.value=true;
   try {
     const preview=await Api.cronPreview({schedule:schedulePayload(draft.config.schedule),count:1});
-    if(!preview.times?.length){localError.value='所选范围内没有可执行时间，请调整日期、时间或跳过节假日开关。';return false;}
-    if(await editor.save()){ElMessage.success(draft.enabled?'任务已创建并启用':'任务已保存，计划暂未启用');emit('saved');return true;}
+    if(!preview.times?.length && preview.scheduleState!=='waiting_calendar'){localError.value='所选范围内没有可执行时间，请调整日期、时间或跳过节假日开关。';return false;}
+    if(await editor.save()){ElMessage.success(draft.enabled?(preview.scheduleState==='waiting_calendar'?'任务已保存，等待日历数据补齐后自动排程':'任务已创建并启用'):'任务已保存，计划暂未启用');emit('saved');return true;}
     return false;
   } catch(exc){localError.value=message(exc);return false;} finally{checking.value=false;}
 }

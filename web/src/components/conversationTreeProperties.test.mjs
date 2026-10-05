@@ -12,8 +12,10 @@ test('folder prompt editor is not wrapped in a native label that activates Monac
   const labels = [...source.matchAll(/<label\b[^>]*>[\s\S]*?<\/label>/g)];
   assert.ok(labels.length > 0);
   assert.ok(labels.every(([label]) => !label.includes('<MdEditor') && !label.includes('<AdaptiveMdEditor')));
-  assert.match(source, /class="property-field" role="group" aria-labelledby="folder-prompt-label"/);
-  assert.match(source, /<span id="folder-prompt-label">/);
+  assert.match(source, /<PromptPolicyEditor v-model="folderPromptPolicy"/);
+  const policy = fs.readFileSync(new URL('./PromptPolicyEditor.vue', import.meta.url), 'utf8');
+  assert.doesNotMatch(policy, /<label\b/);
+  assert.match(policy, /class="folder-prompt-editor"/);
 });
 
 test('folder properties use a compact single-line header, centered tabs and only the requested context controls', () => {

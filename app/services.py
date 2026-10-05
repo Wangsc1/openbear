@@ -186,6 +186,7 @@ class Services:
         self.context = ContextBuilder(
             self.mem, self.messages, self.summaries, self.skills,
             self.tools, self.workspace_dir, self.agent_dao, self.mcp,
+            user_message_template=config.user_message_template,
         )
 
         # 累计用量（本进程内，/status 用）
@@ -713,6 +714,7 @@ class Services:
         self.context = ContextBuilder(
             self.mem, self.messages, self.summaries, self.skills,
             self.tools, self.workspace_dir, self.agent_dao, self.mcp,
+            user_message_template=config.user_message_template,
         )
 
     def reload_skills_from_disk(self) -> dict[str, Any]:

@@ -832,7 +832,12 @@ class WebAdminChatHandlersMixin:
                 backend=backend, model=model, model_label=label, strategy_resolver=strategy, on_rotated=done,
                 frozen_system=bool(edited_context),
                 strategies={"model_summary": ModelSummaryStrategy(self.config, self.llm_factory, label, on_model_call=account)})
+            active_policy = await self._active_prompt_policy(conv_uuid)
+
             async def refresh_runtime(request_messages: list[Message]) -> list[Message]:
+                if active_policy['overrideSystemPrompt']:
+                    from app.task_memory import is_task_memory_runtime_message
+                    return [m for m in request_messages if not is_task_memory_runtime_message(m)]
                 if edited_context:
                     return request_messages
                 epoch = reset_task_memory_runtime_epoch(request_messages)
@@ -850,7 +855,12 @@ class WebAdminChatHandlersMixin:
                 system = edited_context['system'] if edited_context else (await messages.get_system_snapshot(chat_id) or await self._build_system_prompt_for_chat(conversation_uuid=conv_uuid))
                 cur = await self.db.conn.execute("SELECT COALESCE(MAX(id),0) AS n FROM messages WHERE chat_id=?", (chat_id,))
                 high_water = int((await cur.fetchone())["n"])
-                await manager.prepare(history, system=system, tools=edited_context['tools'] if edited_context else self.tools.schemas(scope="main"),
+                compact_tools = edited_context['tools'] if edited_context else self.tools.schemas(scope='main')
+                if active_policy['overrideSystemPrompt']:
+                    from app.context.prompt_policy import policy_tool_names
+                    allowed = set(policy_tool_names(active_policy))
+                    compact_tools = [s for s in compact_tools if s.get('name', s.get('function', {}).get('name')) in allowed]
+                await manager.prepare(history, system=system, tools=compact_tools,
                                       force=True, source="manual", expected_message_high_water=high_water,
                                       refresh_after_rotation=refresh_runtime, request_view=request_view,
                                       request_options=request_options)
@@ -2078,6 +2088,7 @@ class WebAdminChatHandlersMixin:
                 background_control_payload=background_control_payload,
                 root_turn_uuid=turn_uuid,
                 user_op_id=f"msg:{user_message_uuid}",
+                user_message_source=source,
                 **({"reference_bundle_id": reference_bundle_id} if reference_bundle_id else {}),
             ))
             if self.runs is not None:

@@ -63,8 +63,6 @@ class Schedule(Model):
                 raise ValueError('结束时间必须晚于开始时间')
         if self.kind != 'cron' and self.second:
             raise ValueError('执行秒字段仅适用于 Cron，间隔与一次性时间直接包含秒')
-        if self.skip_holidays and self.kind != 'at' and not self.end_at:
-            raise ValueError('跳过休息日需要设置结束时间，以确认范围内的调休日历')
         if self.kind == 'cron':
             if not self.expression or len(self.expression.split()) != 5 or not croniter.is_valid(self.expression):
                 raise ValueError('Cron必须是合法的五段表达式')
