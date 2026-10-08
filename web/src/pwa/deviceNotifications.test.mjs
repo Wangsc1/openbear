@@ -88,15 +88,15 @@ test('device card owns compiled button styles instead of relying on parent scope
   assert.equal(button.cursor, 'pointer');
   assert.equal(button['font-size'], '12px');
   assert.match(button.border, /1px solid/);
-  assert.equal(declarations('.device-notifications__button.is-primary').background, 'var(--ob-blue)');
-  assert.equal(declarations('.device-notifications__button.is-primary').color, 'var(--ob-text-inverse)');
-  assert.equal(declarations('.device-notifications__button:focus-visible').outline, '2px solid var(--ob-blue)');
+  assert.equal(declarations('.device-notifications__button.is-primary').background, 'var(--ob-chat-selected)');
+  assert.equal(declarations('.device-notifications__button.is-primary').color, 'var(--ob-chat-text)');
+  assert.equal(declarations('.device-notifications__button:focus-visible').outline, '2px solid var(--ob-focus)');
   assert.equal(declarations('.device-notifications').margin, '0 0 14px');
   assert.equal(declarations('.device-notifications').background, 'var(--ob-surface)');
   for (const width of [320, 390, 760]) {
     assert.equal(declarations('.device-notifications__main', width)['grid-template-columns'], 'minmax(0, 1fr)');
     assert.equal(declarations('.device-notifications__button', width)['min-height'], '40px');
-    assert.equal(declarations('.device-notifications', width)['border-radius'], '16px');
+    assert.equal(declarations('.device-notifications', width)['border-radius'], '12px');
   }
 });
 

@@ -71,8 +71,8 @@ function prettyJson(value) { try { return JSON.stringify(value, null, 2); } catc
 </script>
 
 <template>
-  <div class="admin-page logs-page h-full flex flex-col">
-    <header class="h-14 shrink-0 flex items-center justify-between px-6 border-b border-macborder bg-ob-surface/70 backdrop-blur">
+  <div class="admin-page logs-page settings-ui h-full flex flex-col">
+    <header class="settings-page-header h-14 shrink-0 flex items-center justify-between px-6 border-b border-macborder bg-ob-surface/70 backdrop-blur">
       <div class="admin-heading flex items-center gap-2">
         <h1 class="text-base font-semibold">系统日志</h1>
         <span class="text-xs text-macsub">提示词渲染记录 + Web 审计日志</span>
@@ -146,7 +146,7 @@ function prettyJson(value) { try { return JSON.stringify(value, null, 2); } catc
       </template>
     </div>
 
-    <el-drawer append-to-body class="admin-drawer logs-drawer" v-model="drawerOpen" title="系统日志详情" size="60%">
+    <el-drawer append-to-body class="settings-ui admin-drawer logs-drawer" v-model="drawerOpen" title="系统日志详情" size="60%">
       <div v-if="detail" class="h-full flex flex-col">
         <div class="flex gap-4 text-xs text-macsub mb-3 flex-wrap">
           <span>#{{ detail.id }}</span>

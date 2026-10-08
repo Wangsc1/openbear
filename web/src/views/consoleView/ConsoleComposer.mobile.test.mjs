@@ -204,6 +204,27 @@ test('open run-config popover follows the composer through keyboard blur and vis
   stopWatch();
 });
 
+test('main and Agent Fast controls occupy equal rows without enlarging the compression row', () => {
+  const rules = {};
+  const styles = postcss.parse(parse(source).descriptor.styles.map(style => style.content).join('\n'));
+  styles.walkRules(rule => {
+    if (rule.parent.type !== 'root') return;
+    for (const selector of rule.selectors) {
+      const declarations = rules[selector] ||= {};
+      rule.walkDecls(decl => { declarations[decl.prop] = decl.value; });
+    }
+  });
+  const px = (selector, property) => parseFloat(rules[selector][property]);
+  const rowChrome = 2 * px('.fast-control', 'padding') + px('.fast-control', 'border-top');
+  const switchHeight = px('.fast-switch', 'height');
+  const agentHeight = px('.thinking-segments button', 'line-height')
+    + 2 * px('.agent-fast-segments button', 'padding') + 2 * px('.thinking-segments', 'padding');
+  const minHeight = px('.fast-control:not(.context-strategy-control)', 'min-height');
+  assert.equal(Math.max(minHeight, switchHeight + rowChrome), 44);
+  assert.equal(Math.max(minHeight, agentHeight + rowChrome), 44, 'the Agent selector must not stretch the Fast row when switching tabs');
+  assert.equal(Math.max(px('.fast-control', 'min-height'), switchHeight + rowChrome), 38, 'the shared compression row keeps its existing size');
+});
+
 test('mobile model picker fixes its search and footer, with only the active middle pane scrolling', () => {
   const styles = postcss.parse(parse(source).descriptor.styles.map(style => style.content).join('\n'));
   const mobileRules = {};

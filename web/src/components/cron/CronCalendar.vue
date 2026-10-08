@@ -4,7 +4,7 @@ import {ChevronLeft,ChevronRight,Plus,CalendarDays,RefreshCw,ArrowUpRight} from 
 import {Api} from '../../api.js';
 import {useAdminPhone} from '../../adminViewport.js';
 import {createQuery} from './useCron.js';
-import {time,number,scheduleText,message} from './cronConfig.js';
+import {time,number,scheduleText} from './cronConfig.js';
 import {CALENDAR_VIEWS,WEEKDAYS,dateKey,localDay,addDays,dateSpan,calendarRange,moveDate,calendarTitle,clockText,dayLabel,minuteOfDay,selectedTime,nextCreationTime,statusInfo,eventSummary,eventsByDate,timeLayout} from './cronCalendar.js';
 import CronStatusIcon from './CronStatusIcon.vue';
 import CronQuickCreate from './CronQuickCreate.vue';
@@ -18,14 +18,6 @@ const {data,loading,error}=query;
 const now=ref(new Date()),focus=ref(localDay(new Date())),view=ref('month'),selectedDay=ref(dateKey(new Date())),selectedMinute=ref(540);
 const viewport=ref(null),quickRef=ref(null),quick=ref(null),detail=ref(null),agenda=ref(null),drag=ref(null);
 const pickedSpan=ref(null);
-const holidaySyncing=ref(false),holidayError=ref('');
-async function syncHolidays(){
-  if(holidaySyncing.value || data.value?.holidayCalendar?.syncing)return false;
-  holidaySyncing.value=true;holidayError.value='';
-  try {await Api.syncCronHolidays();await load(true);return true;}
-  catch(exc){holidayError.value=message(exc);return false;}
-  finally{holidaySyncing.value=false;}
-}
 const selectedSpan=computed(()=>drag.value?dateSpan(drag.value.day,drag.value.endDay):pickedSpan.value);
 const inSelection=key=>selectedSpan.value && key>=selectedSpan.value.start && key<=selectedSpan.value.end;
 const timezone=Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -165,11 +157,6 @@ defineExpose({canLeave,createAt,createSelected,selectedDay,load});
       <div class="cron-cal-navigation"><button class="cron-cal-icon-button" type="button" aria-label="上一个日期范围" @click="move(-1)"><ChevronLeft :size="17" /></button><button class="cron-cal-today-button" type="button" @click="goToday">今天</button><button class="cron-cal-icon-button" type="button" aria-label="下一个日期范围" @click="move(1)"><ChevronRight :size="17" /></button></div>
       <div class="cron-cal-segments" role="group" aria-label="日历视图"><button v-for="[key,text] in CALENDAR_VIEWS" :key="key" type="button" :aria-pressed="view===key" @click="setView(key)">{{ text }}</button></div>
     </header>
-    <div v-if="data?.holidayCalendar" class="cron-cal-holiday-status">
-      <div class="cron-cal-holiday-meta"><details><summary>中国大陆调休日历 · 已覆盖 {{ data.holidayCalendar.years.length }} 个年份</summary><p>覆盖年份：{{ data.holidayCalendar.years.join('、') }}</p><p>数据来源：<a :href="data.holidayCalendar.sourceUrl" target="_blank" rel="noopener noreferrer">holiday-cn</a>（社区整理国务院公告）；启动时及每天自动检查。</p><p>最近检查：{{ time(data.holidayCalendar.lastCheckedAt) }} · 最近成功同步：{{ time(data.holidayCalendar.lastSuccessAt) }}</p><p>数据变更：{{ time(data.holidayCalendar.updatedAt) }}；离线时继续使用本地有效缓存。</p></details><el-button link :loading="holidaySyncing || data.holidayCalendar.syncing" :disabled="busy || holidaySyncing || data.holidayCalendar.syncing" @click="syncHolidays">立即更新</el-button></div>
-      <p v-if="data.holidayCalendar.missingYears?.length" class="cron-note" role="status">当前视图缺少 {{ data.holidayCalendar.missingYears.join('、') }} 年数据；跳过节假日的任务会等待数据补齐，不猜测、不补跑。</p>
-      <p v-if="holidayError || data.holidayCalendar.lastError" class="cron-error" role="alert">{{ holidayError || data.holidayCalendar.lastError }}</p>
-    </div>
     <div v-if="error" class="cron-alert" role="alert">日历加载失败：{{ error }} <el-button link @click="load()">重试</el-button></div>
     <div v-for="warning in data?.warnings || []" :key="warning" class="cron-alert" role="alert">{{ warning }}</div>
     <div class="cron-cal-board" :class="{'is-selecting':Boolean(drag)}" :aria-busy="loading" @selectstart.prevent>

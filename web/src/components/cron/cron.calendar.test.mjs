@@ -231,13 +231,6 @@ test('holiday skipping permits an unbounded schedule and labels missing data sep
   }
   assert.equal(config.label('waiting_calendar'),'等待日历数据');
 });
-test('calendar holiday sync refreshes displayed status, blocks duplicates and reports request failure',async()=>{
-  let synced=0,loads=0,fail=false;
-  const h=harness('./CronCalendar.vue',{props:calendarProps(),Api:{cronCalendar:async()=>{loads++;return {...data(),holidayCalendar:{years:[2026],syncing:false}};},syncCronHolidays:async()=>{synced++;if(fail)throw Error('offline');}}});await flush();
-  const old=loads;assert.equal(await h.run('syncHolidays()'),true);assert.equal(synced,1);assert.equal(loads,old+1);
-  h.run('data.value.holidayCalendar.syncing=true');assert.equal(await h.run('syncHolidays()'),false);assert.equal(synced,1);
-  h.run('data.value.holidayCalendar.syncing=false');fail=true;assert.equal(await h.run('syncHolidays()'),false);assert.equal(h.run('holidayError.value'),'offline');assert.equal(h.run('holidaySyncing.value'),false);h.close();
-});
 test('quick create allows missing-calendar wait but does not claim a date is scheduled',async()=>{
   const io=fixture(),notices=[];io.api.cronPreview=async()=>({times:[],scheduleState:'waiting_calendar',waitingYears:[2099]});
   const h=harness('./CronQuickCreate.vue',{props:{at:new Date(2099,9,5,12).toISOString(),endDate:'2099-10-07',folderId:'F'},Api:io.api,ElMessage:{success:text=>notices.push(text)}});await flush();

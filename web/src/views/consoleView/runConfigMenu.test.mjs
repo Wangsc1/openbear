@@ -47,7 +47,7 @@ function harness(overrides = {}, tab = "main") {
   });
   vm.runInContext(script, context);
   vm.runInContext(`runConfigTab.value = ${JSON.stringify(tab)}`, context);
-  const bindings = proxyRefs(vm.runInContext(`({props, emit, runConfigTab, isAgentTab, contextDetailText, contextMeterStyle, contextPercentNumber, runConfigContextRingClass,
+  const bindings = proxyRefs(vm.runInContext(`({props, emit, runConfigTab, isAgentTab, contextPercentNumber, runConfigContextRingClass,
     runConfigModelText, runConfigMetaText, runConfigMetaParts, runConfigStrategyText, runConfigThinkingBadge, runConfigStatusLabel, menuSelectedModel, menuThinkingLevels, menuSupportsThinking, menuThinkingLevel, menuDefaultThinking,
     agentFastTriState, fmtTokens, modelLabel, modelTags, modelFeatures, rolloverTriggerForModel, compactThinkingLabel, selectMenuModel, selectMenuThinking,
     activeModelDetail, modelDetailId, showModelFeature, clearModelDetail, runConfigPopoverVisible,
@@ -95,7 +95,7 @@ test("model rows display readable numerical attributes and feature badges, omitt
   const h = harness();
   const {html, nodes} = await h.render();
   assert.equal((html.match(/>GPT-6 Astra</g) || []).length, 1);
-  assert.equal((html.match(/72\.0%/g) || []).length, 1);
+  assert.doesNotMatch(html, /压缩阈值占用|context-meter|72\.0%|216K/);
   assert.match(html, />1\.05M 上下文</);
   assert.match(html, />300K 压缩</);
   assert.match(html, />128K 输出</);
@@ -109,6 +109,26 @@ test("model rows display readable numerical attributes and feature badges, omitt
   rows[1].props.onClick(uiEvent({type: 'click'}));
   assert.equal(h.calls[0][0], "select-model");
   assert.equal(h.calls[0][1], models[1]);
+});
+
+test('model names occupy their own row and all original tags remain together below in both tabs', async () => {
+  for (const tab of ['main', 'agent']) {
+    const result = await harness({}, tab).render();
+    const rows = result.nodes.filter(node => node.type === 'button' && hasClass(node, 'model-select'));
+    for (const [index, row] of rows.entries()) {
+      const content = walk(row.children);
+      const title = content.find(node => hasClass(node, 'model-row-title-row'));
+      assert.equal(walk(title.children).filter(node => hasClass(node, 'model-row-name')).length, 1);
+      assert.equal(walk(title.children).some(node => hasClass(node, 'model-tag')), false);
+      const details = content.find(node => hasClass(node, 'model-row-tags'));
+      const tags = walk(details.children).filter(node => hasClass(node, 'model-tag'));
+      const labels = tags.map(tag => walk(tag.children).find(child => child.type === 'span' && typeof child.children === 'string').children);
+      assert.deepEqual(labels, index === 0
+        ? ['1.05M 上下文', '300K 压缩', '128K 输出', '思考', 'Fast']
+        : ['1.05M 上下文', '272K 压缩', '思考']);
+      assert.ok(content.indexOf(title) < content.indexOf(details));
+    }
+  }
 });
 
 test("main thinking labels stay compact while events retain raw metadata values, Fast and search remain functional", async () => {
@@ -148,10 +168,10 @@ test("Agent tab preserves independent model selection, main-following thinking a
   }
 });
 
-test("unknown usage, unsupported capabilities and empty model search stay explicit", async () => {
+test("removed usage stays absent while unsupported capabilities and empty model search stay explicit", async () => {
   const h = harness({contextUsedDisplay: "待实测", contextPercentDisplay: "—", supportsThinking: false, fastSupported: false, modelGroups: []});
   const {html, buttons} = await h.render();
-  assert.match(html, /待实测/);
+  assert.doesNotMatch(html, /待实测|压缩阈值占用/);
   assert.match(html, /没有匹配模型/);
   assert.match(html, /未声明支持/);
   assert.doesNotMatch(html, /0\.0%/);
@@ -329,7 +349,7 @@ for (const tab of ['main', 'agent']) {
     assert.equal(shown(result.nodes, 'run-config-search'), true);
     assert.equal(shown(result.nodes, 'run-config-controls'), false);
     assert.match(result.html, /Fast/); assert.match(result.html, /滑动窗口/);
-    if (tab === 'main') assert.match(result.html, /上下文 216K \/ 300K · 72\.0%/);
+    assert.doesNotMatch(result.html, /压缩阈值占用|上下文 216K|72\.0%/);
     const settings = result.buttons.find(button => button.props?.onClick === r.bindings.toggleRunConfigSettings);
     settings.props.onClick(); assert.equal(blurred, 1);
     result = await r.render();
@@ -355,6 +375,7 @@ test("popup typography and surfaces are unified, and short viewports keep every 
   assert.match(css, /\.run-config-search input\s*\{\s*font-size: 16px;\s*\}/, 'only the mobile search input gets the iOS-safe size');
   assert.match(css, /\.model-row-name[^}]*font-size: 13px/);
   assert.match(css, /\.model-group-title[^}]*font-size: 12px/);
+  assert.match(css, /\.model-search\s*\{[^}]*background: var\(--ob-chat-hover\);/, 'search uses the same quiet gray surface as the conversation tree');
   assert.match(css, /\.model-tag[^}]*font-size: 12px/);
   assert.doesNotMatch(css, /font-weight:\s*[6-9]\d\d|linear-gradient|text-transform:\s*uppercase/);
   assert.match(source, /\.run-config-popover\s*\{[^}]*--rc-text: var\(--ob-text\);[^}]*--rc-accent: var\(--ob-blue\);/);

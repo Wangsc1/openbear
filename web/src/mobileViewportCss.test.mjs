@@ -127,7 +127,7 @@ test('touch targets are 44px with persistent remove/More visibility, zoom-safe i
       assert.equal(declarations(composer, `:deep(${selector})`, env)['font-size'], undefined, 'the shared input policy owns mobile typography');
       assert.equal(declarations('./references/ReferenceEditor.vue', selector, desktop)['font-size'], '14px', 'desktop retains its original editor and placeholder size');
       const mobileSelector = selector === '.reference-editor-content' ? '[contenteditable]:not([contenteditable="false"])' : selector;
-      assert.equal(declarations('./mobile-inputs.css', mobileSelector, env)['font-size'], '16px', 'actual editable node and placeholder use the mobile font floor');
+      assert.equal(declarations('./mobile-inputs.css', mobileSelector, env)['font-size'], 'var(--ob-chat-input-font-size, 16px)', 'actual editable node and placeholder retain the 16px mobile fallback; desktop overrides are scoped separately');
     }
     assert.equal(declarations('./components/ConversationTree.vue', '.tree-touch-more', env).display, 'grid');
     assert.equal(declarations('./components/ConversationTree.vue', '.tree-context-menu button', env)['min-height'], '44px');

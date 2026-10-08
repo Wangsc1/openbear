@@ -1,6 +1,5 @@
 <script setup>
 import {computed, onBeforeUnmount, ref, watch} from "vue";
-import {Download, FullScreen, RefreshLeft, RefreshRight, ZoomIn, ZoomOut} from "@element-plus/icons-vue";
 import {renderMarkdown} from "./markdown.js";
 import {vMarkdownHtml} from "./markdownDom.js";
 import {artifactFromUrl, openArtifactPreview} from "../../artifacts/artifactFiles.js";
@@ -25,7 +24,6 @@ const displayedText = ref(String(props.text || ""));
 const imageViewerOpen = ref(false);
 const imageViewerUrls = ref([]);
 const imageViewerIndex = ref(0);
-const imageViewerArtifact = computed(() => artifactFromUrl(imageViewerUrls.value[imageViewerIndex.value]));
 let liveTimer = 0;
 let liveFrame = 0;
 let lastLivePaintAt = 0;
@@ -235,58 +233,10 @@ function onMarkdownClick(event) {
 	                 :url-list="imageViewerUrls"
 	                 :initial-index="imageViewerIndex"
 	                 hide-on-click-modal
-	                 @switch="imageViewerIndex = $event"
-	                 @close="imageViewerOpen = false">
-		<template #toolbar="{actions, reset}">
-			<!-- Keep transforms in the viewer: reset is its native fit/original toggle. -->
-			<div class="markdown-image-toolbar" :class="{'has-download': imageViewerArtifact}"
-			     role="toolbar" aria-label="图片预览操作"
-			     @keydown.space.prevent.stop="$event.target.closest('button, a')?.click()">
-				<button class="markdown-image-control" type="button" title="缩小" aria-label="缩小" @click.stop="actions('zoomOut')"><ZoomOut aria-hidden="true"/></button>
-				<button class="markdown-image-control" type="button" title="放大" aria-label="放大" @click.stop="actions('zoomIn')"><ZoomIn aria-hidden="true"/></button>
-				<button class="markdown-image-control" type="button" title="切换适应/原始尺寸" aria-label="切换适应/原始尺寸" @click.stop="reset"><FullScreen aria-hidden="true"/></button>
-				<button class="markdown-image-control" type="button" title="向左旋转" aria-label="向左旋转" @click.stop="actions('anticlockwise')"><RefreshLeft aria-hidden="true"/></button>
-				<button class="markdown-image-control" type="button" title="向右旋转" aria-label="向右旋转" @click.stop="actions('clockwise')"><RefreshRight aria-hidden="true"/></button>
-				<a v-if="imageViewerArtifact" class="markdown-image-control markdown-image-download"
-				   :href="imageViewerArtifact.downloadUrl" download
-				   title="下载原图" aria-label="下载原图"
-				   @click.stop="onArtifactDownload($event, imageViewerArtifact)"><Download aria-hidden="true"/></a>
-			</div>
-		</template>
-	</el-image-viewer>
+	                 @close="imageViewerOpen = false"/>
 </template>
 
 <style scoped>
-.markdown-image-toolbar {
-	display: flex;
-	align-items: center;
-	/* Native outer/inner horizontal padding totals 58px; leave 16px viewport
-	   clearance without widening or replacing the viewer's toolbar shell. */
-	width: min(220px, calc(100vw - 74px));
-	height: 44px;
-}
-.markdown-image-toolbar.has-download { width: min(264px, calc(100vw - 74px)); }
-.markdown-image-control {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	flex: 1;
-	min-width: 0;
-	min-height: 44px;
-	padding: 0;
-	border: 0;
-	border-radius: 4px;
-	background: transparent;
-	color: inherit;
-	font: inherit;
-	text-decoration: none;
-	cursor: pointer;
-	touch-action: manipulation;
-}
-.markdown-image-control svg { width: 1em; height: 1em; }
-.markdown-image-control:hover { background: rgba(255, 255, 255, 0.12); }
-.markdown-image-control:focus-visible { outline: 2px solid #fff; outline-offset: -2px; }
-
 .bear-md :deep(h1),
 .bear-md :deep(h2),
 .bear-md :deep(h3),

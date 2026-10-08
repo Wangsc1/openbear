@@ -80,8 +80,8 @@ onMounted(loadSessions);
 </script>
 
 <template>
-  <section class="sessions-view h-full min-h-0 flex flex-col bg-macbg" v-loading="loading">
-    <header class="sessions-header h-14 shrink-0 flex items-center justify-between gap-4 px-3 sm:px-6 border-b border-macborder bg-ob-surface/75 backdrop-blur">
+  <section class="sessions-view settings-ui h-full min-h-0 flex flex-col bg-macbg" v-loading="loading">
+    <header class="settings-page-header sessions-header h-14 shrink-0 flex items-center justify-between gap-4 px-3 sm:px-6 border-b border-macborder bg-ob-surface/75 backdrop-blur">
       <div class="min-w-0">
         <div class="flex min-w-0 items-center gap-2">
           <h1 class="text-base font-semibold whitespace-nowrap">登录设备</h1>
@@ -204,19 +204,17 @@ onMounted(loadSessions);
   justify-content: center;
   gap: 6px;
   padding: 0 12px;
-  border: 1px solid var(--ob-border);
-  border-radius: 999px;
-  background: linear-gradient(180deg, rgb(var(--ob-surface-rgb) / .94), rgb(var(--ob-surface-rgb) / .88));
-  color: var(--ob-text);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ob-chat-subtle);
   font-size: 12px;
-  font-weight: 500;
-  box-shadow: inset 0 1px 0 var(--ob-border), 0 1px 2px rgb(var(--ob-shadow-rgb) / .04);
-  transition: transform .14s ease, box-shadow .14s ease, border-color .14s ease, opacity .14s ease;
+  font-weight: 400;
+  transition: background-color .15s ease, color .15s ease, opacity .15s ease;
 }
 .sessions-toolbar-button:hover:not(:disabled),
 .session-revoke:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: inset 0 1px 0 var(--ob-border), 0 6px 16px rgb(var(--ob-shadow-rgb) / .08);
+  background: var(--ob-chat-hover);
 }
 .sessions-toolbar-button:disabled,
 .session-revoke:disabled { cursor: not-allowed; opacity: .48; }
@@ -228,9 +226,8 @@ onMounted(loadSessions);
   overflow: hidden;
   margin-bottom: 14px;
   border: 1px solid var(--session-line);
-  border-radius: 14px;
+  border-radius: 12px;
   background: var(--session-surface);
-  box-shadow: 0 2px 8px rgb(var(--ob-shadow-rgb) / .025), inset 0 1px 0 var(--ob-border);
 }
 .sessions-overview > div {
   display: flex;
@@ -257,9 +254,8 @@ onMounted(loadSessions);
 .sessions-panel {
   overflow: hidden;
   border: 1px solid var(--session-line);
-  border-radius: 18px;
+  border-radius: 12px;
   background: var(--session-surface);
-  box-shadow: 0 6px 18px rgb(var(--ob-shadow-rgb) / .04), inset 0 1px 0 var(--ob-border);
 }
 .sessions-panel__header {
   display: flex;
@@ -268,15 +264,15 @@ onMounted(loadSessions);
   gap: 16px;
   padding: 13px 17px 11px;
   border-bottom: 1px solid var(--ob-border);
-  background: linear-gradient(180deg, rgb(var(--ob-surface-rgb) / .88), rgb(var(--ob-surface-rgb) / .58));
+  background: var(--ob-hover);
 }
-.sessions-panel__header h2 { font-size: 14px; font-weight: 700; letter-spacing: -.01em; }
+.sessions-panel__header h2 { font-size: 13px; font-weight: 600; }
 .sessions-panel__header p { margin-top: 2px; color: var(--session-faint); font-size: 11px; }
 .sessions-panel__header > span {
   padding: 3px 8px;
   border: 1px solid var(--ob-border);
-  border-radius: 999px;
-  background: rgb(var(--ob-surface-rgb) / .8);
+  border-radius: 5px;
+  background: var(--ob-hover);
   color: var(--session-muted);
   font-size: 11px;
 }
@@ -290,26 +286,25 @@ onMounted(loadSessions);
   transition: background-color .12s ease;
 }
 .session-device:last-child { border-bottom: 0; }
-.session-device:hover { background: rgb(var(--ob-surface-rgb) / .76); }
+.session-device:hover { background: var(--ob-hover); }
 .session-device.is-current {
-  background: linear-gradient(90deg, var(--session-accent-wash), transparent 72%);
-  box-shadow: inset 3px 0 0 rgb(var(--ob-blue-rgb) / .72);
+  background: var(--ob-hover);
+  box-shadow: inset 2px 0 0 var(--ob-blue);
 }
 .session-device__symbol {
   display: grid;
   width: 40px;
   height: 40px;
   place-items: center;
-  border: 1px solid var(--ob-border);
-  border-radius: 13px;
-  background: linear-gradient(180deg, rgb(var(--ob-surface-rgb) / .96), rgb(var(--ob-surface-rgb) / .9));
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--ob-hover);
   color: var(--ob-text-subtle);
-  box-shadow: inset 0 1px 0 var(--ob-border), 0 1px 3px rgb(var(--ob-shadow-rgb) / .06);
 }
 .session-device.is-current .session-device__symbol {
-  border-color: rgb(var(--ob-blue-rgb) / .2);
-  background: rgb(var(--ob-blue-rgb) / .07);
-  color: var(--session-accent);
+  border-color: transparent;
+  background: var(--ob-chat-selected);
+  color: var(--ob-chat-text);
 }
 .session-device__content { min-width: 0; }
 .session-device__title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
@@ -319,18 +314,17 @@ onMounted(loadSessions);
   align-items: center;
   gap: 5px;
   padding: 2px 7px;
-  border-radius: 999px;
-  background: rgb(var(--ob-blue-rgb) / .08);
-  color: var(--ob-blue);
+  border-radius: 4px;
+  background: var(--ob-chat-selected);
+  color: var(--ob-chat-text);
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 500;
 }
 .session-current-badge i {
   width: 6px;
   height: 6px;
   border-radius: 99px;
   background: var(--ob-success);
-  box-shadow: 0 0 0 3px rgb(var(--ob-success-rgb) / .11);
 }
 .session-device__identity {
   display: flex;
@@ -347,8 +341,8 @@ onMounted(loadSessions);
 .session-device__times div { display: grid; gap: 2px; }
 .session-device__times dt { color: var(--session-faint); font-size: 9px; letter-spacing: .04em; }
 .session-device__times dd { color: var(--ob-text); font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
-.session-revoke { min-width: 104px; color: var(--ob-danger); border-color: rgb(var(--ob-danger-rgb) / .22); }
-.session-revoke.is-current { color: var(--ob-text); border-color: var(--ob-border); }
+.session-revoke { min-width: 104px; color: var(--ob-danger); border-color: transparent; background: var(--ob-danger-soft); }
+.session-revoke.is-current { color: var(--ob-chat-text); border-color: transparent; background: var(--ob-chat-hover); }
 .sessions-empty { display: grid; min-height: 220px; place-items: center; align-content: center; gap: 7px; color: var(--session-faint); }
 .sessions-empty strong { color: var(--ob-text); font-size: 12px; }
 .sessions-empty p { color: var(--session-faint); font-size: 10px; }
@@ -360,11 +354,11 @@ onMounted(loadSessions);
   .sessions-header .text-macsub { display: none; }
   .sessions-toolbar-button { min-width: 44px; min-height: 44px; padding: 0 10px; border: 0; border-radius: 9px; background: transparent; box-shadow: none; color: var(--session-muted); }
   .sessions-content { padding: 10px; }
-  .sessions-overview { display: grid; grid-template-columns: 1fr 1fr; border-radius: 14px; }
+  .sessions-overview { display: grid; grid-template-columns: 1fr 1fr; border-radius: 12px; }
   .sessions-overview > div { min-width: 0; justify-content: space-between; padding: 10px 12px; }
   .sessions-overview > div:nth-child(2) { border-right: 0; }
   .sessions-overview p { grid-column: 1 / -1; padding: 9px 12px; border-top: 1px solid var(--session-line); }
-  .sessions-panel { border-radius: 16px; }
+  .sessions-panel { border-radius: 12px; }
   .sessions-panel__header { align-items: flex-start; padding: 12px 13px; }
   .sessions-panel__header p { max-width: 240px; line-height: 1.45; }
   .session-device { grid-template-columns: auto minmax(0, 1fr); gap: 11px; padding: 14px 13px; }
@@ -373,28 +367,4 @@ onMounted(loadSessions);
   .session-revoke { grid-column: 1 / -1; width: 100%; min-height: 44px; }
 }
 
-:global(html.dark) .sessions-view {
-  --session-ink: var(--ob-text-strong);
-  --session-muted: var(--ob-text-subtle);
-  --session-faint: var(--ob-text-muted);
-  --session-line: var(--ob-border);
-  --session-surface: var(--ob-surface);
-  --session-inset: var(--ob-surface-soft);
-  --session-accent: var(--ob-blue);
-  --session-accent-wash: var(--ob-blue-soft);
-}
-:global(html.dark) .sessions-header { border-bottom-color: var(--ob-border); background: rgb(var(--ob-surface-soft-rgb) / .82); }
-:global(html.dark) .sessions-toolbar-button,
-:global(html.dark) .session-revoke { border-color: var(--ob-border); background: linear-gradient(180deg, rgb(var(--ob-surface-soft-rgb) / .94), rgb(var(--ob-surface-soft-rgb) / .88)); color: var(--ob-text); box-shadow: inset 0 1px 0 rgb(var(--ob-border-rgb) / .11), 0 1px 2px rgb(var(--ob-shadow-rgb) / .16); }
-:global(html.dark) .session-revoke:not(.is-current) { color: var(--ob-danger); border-color: rgb(var(--ob-danger-rgb) / .22); }
-:global(html.dark) .sessions-overview,
-:global(html.dark) .sessions-panel { box-shadow: 0 6px 18px rgb(var(--ob-shadow-rgb) / .16), inset 0 1px 0 rgb(var(--ob-border-rgb) / .05); }
-:global(html.dark) .sessions-overview strong,
-:global(html.dark) .session-device__title h3 { color: var(--ob-text-strong); }
-:global(html.dark) .sessions-panel__header { border-bottom-color: var(--ob-border); background: linear-gradient(180deg, rgb(var(--ob-surface-soft-rgb) / .88), rgb(var(--ob-surface-soft-rgb) / .58)); }
-:global(html.dark) .sessions-panel__header > span { border-color: var(--ob-border); background: rgb(var(--ob-surface-soft-rgb) / .8); color: var(--ob-text); }
-:global(html.dark) .session-device { border-bottom-color: var(--ob-border); }
-:global(html.dark) .session-device:hover { background: rgb(var(--ob-surface-soft-rgb) / .76); }
-:global(html.dark) .session-device__symbol { border-color: var(--ob-border); background: linear-gradient(180deg, rgb(var(--ob-surface-soft-rgb) / .94), rgb(var(--ob-surface-soft-rgb) / .88)); color: var(--ob-text); box-shadow: inset 0 1px 0 rgb(var(--ob-border-rgb) / .08), 0 1px 3px rgb(var(--ob-shadow-rgb) / .16); }
-:global(html.dark) .session-device__times dd { color: var(--ob-text); }
 </style>

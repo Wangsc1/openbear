@@ -10,6 +10,19 @@
   [contenteditable]:not([contenteditable="false"]),
   .el-select__wrapper,
   .reference-editor-placeholder {
-    font-size: 16px !important;
+    font-size: var(--ob-chat-input-font-size, 16px) !important;
+  }
+}
+
+/* A touchscreen PC can match any-pointer: coarse even with a mouse. Restore
+   only these compact chat fields in the desktop layout. iOS/iPadOS retain the
+   zoom-safe floor, including when a trackpad makes their primary pointer fine.
+   Feed the winning rule above instead of competing with its :not() specificity. */
+@supports not (-webkit-touch-callout: none) {
+  @media (min-width: 761px) and (hover: hover) and (pointer: fine) {
+    .conversation-tree .tree-search input { --ob-chat-input-font-size: 12px; }
+    .composer-shell .reference-editor-content,
+    .composer-shell .reference-editor-placeholder { --ob-chat-input-font-size: 14px; }
+    .run-config-menu-popper .model-search input { --ob-chat-input-font-size: 13px; }
   }
 }

@@ -413,7 +413,9 @@ test('mobile overview/metrics wrap rather than crop, header/actions have explici
 test('761px+ keeps desktop tabs, restart style and nested model scroller/grid rules', () => {
   for (const width of [761, 1024, 1440]) {
     assert.equal(css(settings, '.settings-section-select', width).display, 'none');
-    for (const c of ['.settings-header', '.settings-desktop-tabs', '.settings-header .settings-restart']) assert.deepEqual(css(settings, c, width), {});
+    for (const c of ['.settings-desktop-tabs', '.settings-header .settings-restart']) assert.deepEqual(css(settings, c, width), {});
+    assert.equal(css(settings, '.settings-header', width).background, 'var(--ob-chat-bg)');
+    assert.equal(css(settings, '.settings-header', width).padding, '12px 24px');
     for (const c of ['.channels-view', '.channels-workspace', '.channel-detail-stack', '.channels-header', '.channels-view .model-card']) assert.deepEqual(css(channels, c, width), {});
     assert.equal(css(channels, '.model-list-scroll', width)['overflow-y'], 'auto');
     assert.equal(css(channels, '.model-list-scroll', width).flex, '1 1 auto');

@@ -32,7 +32,7 @@ function cancelAddress() {
 </script>
 
 <template>
-  <section class="h-full overflow-y-auto px-5 py-5 text-sm text-mactext">
+  <section class="h-full overflow-y-auto px-5 py-5 settings-ui install-page text-sm text-mactext">
     <div class="mx-auto max-w-2xl space-y-4">
       <header class="flex items-center gap-3">
         <span class="h-12 w-12 shrink-0"><BearLogo /></span>
@@ -42,7 +42,7 @@ function cancelAddress() {
         </div>
       </header>
 
-      <div class="rounded-2xl border border-macborder bg-ob-surface/75 p-4">
+      <div class="install-panel">
         <dl class="space-y-3 text-xs">
           <div class="flex flex-wrap items-baseline gap-x-4 gap-y-1">
             <dt class="w-20 shrink-0 text-macsub">当前入口</dt>
@@ -59,7 +59,7 @@ function cancelAddress() {
         </dl>
       </div>
 
-      <div class="rounded-2xl border border-macborder bg-ob-surface/75 p-4">
+      <div class="install-panel">
         <div aria-live="polite" role="status">
           <h2 class="font-semibold">{{ presentation.title }}</h2>
           <p class="mt-2 text-xs leading-relaxed text-macsub">{{ presentation.detail }}</p>
@@ -70,7 +70,7 @@ function cancelAddress() {
         </div>
       </div>
 
-      <form v-if="state.http" class="rounded-2xl border border-macborder bg-ob-surface/75 p-4" @submit.prevent="prepareAddress">
+      <form v-if="state.http" class="install-panel" @submit.prevent="prepareAddress">
         <h2 class="font-semibold">已有自己的 HTTPS 入口？</h2>
         <p id="pwa-https-help" class="mt-2 text-xs leading-relaxed text-macsub">仅填写你自己可信的 OpenBear 地址。这里只解析地址，不会在后台访问、验证或替你配置 HTTPS。跳转不复制当前会话或密钥，目标入口可能需要重新登录。</p>
         <template v-if="!destination">
@@ -86,7 +86,7 @@ function cancelAddress() {
           <p class="text-xs leading-relaxed text-macsub">将只打开以下 origin，路径、查询参数与片段均已移除。请核对主机名，确认它属于你：</p>
           <p class="break-all font-medium">{{ destination }}</p>
           <div class="flex flex-wrap items-center gap-3">
-            <a :href="destination" rel="noreferrer noopener" referrerpolicy="no-referrer" class="rounded-full bg-macblue px-4 py-2 text-xs font-medium text-ob-inverse focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2">前往此 HTTPS 入口</a>
+            <a :href="destination" rel="noreferrer noopener" referrerpolicy="no-referrer" class="install-address-link focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2">前往此 HTTPS 入口</a>
             <el-button native-type="button" text @click="cancelAddress">取消</el-button>
           </div>
         </div>

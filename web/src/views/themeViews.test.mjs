@@ -8,7 +8,7 @@ import postcss from 'postcss';
 
 const dir = dirname(fileURLToPath(import.meta.url));
 const views = 'MemoryView SecretsView DocsView SkillsView McpView SettingsHubView SettingsView ChannelsView TemplateView RathAgentsView SessionsView StatisticsView LogsView LoginView InstallAppView'.split(' ');
-const roles = new Set('bg sidebar header surface surface-raised surface-soft text text-strong text-subtle text-muted text-disabled text-inverse border border-soft border-strong hover selected focus mask blue success warning danger info violet orange blue-soft success-soft warning-soft danger-soft info-soft violet-soft orange-soft shadow-panel shadow-popover shadow-dialog shadow-inset scrollbar scrollbar-hover code-bg code-text'.split(' '));
+const roles = new Set('bg sidebar header surface surface-raised surface-soft text text-strong text-subtle text-muted text-disabled text-inverse border border-soft border-strong hover selected focus mask blue success warning danger info violet orange blue-soft success-soft warning-soft danger-soft info-soft violet-soft orange-soft shadow-panel shadow-popover shadow-dialog shadow-inset scrollbar scrollbar-hover code-bg code-text switch-thumb chat-bg chat-text chat-subtle chat-line chat-hover chat-selected'.split(' '));
 const channels = new Set('bg sidebar header surface surface-raised surface-soft text text-strong text-subtle text-muted text-disabled text-inverse border blue success warning danger info violet orange'.split(' '));
 const literal = /#[\da-f]{3,8}\b|rgba?\(\s*\d+\s*,\s*\d+/i;
 const neutralUtility = /(?<![\w-])(?:bg|text|border|ring|outline|placeholder|divide)-(?:white|black|zinc|slate|gray|neutral)(?:-\d+)?(?:\/[^\s"']+)?/;
@@ -50,6 +50,6 @@ test('statistics keeps differentiated chart series and semantic outcome colors',
   assert.match(stats, /--stat-bg:var\(--ob-bg\)/);
   assert.doesNotMatch(stats, /html\.dark \.statistics-view/);
   const channels = readFileSync(join(dir, 'ChannelsView.vue'), 'utf8');
-  assert.match(channels, /\.mac-primary-button \{\s*background: var\(--ob-blue\) !important;\s*color: var\(--ob-text-inverse\)/);
-  assert.match(channels, /html\.dark \.mobile-channel-pill\.is-active \{\s*background: var\(--ob-selected\);\s*border-color: var\(--ob-blue\);\s*color: var\(--ob-blue\)/);
+  assert.match(channels, /\.mac-primary-button \{\s*background: var\(--ob-chat-selected\);\s*color: var\(--ob-chat-text\)/);
+  assert.match(channels, /\.mobile-channel-pill\.is-active \{\s*background: var\(--ob-chat-selected\);\s*border-color: var\(--ob-border-strong\);\s*color: var\(--ob-chat-text\)/);
 });

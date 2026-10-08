@@ -3,6 +3,7 @@ import { computed, onMounted, onBeforeUnmount, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Api, apiError } from "../api";
 import { defineLazyView } from "../lazyView.js";
+import "./settings-ui.css";
 
 const TemplateView = defineLazyView(() => import("./TemplateView.vue"), "提示词模板");
 const LogsView = defineLazyView(() => import("./LogsView.vue"), "系统日志");
@@ -92,7 +93,7 @@ watch(activeSection, (next) => emit("section-changed", next));
 </script>
 
 <template>
-  <section class="settings-hub h-full min-h-0 flex flex-col bg-macbg">
+  <section class="settings-hub settings-ui h-full min-h-0 flex flex-col bg-macbg">
     <header class="settings-header shrink-0 border-b border-macborder bg-ob-surface/75 px-5 py-3 backdrop-blur">
       <div class="settings-header-row flex min-w-0 items-center gap-4">
         <div class="settings-mobile-navigation"><slot name="mobile-navigation" /></div>
@@ -112,13 +113,14 @@ watch(activeSection, (next) => emit("section-changed", next));
         <svg class="settings-section-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 6 3.5 3.5L11.5 6" /></svg>
         </div>
         <nav class="settings-desktop-tabs min-w-0 flex-1 overflow-x-auto">
-          <div class="flex w-max items-center gap-1 rounded-2xl bg-ob-soft/80 p-1 ring-1 ring-inset ring-ob-border">
+          <div class="settings-tab-list">
             <button
               v-for="item in sections"
               :key="item.key"
               type="button"
-              class="flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-medium transition whitespace-nowrap"
-              :class="activeSection === item.key ? 'bg-ob-surface text-ob-strong shadow-sm ring-1 ring-ob-border' : 'text-ob-subtle hover:bg-ob-surface/70 hover:text-ob-strong'"
+              class="settings-tab"
+              :class="{ 'is-active': activeSection === item.key }"
+              :aria-current="activeSection === item.key ? 'page' : undefined"
               :title="item.hint"
               @click="selectSection(item.key)"
             >
@@ -137,10 +139,20 @@ watch(activeSection, (next) => emit("section-changed", next));
 </template>
 
 <style scoped>
+.settings-hub { background: var(--ob-chat-bg); }
+.settings-header { padding: 12px 24px; border-color: var(--ob-chat-line); background: var(--ob-chat-bg); backdrop-filter: none; }
+.settings-heading > div:first-child { font-size: 13px; font-weight: 500; }
+.settings-subtitle { color: var(--ob-chat-subtle); }
+.settings-tab-list { display: flex; width: max-content; align-items: center; gap: 4px; }
+.settings-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 10px; border: 1px solid transparent; border-radius: 6px; color: var(--ob-chat-subtle); font-size: 12px; white-space: nowrap; transition: background-color .15s ease, color .15s ease; }
+.settings-tab:hover { background: var(--ob-chat-hover); color: var(--ob-chat-text); }
+.settings-tab.is-active { background: var(--ob-chat-selected); color: var(--ob-chat-text); font-weight: 500; }
+.settings-tab:focus-visible { outline: 2px solid var(--ob-focus); outline-offset: -2px; }
+
 .settings-section-select, .settings-section-control, .settings-mobile-navigation { display: none; }
 @media (max-width: 760px) {
   .settings-hub { min-width: 0; }
-  .settings-header { padding: calc(4px + env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) 4px max(8px, env(safe-area-inset-left, 0px)); background: var(--el-bg-color-overlay); }
+  .settings-header { padding: calc(4px + env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) 4px max(8px, env(safe-area-inset-left, 0px)); background: var(--ob-chat-bg); }
   .settings-header-row { gap: 8px; }
   .settings-mobile-navigation { display: flex; flex: 0 0 auto; }
   .settings-section-control { display: block; position: relative; flex: 1 1 0%; min-width: 0; }
@@ -159,7 +171,7 @@ watch(activeSection, (next) => emit("section-changed", next));
     min-height: 44px;
     border: 1px solid var(--el-border-color-lighter);
     border-radius: 10px;
-    background-color: var(--el-fill-color-light);
+    background-color: var(--ob-chat-hover);
     padding: 0 40px 0 12px;
     cursor: pointer;
   }

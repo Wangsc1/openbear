@@ -191,7 +191,6 @@ const menuSupportsThinking = computed(() => isAgentTab.value ? props.agentSuppor
 const menuThinkingLevel = computed(() => isAgentTab.value ? props.agentThinkLevel : props.effectiveThinking);
 const menuDefaultThinking = computed(() => compactThinkingLabel(isAgentTab.value ? props.agentDefaultThinkingLabel : currentDefaultThinkingLabel.value));
 const menuSelectedModel = computed(() => isAgentTab.value ? props.agentModel : props.currentModel);
-const contextDetailText = computed(() => `已用 ${props.contextUsedDisplay} · 压缩阈值 ${props.contextThresholdDisplay} · 模型窗口 ${props.contextWindowDisplay}`);
 
 const runConfigThinkingBadge = computed(() => props.supportsThinking && props.effectiveThinking && props.effectiveThinking !== 'off'
 	? compactThinkingLabel(props.effectiveThinking) : '');
@@ -269,7 +268,6 @@ const contextPercentNumber = computed(() => {
 	const value = Number(String(props.contextPercentDisplay || "").replace("%", ""));
 	return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
 });
-const contextMeterStyle = computed(() => ({width: `${contextPercentNumber.value}%`}));
 const runConfigContextRingClass = computed(() => ({
 	'is-unknown': !Number.isFinite(Number.parseFloat(props.contextPercentDisplay)),
 	'is-warning': contextPercentNumber.value >= 85 && contextPercentNumber.value < 100,
@@ -1082,15 +1080,6 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 									<button type="button" role="tab" :aria-selected="runConfigTab === 'main'" :class="runConfigTab === 'main' ? 'is-active' : ''" @click="runConfigTab = 'main'">主会话</button>
 									<button type="button" role="tab" :aria-selected="runConfigTab === 'agent'" :class="runConfigTab === 'agent' ? 'is-active' : ''" @click="runConfigTab = 'agent'">Agent</button>
 								</div>
-								<el-tooltip v-if="!isAgentTab" :content="contextDetailText" placement="top" :show-after="400">
-									<div v-show="!runConfigCompact" class="run-config-context" :aria-label="contextDetailText">
-										<div class="context-meter-row">
-											<span class="config-label"><ModelFeatureIcon name="context"/>压缩阈值占用</span>
-											<span class="context-meter-values"><span>{{ props.contextUsedDisplay }} <span class="context-meter-limit">/ {{ props.contextThresholdDisplay }}</span></span><span class="context-percent">{{ props.contextPercentDisplay }}</span></span>
-										</div>
-										<div class="context-meter" aria-hidden="true"><span :style="contextMeterStyle"></span></div>
-									</div>
-								</el-tooltip>
 								<p v-if="props.running" v-show="!runConfigCompact" class="run-config-notice">{{ isAgentTab ? '模型与执行设置用于新 Agent' : '模型与执行设置在下一次调用生效' }}</p>
 								<label v-show="!runConfigCompact || !runConfigSettingsOpen" class="model-search run-config-search">
 									<Search/>
@@ -1170,7 +1159,6 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 								<div v-if="runConfigCompact" class="run-config-compact-footer">
 									<div class="run-config-compact-summary" aria-live="polite">
 										<span>{{ runConfigSettingsSummary }}</span>
-										<span v-if="!isAgentTab" :aria-label="contextDetailText">上下文 {{ props.contextUsedDisplay }} / {{ props.contextThresholdDisplay }} · {{ props.contextPercentDisplay }}</span>
 										<span v-if="props.running">{{ isAgentTab ? '用于新 Agent' : '下一次调用生效' }}</span>
 									</div>
 									<div class="run-config-compact-actions">
@@ -2227,20 +2215,9 @@ button.status-chip:hover, .status-chip-active {
 	color: var(--rc-text);
 	box-shadow: var(--ob-shadow-panel);
 }
-.run-config-context {
-	flex: 0 0 auto;
-	padding: 6px 8px;
-	border-radius: 8px;
-	background: var(--rc-surface);
-}
-.context-meter-row, .run-config-control-head, .fast-control { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.run-config-control-head, .fast-control { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .config-label { display: inline-flex; align-items: center; flex: 0 0 auto; gap: 7px; font-size: 13px; font-weight: 500; white-space: nowrap; }
 .config-label svg { width: 15px; height: 15px; flex: 0 0 auto; color: var(--rc-muted); }
-.context-meter-values { display: flex; align-items: baseline; gap: 8px; font-variant-numeric: tabular-nums; font-size: 12px; white-space: nowrap; }
-.context-meter-limit { color: var(--rc-muted); }
-.context-percent { font-weight: 500; color: var(--rc-text); }
-.context-meter { height: 5px; margin-top: 6px; overflow: hidden; border-radius: 5px; background: rgb(var(--ob-text-muted-rgb) / 0.06); }
-.context-meter span { display: block; height: 100%; border-radius: inherit; background: var(--rc-accent); transition: width .2s ease; }
 .run-config-notice { margin: 0 4px; color: var(--rc-muted); font-size: 12px; }
 .model-search {
 	display: flex;
@@ -2251,7 +2228,7 @@ button.status-chip:hover, .status-chip-active {
 	padding: 6px 10px;
 	border: 1px solid var(--rc-line);
 	border-radius: 8px;
-	background: var(--rc-control);
+	background: var(--ob-chat-hover);
 	color: var(--rc-muted);
 	transition: border-color .15s ease, box-shadow .15s ease;
 }
@@ -2421,6 +2398,8 @@ button.status-chip:hover, .status-chip-active {
 	padding: 6px 0;
 	border-top: 1px solid var(--rc-line);
 }
+/* Reserve the same row for the 22px switch and the 30px Agent segments. */
+.fast-control:not(.context-strategy-control) { min-height: 44px; }
 .config-value { display: flex; align-items: center; gap: 9px; }
 .agent-fast-segments { flex: 0 0 auto; }
 .agent-fast-segments button { flex: 0 0 auto; min-width: 30px; padding: 2px 10px; font-size: 12px; text-align: center; }

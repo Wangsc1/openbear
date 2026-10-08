@@ -11,7 +11,9 @@ const rule = media.nodes.find(n => n.type === 'rule');
 function matches(query, env) {
   return query.split(',').some(part => [...part.matchAll(/\(([^)]+)\)/g)].every(([, atom]) => {
     const [key,value] = atom.split(':').map(s=>s.trim());
-    return key === 'max-width' ? env.width <= parseFloat(value) : env[key] === value;
+    if (key === 'max-width') return env.width <= parseFloat(value);
+    if (key === 'min-width') return env.width >= parseFloat(value);
+    return env[key] === value;
   }));
 }
 test('mobile input floor covers small screens and landscape touch devices without altering desktop or pinch zoom', () => {
@@ -22,7 +24,7 @@ test('mobile input floor covers small screens and landscape touch devices withou
   ]) assert.equal(matches(media.params,env),true);
   assert.equal(matches(media.params,{width:1440,hover:'hover',pointer:'fine','any-pointer':'fine'}),false);
   assert.equal(matches(media.params,{width:1024,hover:'hover',pointer:'fine','any-pointer':'fine'}),false);
-  assert.deepEqual(rule.nodes.map(n=>[n.prop,n.value,n.important]),[['font-size','16px',true]]);
+  assert.deepEqual(rule.nodes.map(n=>[n.prop,n.value,n.important]),[['font-size','var(--ob-chat-input-font-size, 16px)',true]]);
   const main=read('./main.js');assert.ok(main.indexOf('import "./mobile-inputs.css"')>main.indexOf('import "./admin-mobile.css"'));
   assert.doesNotMatch(read('../index.html'),/maximum-scale|user-scalable/);
 });
@@ -35,6 +37,53 @@ test('the shared rule reaches native/Element forms, teleported dialogs, rich tex
   // No app/dialog ancestor restriction: Element Plus teleports overlays to body.
   assert.ok(rule.selectors.every(s=>!s.includes('#app')&&!s.includes('.app-shell')));
 });
+test('compact chat fields restore desktop sizes even on touch PCs, while iPhone/iPad keep zoom-safe inputs', () => {
+  const nativeInput = rule.selectors.find(selector => selector.startsWith('input'));
+  const controls = [
+    {selector: '.conversation-tree .tree-search input', mobile: nativeInput, font: '12px', file: './components/ConversationTree.vue', base: '.tree-search input'},
+    {selector: '.composer-shell .reference-editor-content', mobile: '[contenteditable]:not([contenteditable="false"])', font: '14px', file: './references/ReferenceEditor.vue', base: '.reference-editor-content'},
+    {selector: '.composer-shell .reference-editor-placeholder', mobile: '.reference-editor-placeholder', font: '14px', file: './references/ReferenceEditor.vue', base: '.reference-editor-placeholder'},
+    {selector: '.run-config-menu-popper .model-search input', mobile: nativeInput, font: '13px', file: './views/consoleView/ConsoleComposer.vue', base: '.model-search input'},
+  ];
+  function sharedFont(selectors, env, initial) {
+    let font = initial, desktopSize;
+    sheet.walkRules(candidate => {
+      if (!candidate.selectors.some(selector => selectors.includes(selector))) return;
+      for (let parent = candidate.parent; parent; parent = parent.parent) {
+        if (parent.type !== 'atrule') continue;
+        if (parent.name === 'media' && !matches(parent.params, env)) return;
+        if (parent.name === 'supports') {
+          assert.equal(parent.params, 'not (-webkit-touch-callout: none)');
+          if (env.ios) return;
+        }
+      }
+      candidate.walkDecls(decl => {
+        if (decl.prop === 'font-size') { assert.equal(decl.important, true); font = decl.value; }
+        if (decl.prop === '--ob-chat-input-font-size') desktopSize = decl.value;
+      });
+    });
+    return font === 'var(--ob-chat-input-font-size, 16px)' ? (desktopSize || '16px') : font;
+  }
+  const desktop = {width:1440, hover:'hover', pointer:'fine', 'any-pointer':'fine', ios:false};
+  const phone = {width:390, hover:'none', pointer:'coarse', 'any-pointer':'coarse', ios:true};
+  for (const control of controls) {
+    let correction;
+    sheet.walkRules(candidate => { if (candidate.selectors.includes(control.selector)) correction = candidate; });
+    assert.deepEqual(correction.nodes.map(decl => [decl.prop, decl.value]), [['--ob-chat-input-font-size', control.font]], 'desktop size feeds the existing high-specificity rule rather than losing an !important contest');
+    const {descriptor} = parse(read(control.file));
+    const componentCss = postcss.parse(descriptor.styles.map(style => style.content).join('\n'));
+    let baseFont;
+    componentCss.walkRules(candidate => {
+      if (candidate.parent.type === 'root' && candidate.selectors.includes(control.base)) candidate.walkDecls('font-size', decl => {baseFont = decl.value;});
+    });
+    assert.equal(baseFont, control.font, 'desktop correction matches the existing component scale');
+    const font = env => sharedFont([control.mobile, control.selector], env, baseFont);
+    for (const env of [desktop, {...desktop, 'any-pointer':'coarse'}, {...desktop, width:1024, 'any-pointer':'coarse'}]) assert.equal(font(env), control.font, control.selector);
+    for (const env of [phone, {...phone, width:844}, {...phone, width:1024, hover:'hover', pointer:'fine'}, {...desktop, width:600, 'any-pointer':'coarse'}, {...phone, ios:false}]) assert.equal(font(env), '16px', control.selector);
+  }
+  assert.equal(sharedFont([nativeInput], {...desktop, 'any-pointer':'coarse'}, '13px'), '16px', 'unrelated form inputs keep their existing mobile policy');
+});
+
 test('Monaco font measurements follow the same media query and restore desktop sizing, releasing listeners on unmount', () => {
   const listeners=new Set(),options=[];
   const media={matches:true,addEventListener:(name,fn)=>{assert.equal(name,'change');listeners.add(fn);},removeEventListener:(_,fn)=>listeners.delete(fn)};

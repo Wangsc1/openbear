@@ -291,8 +291,8 @@ onMounted(load);
 </script>
 
 <template>
-  <div class="admin-page agents-page h-full flex flex-col" v-loading="loading">
-    <header class="h-14 shrink-0 flex items-center justify-between px-6 border-b border-macborder bg-ob-surface/70 backdrop-blur">
+  <div class="admin-page agents-page settings-ui h-full flex flex-col" v-loading="loading">
+    <header class="settings-page-header h-14 shrink-0 flex items-center justify-between px-6 border-b border-macborder bg-ob-surface/70 backdrop-blur">
       <div class="admin-heading flex items-center gap-2">
         <h1 class="text-base font-semibold">Agent Presets</h1>
         <span class="text-xs text-macsub">system prompt 与适用场景</span>
@@ -343,7 +343,7 @@ onMounted(load);
       </div>
     </div>
 
-    <el-drawer append-to-body class="admin-drawer agent-drawer" v-model="drawerOpen" size="72%" :title="editing?.id ? '编辑 Preset' : '新建 Preset'">
+    <el-drawer append-to-body class="settings-ui admin-drawer agent-drawer" v-model="drawerOpen" size="72%" :title="editing?.id ? '编辑 Preset' : '新建 Preset'">
       <template v-if="editing">
         <div class="agent-edit-body h-full flex flex-col min-h-0 gap-4">
           <section class="mac-panel p-4 grid grid-cols-1 md:grid-cols-4 gap-3 shrink-0">

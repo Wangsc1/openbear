@@ -346,9 +346,9 @@ const SAMPLE = `You are OpenBear, a capable AI assistant operating inside a priv
 </script>
 
 <template>
-	<div class="admin-page template-page h-full flex flex-col">
+	<div class="admin-page template-page settings-ui h-full flex flex-col">
 		<header
-			class="h-14 shrink-0 flex items-center justify-between px-6 border-b border-macborder bg-ob-surface/70 backdrop-blur">
+			class="settings-page-header h-14 shrink-0 flex items-center justify-between px-6 border-b border-macborder bg-ob-surface/70 backdrop-blur">
 			<div class="admin-heading flex items-center gap-2 min-w-0">
 				<h1 class="text-base font-semibold shrink-0">提示词模板</h1>
 				<span class="text-xs text-macsub truncate">选择模板 · 编辑 · 自动补全 · 实时预览</span>
@@ -482,7 +482,7 @@ const SAMPLE = `You are OpenBear, a capable AI assistant operating inside a priv
 			<div v-else class="flex-1 flex items-center justify-center text-macsub text-sm">选择或新建一个模板</div>
 		</div>
 		
-		<el-dialog append-to-body class="admin-dialog template-dialog"
+		<el-dialog append-to-body class="settings-ui admin-dialog template-dialog"
 			v-model="showBuiltinImport"
 			title="导入随版本模板"
 			width="520px"
@@ -516,7 +516,7 @@ const SAMPLE = `You are OpenBear, a capable AI assistant operating inside a priv
 			</template>
 		</el-dialog>
 
-		<el-dialog append-to-body class="admin-dialog template-dialog" v-model="showParams" title="预览样例运行时参数" width="760px">
+		<el-dialog append-to-body class="settings-ui admin-dialog template-dialog" v-model="showParams" title="预览样例运行时参数" width="760px">
 			<div class="text-xs text-macsub mb-2">默认来自后端当前运行时 params；改完会自动刷新预览。</div>
 			<el-input v-model="sampleParams" type="textarea" resize="none" class="template-param-input"/>
 			<template #footer>
@@ -526,7 +526,7 @@ const SAMPLE = `You are OpenBear, a capable AI assistant operating inside a priv
 			</template>
 		</el-dialog>
 		
-		<el-dialog append-to-body class="admin-dialog template-dialog" v-model="showHelp" title="模板语法说明" width="760px">
+		<el-dialog append-to-body class="settings-ui admin-dialog template-dialog" v-model="showHelp" title="模板语法说明" width="760px">
 			<div class="text-sm space-y-3 leading-relaxed">
 				<p class="text-macsub">模板用兼容 prompt-memory 的语法拼装系统提示词，不与 Markdown 冲突。模板页输入
 					<code>[[</code> 会补变量/函数，输入 <code>@</code> 会补模板指令。</p>

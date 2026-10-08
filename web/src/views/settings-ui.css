@@ -1,0 +1,97 @@
+/* Settings-only admin chrome. Opt in page roots AND teleported dialogs/drawers;
+   reference pages and the conversation UI keep their own existing styles. */
+.settings-ui { color: var(--ob-chat-text); }
+.settings-ui > .settings-page-header, .settings-ui.admin-page > .settings-page-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 66px;
+  height: auto;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--ob-chat-line);
+  background: var(--ob-chat-bg);
+  backdrop-filter: none;
+}
+.settings-ui .settings-page-header h1 { font-size: 13px; font-weight: 500; line-height: 20px; }
+.settings-ui .settings-page-header .admin-heading,
+.settings-ui .settings-page-header .channels-heading { min-width: 0; flex-wrap: wrap; gap: 3px 10px; }
+.settings-ui .settings-page-header .text-macsub { color: var(--ob-chat-subtle); font-size: 11px; }
+.settings-ui .mac-panel { border-color: var(--ob-border); border-radius: 12px; background: var(--ob-surface); box-shadow: none; }
+.settings-ui .el-button:not(.is-link), .settings-ui > .settings-page-header .el-button:not(.is-link) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 30px;
+  min-height: 30px;
+  margin: 0;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ob-chat-subtle);
+  font-size: 12px;
+  font-weight: 400;
+  box-shadow: none;
+  white-space: nowrap;
+}
+.settings-ui .el-button--primary:not(.is-link), .settings-ui > .settings-page-header .el-button--primary:not(.is-link) { background: var(--ob-chat-selected); color: var(--ob-chat-text); font-weight: 500; }
+.settings-ui .el-button:not(.is-link):not(:disabled):hover { background: var(--ob-chat-hover); color: var(--ob-chat-text); }
+.settings-ui .el-button--danger:not(.is-link) { color: var(--ob-danger); background: var(--ob-danger-soft); }
+.settings-ui .el-button--danger:not(.is-link):not(:disabled):hover { color: var(--ob-danger); background: var(--ob-danger-soft); border-color: var(--ob-danger); }
+.settings-ui .el-button:not(.is-link).is-disabled { opacity: .45; }
+.settings-ui .el-button.is-circle { width: 30px; padding: 0; }
+.settings-ui .el-button:focus-visible,
+.settings-ui button:focus-visible,
+.settings-ui a:focus-visible { outline: 2px solid var(--ob-focus); outline-offset: 2px; }
+.settings-ui .el-button + .el-button { margin-left: 0; }
+.settings-ui .el-checkbox__label { font-size: 12px; }
+.settings-ui .el-radio-button {
+  --el-radio-button-checked-bg-color: var(--ob-chat-selected);
+  --el-radio-button-checked-text-color: var(--ob-chat-text);
+  --el-radio-button-checked-border-color: var(--ob-border-strong);
+}
+.settings-ui .el-radio-button:not(.is-active) .el-radio-button__inner { background: var(--ob-surface); }
+.settings-ui .el-radio-button__inner { box-shadow: none; }
+.settings-ui .el-tabs__item { color: var(--ob-chat-subtle); font-size: 12px; }
+.settings-ui .el-tabs__item.is-active { color: var(--ob-chat-text); font-weight: 500; }
+.settings-ui .el-tabs__active-bar { background: var(--ob-chat-text); }
+.settings-ui .el-pagination.is-background .el-pager li.is-active { background: var(--ob-chat-selected); color: var(--ob-chat-text); }
+.settings-ui.el-dialog { border: 1px solid var(--ob-border); border-radius: 12px; background: var(--ob-surface-raised); box-shadow: var(--ob-shadow-dialog); }
+.settings-ui.el-drawer { background: var(--ob-surface); }
+.settings-ui .el-dialog__title, .settings-ui .el-drawer__title { color: var(--ob-text); font-size: 14px; font-weight: 500; }
+.settings-ui .el-dialog__footer, .settings-ui .el-drawer__footer { border-top: 1px solid var(--ob-border); }
+/* Template editing keeps its existing split panes, save/activate guards and
+   phone menu. Only the chrome around those controls is shared. */
+.settings-ui.template-page > .settings-page-header { flex-wrap: wrap; }
+.settings-ui.template-page .template-actions { flex-wrap: wrap; gap: 6px; }
+.settings-ui.template-page .template-meta { background: var(--ob-surface); }
+.settings-ui.template-page .template-preview-toolbar { background: var(--ob-surface); backdrop-filter: none; }
+.settings-ui.template-page .template-counters > span { border-radius: 5px; background: var(--ob-hover); }
+.settings-ui.template-page .template-mobile-actions button,
+.settings-ui.template-page .template-more > summary { border-radius: 6px; background: transparent; color: var(--ob-chat-subtle); }
+.settings-ui.template-page .template-mobile-actions button.is-primary { color: var(--ob-chat-text); background: var(--ob-chat-selected); }
+.settings-ui.template-page .template-mobile-actions button.is-danger { color: var(--ob-danger); }
+.settings-ui.template-page .template-pane-switch button[aria-pressed="true"] { background: var(--ob-surface); color: var(--ob-chat-text); }
+.settings-ui.agents-page .agent-card { box-shadow: none; }
+.settings-ui.agents-page .agent-card h2 { font-size: 14px; font-weight: 600; }
+.settings-ui.agents-page .agent-card .admin-card-actions { flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.settings-ui.agents-page .agent-card .el-tag { border-radius: 5px; font-size: 11px; }
+.settings-ui.agents-page .agent-card .rounded-full { border-radius: 5px; }
+.settings-ui.logs-page .el-table { border: 1px solid var(--ob-border); box-shadow: none; }
+.settings-ui.install-page { background: var(--ob-chat-bg); }
+.settings-ui.install-page .install-panel { border: 1px solid var(--ob-border); border-radius: 12px; background: var(--ob-surface); padding: 16px; }
+.settings-ui.install-page h1 { font-size: 16px; font-weight: 600; }
+.settings-ui.install-page h2 { font-size: 13px; font-weight: 500; }
+.settings-ui .install-address-link { display: inline-flex; align-items: center; min-height: 30px; padding: 4px 9px; border-radius: 6px; background: var(--ob-chat-selected); color: var(--ob-chat-text); font-size: 12px; font-weight: 500; }
+.settings-ui .install-address-link:hover { background: var(--ob-chat-hover); }
+@media (max-width: 760px) {
+  .settings-ui > .settings-page-header, .settings-ui.admin-page > .settings-page-header { min-height: 48px; padding: 6px 12px; gap: 8px; }
+  .settings-ui .el-button:not(.is-link), .settings-ui > .settings-page-header .el-button:not(.is-link) { min-height: 40px; height: auto; }
+  .settings-ui .el-button.is-circle, .settings-ui > .settings-page-header .el-button.is-circle:not(.is-link) { width: 40px; min-width: 40px; }
+  .settings-ui .template-mobile-actions button, .settings-ui .template-more > summary { min-height: 40px; }
+  .settings-ui .install-address-link { min-height: 40px; }
+  .settings-ui.template-page > .settings-page-header .template-mobile-actions { gap: 4px; }
+}
