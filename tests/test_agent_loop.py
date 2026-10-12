@@ -1918,14 +1918,16 @@ async def test_bridge_marker_echo_is_treated_as_empty_response_then_retries():
 
 
 async def test_bridge_marker_echo_at_limit_is_not_delivered_as_final_text():
-    """补救次数用完后仍只有桥接标记：收尾为空，不把标记当作回复内容。"""
+    """补救次数用完后仍只有桥接标记：返回明确失败，不交付空正文。"""
     marker = "[protocol: role-alternation bridge]"
     backend = FakeBackend([[StreamEvent(kind="content", text=marker),
                             StreamEvent(kind="finish", finish_reason="stop")]])
     agent = Agent(backend, _echo_registry(), empty_response_retry_limit=1)
     rec = RecordRenderer()
     r = await agent.run([{"role": "user", "content": "hi"}], rec, model="m")
-    assert r.text == ""
+    assert "自动补救次数已用尽" in r.text
+    assert r.halted_reason == "empty_response"
+    assert r.text == rec.final
     assert r.model_calls == 2
     assert marker not in rec.final
 
@@ -1956,12 +1958,13 @@ async def test_reasoning_only_retry_then_succeed():
 
 
 async def test_empty_response_retry_gives_up_at_limit():
-    """连续空响应达上限 → 不死循环,正常收尾(空回复)。"""
+    """连续空响应达上限 → 不死循环，明确失败正文。"""
     backend = FakeBackend([[StreamEvent(kind="finish", finish_reason="stop")]])  # 永远空
     agent = Agent(backend, _echo_registry(), empty_response_retry_limit=1)
     r = await agent.run([{"role": "user", "content": "hi"}], RecordRenderer(), model="m")
     # 首轮空 + 重试1次仍空 → 收尾。总调用 = 2(1 原始 + 1 重试)
-    assert r.text == ""
+    assert "自动补救次数已用尽" in r.text
+    assert r.halted_reason == "empty_response"
     assert r.model_calls == 2
 
 

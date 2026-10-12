@@ -1390,7 +1390,7 @@ class Agent:
                         log.warning("模型只思考无正文，补救重试", 轮次=round_no, 次数=reasoning_only_retry)
                         await renderer.on_status("重新组织回答 …")
                         convo.append({"role": "user",
-                                      "content": "你刚才只有思考、没有输出正文回复。请基于已有信息直接给出最终回答。"})
+                                      "content": "你刚才只有思考、没有输出正文回复。请基于已有信息直接给出最终回答。不要复述内部角色交替占位或协议标记；若无法完成，请明确说明原因。"})
                         return RuntimeDecision.continue_()
                     elif not only_reasoning and empty_retry < self._empty_response_retry_limit:
                         empty_retry += 1
@@ -1398,7 +1398,7 @@ class Agent:
                         log.warning("模型空响应，补救重试", 轮次=round_no, 次数=empty_retry)
                         await renderer.on_status("重新组织回答 …")
                         convo.append({"role": "user",
-                                      "content": "你刚才没有输出任何回复。请基于已有信息直接给出最终回答。"})
+                                      "content": "你刚才没有输出任何有效正文回复。请基于已有信息直接给出最终回答。不要复述内部角色交替占位或协议标记；若无法完成，请明确说明原因。"})
                         return RuntimeDecision.continue_()
                 # #14 stop reason 兜底：length 截断给用户明确提示;未知 finish_reason 记日志便于排障。
                 if finish == "length":
@@ -1418,6 +1418,18 @@ class Agent:
                             tool_schemas[:] = [s for s in tool_schemas if s.get("function", {}).get("name", s.get("name")) in {"Webhook", "History"}]
                         convo.append({"role": "user", "content": decision["message"], "_openbear_source": {"kind": "runtime"}})
                         return RuntimeDecision.continue_()
+                if not full_text.strip() and finish != "length":
+                    # API success is not a usable answer. Persist the same explicit
+                    # failure body that renderers and Agent callers receive, but do
+                    # not attach an opaque model turn to runtime-authored text.
+                    result.halted_reason = "empty_response"
+                    full_text = (
+                        "⚠️ 模型未能生成有效正文回复，自动补救次数已用尽，本次已停止。"
+                        "请重试；若问题持续，可检查模型服务状态。"
+                    )
+                    signature = ""
+                    native_output_items = []
+                    native_round_replayable = False
                 result.text = full_text
                 # 实时落库普通字段；完整 model-visible context 只进私有 checkpoint。
                 if full_text or reasoning_text or native_output_items:
@@ -1486,8 +1498,8 @@ class Agent:
         try:
             value = await session.run(run_host,
                 classify=lambda value: "cancelled" if value.halted_reason in {"soft_stop", "retry_cancelled"}
-                else "failed" if value.model_fail else "completed")
-            terminal_reason = "protocol_incomplete" if value.halted_reason == 'receipt_repair_incomplete' else "cancelled" if value.halted_reason else "failed" if value.model_fail else "completed"
+                else "failed" if value.model_fail or value.halted_reason == "empty_response" else "completed")
+            terminal_reason = "protocol_incomplete" if value.halted_reason == 'receipt_repair_incomplete' else "failed" if value.halted_reason == "empty_response" else "cancelled" if value.halted_reason else "failed" if value.model_fail else "completed"
             return value
         except asyncio.CancelledError:
             terminal_reason = "cancelled"
