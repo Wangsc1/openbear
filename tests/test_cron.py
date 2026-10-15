@@ -421,6 +421,110 @@ async def test_restart_marks_active_interrupted_and_past_once_missed(cron_env):
     assert len(await many(e.db.conn, 'SELECT * FROM cron_runs')) == 1
 
 
+async def test_auto_create_child_allows_one_shot_from_cron_run(cron_env, monkeypatch):
+    e = cron_env; now = e.cron.clock()
+    # Schedule a one-off child creation in the same folder.
+    auto_cfg = {'enabled': True, 'folderId': 'folder', 'descriptionPrefix': '[auto] '}
+    job = await create(e, schedule={'kind': 'at', 'at': iso(now+1000)},
+        autoCreateChild=auto_cfg)
+    e.cron.clock = lambda: now+1001
+    await e.cron.tick()
+    run_task = e.cron.tasks[next(iter(e.cron.tasks))]
+    await asyncio.wait_for(run_task, 10)
+    run_row = await one(e.db.conn, 'SELECT * FROM cron_runs WHERE job_id=?', (job['id'],))
+    conv_row = await one(e.db.conn, 'SELECT * FROM web_conversations WHERE conversation_uuid=?', (run_row['conversation_uuid'],))
+    # Simulate the model calling Cron create inside the completed run context.
+    ctx = ToolRuntimeContext(
+        conversation_uuid=conv_row['conversation_uuid'], chat_id=conv_row['internal_chat_id'],
+        source='cron', cron_run_id=run_row['run_id'])
+    # Without auto_create_child, create would be forbidden; here it succeeds.
+    result = await dispatch(e.cron, 'create', {
+        'folderId': 'folder',
+        'name': '[auto] child',
+        'description': '[auto] one-shot follow-up',
+        'enabled': True,
+        'requestId': 'child-1',
+        'config': {'schedule': {'kind': 'at', 'at': iso(now+10000), 'timezone': 'UTC'}, 'instructions': 'child'}}, ctx)
+    assert result['job']['folderId'] == 'folder'
+    assert result['job']['name'].startswith('[auto] ')
+    # Reject wrong folder.
+    with pytest.raises(CronError):
+        await dispatch(e.cron, 'create', {
+            'folderId': 'other', 'name': '[auto] bad folder', 'requestId': 'bad-1',
+            'config': {'schedule': {'kind': 'at', 'at': iso(now+10000), 'timezone': 'UTC'}, 'instructions': 'x'}}, ctx)
+    # Reject non-at schedule.
+    with pytest.raises(CronError):
+        await dispatch(e.cron, 'create', {
+            'folderId': 'folder', 'name': '[auto] bad schedule', 'requestId': 'bad-2',
+            'config': {'schedule': {'kind': 'every', 'everySeconds': 60, 'timezone': 'UTC'}, 'instructions': 'x'}}, ctx)
+    # Reject missing prefix.
+    with pytest.raises(CronError):
+        await dispatch(e.cron, 'create', {
+            'folderId': 'folder', 'name': 'no prefix', 'requestId': 'bad-3',
+            'config': {'schedule': {'kind': 'at', 'at': iso(now+10000), 'timezone': 'UTC'}, 'instructions': 'x'}}, ctx)
+
+
+@pytest.mark.parametrize('capability', [None, False, True])
+async def test_auto_create_child_real_turn_provenance_and_tool_policy(cron_env, capability):
+    """The real failure was a blanket prohibition in the model's runtime input."""
+    e = cron_env; now = e.cron.clock()
+    prefix = 'FLOWERCLOUD_EXPIRY_AUTO:'
+    config = {} if capability is None else {'autoCreateChild': {
+        'enabled': capability, 'folderId': 'folder', 'descriptionPrefix': prefix}}
+    job = await create(e, **config)
+    child = {'folderId': 'folder', 'name': 'isolated child', 'description': prefix + 'fixture',
+        'enabled': True, 'requestId': 'isolated-child', 'config': {
+            'schedule': {'kind': 'at', 'at': iso(now + 3600000)}, 'instructions': 'isolated child'}}
+    requests = [('create', child)]
+    if capability:
+        # These must still be denied even with the creation capability enabled.
+        requests += [('create', {**child, 'folderId': 'other'}),
+                     ('create', {**child, 'description': 'wrong prefix'}),
+                     ('create', {**child, 'config': {'schedule': {'kind': 'every', 'everySeconds': 60}}})]
+        requests += [(action, {'jobId': job['id'], 'enabled': False, 'expectedRevision': 1})
+                     for action in ('update', 'set_enabled', 'delete', 'run', 'stop')]
+    scripts = [[StreamEvent('tool_call', tool_calls=[ToolCall('child-' + str(i), 'Cron',
+                    json.dumps({'action': action, 'params': params}))]),
+                StreamEvent('finish', finish_reason='tool_calls')]
+               for i, (action, params) in enumerate(requests)]
+    scripts.append([StreamEvent('content', text='finished'), StreamEvent('finish', finish_reason='stop')])
+    backend = FakeStreamBackend(scripts)
+    e.server.llm_factory = FakeRunFactory(backend, context_window=128000)
+    result = await run(e, job)
+    assert result['status'] == 'completed', result
+    injected = '\n'.join(str(m.get('content', '')) for m in backend.seen_convos[0])
+    blanket = 'Do not create, enable or modify schedules from this automatic execution.'
+    assert (blanket not in injected) == bool(capability)
+    assert ('autoCreateChild is enabled in this run snapshot' in injected) == bool(capability)
+    if capability:
+        assert '"folder"' in injected and '"' + prefix + '"' in injected
+        assert 'config.schedule.kind must be "at"' in injected
+        assert 'existing tool confirmation gates' in injected
+    tools = [m for m in backend.seen_convos[-1] if m.get('role') == 'tool']
+    assert len(tools) == len(requests)
+    if capability:
+        assert json.loads(tools[0]['content'])['job']['description'] == prefix + 'fixture'
+        tools = tools[1:]
+    assert all(json.loads(m['content'])['code'] == 'automatic_configuration_forbidden' for m in tools)
+    assert (await e.cron.list(123, {}))['total'] == (2 if capability else 1)
+    assert (await e.cron.get(123, job['id']))['job']['revision'] == 1
+
+
+async def test_auto_create_child_provenance_uses_run_snapshot(cron_env):
+    from app.cron.executor import PROVENANCE, run_provenance
+    e = cron_env
+    job = await create(e, autoCreateChild={
+        'enabled': True, 'folderId': 'folder', 'descriptionPrefix': '[snapshot] '})
+    result = await run(e, job)
+    # Editing the definition must not remove/change this run's authority.
+    await e.cron.save(123, {'config': {**job['config'], 'autoCreateChild': None},
+        'expectedRevision': job['revision'], 'requestId': 'remove-capability'}, job['id'])
+    text = await run_provenance(e.db, result['id'])
+    assert 'autoCreateChild is enabled in this run snapshot' in text
+    assert '[snapshot] ' in text
+    assert await run_provenance(e.db, 'missing-run') == PROVENANCE
+
+
 async def test_frontend_deep_link_and_editor_dependencies(cron_env, monkeypatch):
     e = cron_env
     # Route tests must not depend on a developer's untracked web/dist build.

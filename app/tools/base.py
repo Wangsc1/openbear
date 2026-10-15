@@ -181,6 +181,7 @@ class ToolRuntimeContext:
     webhook_automatic: bool = False
     # Host-injected recommendation-run authority for the Recommendation tool.
     recommendation_run_id: str = ""
+    cron_run_id: str = ""
     receipt_repair: bool = False
     receipt_repair_calls: int = 0
     receipt_repair_started: float = 0.0

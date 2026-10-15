@@ -292,8 +292,8 @@ class WebAdminChatRunMixin:
                 from app.webhooks.runtime_bridge import PROVENANCE
                 llm_text = PROVENANCE + "\nTrusted assignmentId: " + webhook_assignment_id + "\n\n" + llm_text
             if cron_run_id:
-                from app.cron.executor import PROVENANCE as CRON_PROVENANCE
-                llm_text = CRON_PROVENANCE + "\nTrusted Cron run: " + cron_run_id + "\n\n" + llm_text
+                from app.cron.executor import run_provenance
+                llm_text = await run_provenance(self.db, cron_run_id) + "\nTrusted Cron run: " + cron_run_id + "\n\n" + llm_text
             if recommendation_run_id:
                 llm_text = ("Recommendation cycle (trusted runtime provenance): an automatic run of the "
                             "recommendation module, not a live human message.\n\n" + llm_text)
@@ -1043,6 +1043,7 @@ class WebAdminChatRunMixin:
                 webhook_owner_id=int((conversation or {}).get("owner_chat_id") or 0),
                 webhook_automatic=bool(webhook_assignment_id),
                 recommendation_run_id=recommendation_run_id,
+                cron_run_id=cron_run_id,
             )
             webhook_service = getattr(self, "webhooks", None)
             if webhook_service is not None and webhook_service.bridge is not None:

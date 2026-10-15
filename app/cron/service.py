@@ -204,7 +204,17 @@ class CronService:
         async with self.db.write_transaction(label='cron-config') as conn:
             previous, fp = await self.operation(conn, owner, 'update:' + job_id if job_id else 'create', request)
             if previous:
-                return previous
+                if job_id:
+                    return previous
+                # A deleted definition is absent from the task list. Allow the
+                # same create request to create it anew, atomically replacing
+                # the stale receipt so concurrent retries still deduplicate.
+                target = await one(conn, 'SELECT deleted_at_ms FROM cron_jobs WHERE job_id=? AND owner_chat_id=?',
+                                   (previous['job']['id'], owner))
+                if target and target['deleted_at_ms'] is None:
+                    return previous
+                await conn.execute('DELETE FROM cron_operations WHERE owner_chat_id=? AND request_id=?',
+                                   (owner, request['requestId']))
             old = await self.row(conn, owner, job_id) if job_id else None
             if old:
                 self.check_revision(old, request)

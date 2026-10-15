@@ -15,11 +15,44 @@ READ = {'describe', 'list', 'get', 'runs', 'statistics', 'preview'}
 GUIDANCE = (Path(__file__).resolve().parents[2] / 'prompts' / 'guides' / 'cron.md').read_text(encoding='utf-8')
 
 
+async def _allowed_auto_create(s, action, params, ctx):
+    if action != 'create':
+        return False
+    run_id = ctx.cron_run_id
+    if not isinstance(run_id, str) or not run_id.strip():
+        return False
+    row = await one(s.db.conn, 'SELECT config_json FROM cron_runs WHERE run_id=?', (run_id,))
+    if not row:
+        return False
+    cfg = JobConfig.model_validate_json(row['config_json'])
+    if not cfg.auto_create_child or not cfg.auto_create_child.enabled:
+        return False
+    allowed = cfg.auto_create_child
+    if allowed.schedule_kind != 'at':
+        return False
+    body = params.get('config', {})
+    if not isinstance(body, dict):
+        return False
+    schedule = body.get('schedule', {})
+    if not isinstance(schedule, dict):
+        return False
+    if schedule.get('kind') != 'at':
+        return False
+    if params.get('folderId') != allowed.folder_id:
+        return False
+    description = str(params.get('description', ''))
+    name = str(params.get('name', ''))
+    if not (description.startswith(allowed.description_prefix) or name.startswith(allowed.description_prefix)):
+        return False
+    return True
+
+
 async def dispatch(s, action, params, ctx):
     if action not in ACTIONS or not isinstance(params, dict): raise CronError('invalid_action')
     if ctx.agent_session_uuid: raise CronError('main_controller_only', status=403)
     if (ctx.source == 'cron' or ctx.webhook_automatic or current_budget() is not None) and action not in READ:
-        raise CronError('automatic_configuration_forbidden', status=403)
+        if ctx.source != 'cron' or action != 'create' or not await _allowed_auto_create(s, action, params, ctx):
+            raise CronError('automatic_configuration_forbidden', status=403)
     if any(k in params for k in ('owner', 'ownerId', 'ownerChatId', 'trusted', 'confirmed', 'confirmationToken')):
         raise CronError('host_identity_not_a_parameter', status=403)
     conversation = await one(s.db.conn, 'SELECT owner_chat_id FROM web_conversations WHERE conversation_uuid=? AND internal_chat_id=?', (ctx.conversation_uuid, ctx.chat_id))

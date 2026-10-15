@@ -108,6 +108,22 @@ class Notifications(Model):
     errors_only: bool = Field(False, strict=True)
 
 
+class AutoCreateChild(Model):
+    enabled: bool = Field(False, strict=True)
+    folder_id: str | None = None
+    description_prefix: str = '[自动创建] '
+    schedule_kind: Literal['at'] = 'at'
+
+    @model_validator(mode='after')
+    def valid(self):
+        if self.enabled:
+            if not isinstance(self.folder_id, str) or not self.folder_id.strip():
+                raise ValueError('启用自动创建子任务时必须指定 folderId')
+            if not isinstance(self.description_prefix, str) or not self.description_prefix.strip():
+                raise ValueError('descriptionPrefix 不能为空')
+        return self
+
+
 class JobConfig(Model):
     schedule: Schedule = Field(default_factory=Schedule)
     run_config: TargetRunConfig = Field(default_factory=TargetRunConfig)
@@ -116,5 +132,6 @@ class JobConfig(Model):
     total_tokens_budget: int | None = Field(None, gt=0, strict=True)
     cost_budget_usd: float | None = Field(None, gt=0)
     notifications: Notifications = Field(default_factory=Notifications)
+    auto_create_child: AutoCreateChild | None = Field(default=None)
     pre: Script = Field(default_factory=Script)
     post: PostScript = Field(default_factory=PostScript)
