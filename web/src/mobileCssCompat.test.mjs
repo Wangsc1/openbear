@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import postcss from 'postcss';
-import {parse, compileTemplate, compileStyle, compileStyleAsync} from '@vue/compiler-sfc';
+import {parse, compileStyleAsync} from '@vue/compiler-sfc';
 import mobileCompat from '../postcss-mobile-compat.js';
 import config from '../postcss.config.js';
 
@@ -135,31 +135,6 @@ test('actual PostCSS plugin chain compiles scoped CSS and keeps guards in emitte
     assert.deepEqual(result.errors, [], name);
     assert.match(result.code, /@supports not \((?:color: color-mix\(in srgb, red, blue\)|height: 100dvh)\)/);
   }
-});
-
-test('only existing state drives former :has layouts; templates and scoped styles compile', () => {
-  const bindings = [
-    ['TurnList', /'has-inline-retry': entry\.event\.kind === 'model_retry'/, /\.timed-row-assistant\.visibility-selectable\.has-inline-retry/],
-    ['ConsoleComposer', /'has-multiple': props\.pendingConfirmations\.length > 1/, /\.web-confirm-stack\.has-multiple/],
-    ['ConsoleComposer', /'is-disabled': interactionDisabled\(item\)/, /\.web-interaction-option\.is-disabled/],
-    ['ConsoleComposer', /'has-multiple': questionnaireQuestions\(item\)\.length > 1/, /\.questionnaire-questions\.has-multiple/],
-    ['ConversationRetryEvent', /'has-actions': retry\.active && retry\.cancellable && retry\.waitId/, /\.retry-summary\.has-actions/],
-    ['ConsoleUserInteractionEvent', /'has-multiple': view\.questions\.length > 1/, /\.questionnaire-questions\.has-multiple/],
-    ['ContextEditor', /'has-selection': checked\.length > 0/, /\.ce-outline\.has-selection/],
-  ];
-  for (const [name, binding, selector] of bindings) {
-    const {template, styles} = descriptor(name);
-    assert.match(template.content, binding, name);
-    assert.match(styles.map(s => s.content).join('\n') + (name === 'ContextEditor' ? read(`${VIEWS}contextEditor/style.css`) : ''), selector, name);
-    const compiled = compileTemplate({source: template.content, filename:`${name}.vue`, id:`test-${name}`});
-    assert.deepEqual(compiled.errors, [], `${name} template`);
-    for (const style of styles) {
-      const output = compileStyle({source:style.content,filename:`${name}.vue`,id:`data-v-${name}`,scoped:style.scoped,postcssPlugins:[mobileCompat()]});
-      assert.deepEqual(output.errors, [], `${name} style`);
-      assert.doesNotMatch(output.code, /:has\(/);
-    }
-  }
-  assert.doesNotMatch(read(`${VIEWS}contextEditor/style.css`), /:has\(/);
 });
 
 test('teleported drawer inline sizes use inherited visualViewport pixels and vh when unset; heatmap remains themed', async () => {

@@ -50,6 +50,7 @@ class Worker:
                 return
             await self.close()
             self.fatal = ""
+            from app.managed.settings import sanitized_env
             self.proc = await asyncio.create_subprocess_exec(
                 self.python,
                 "-m",
@@ -57,6 +58,7 @@ class Worker:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
+                env=sanitized_env(),
                 start_new_session=True,
             )
             self.generation += 1

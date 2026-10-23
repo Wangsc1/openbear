@@ -37,6 +37,8 @@ class InteractionService:
         self.pending: dict[str, dict[str, Any]] = {}
         self.by_conversation: dict[str, set[str]] = {}
         self._listeners: list[Listener] = []
+        # Action-specific answer checks that need host state (e.g. live models).
+        self.validators: dict[str, Callable[[dict[str, Any], dict[str, Any]], list[dict[str, str]]]] = {}
         # A single short submission lock avoids an unbounded per-ID lock cache.
         # No network or notification callback is awaited under this lock.
         self._lock = asyncio.Lock()
@@ -269,6 +271,9 @@ class InteractionService:
                 if item.get("sensitive") and source == "telegram":
                     return {"ok": False, "statusCode": 403, "error": "sensitive_interaction_web_only"}
                 result, errors = canonical_answer(item, answer, source=source)
+                validator = self.validators.get(item["action"])
+                if validator is not None and not errors and not result.get("cancelled"):
+                    errors = validator(item, result)
                 digest = "" if item.get("sensitive") else self._digest(result)
                 if row["status"] != "pending":
                     if not errors and digest and row["answer_digest"] == digest:
@@ -349,6 +354,5 @@ class InteractionService:
 
     async def prune(self, *, before_ms: int | None = None) -> int:
         before = before_ms if before_ms is not None else _now_ms() - 30 * 86_400_000
-        async with self.db.write_transaction(label="interaction_prune") as conn:
-            cur = await conn.execute("DELETE FROM user_interactions WHERE status!='pending' AND resolved_at_ms<?", (before,))
-            return max(0, cur.rowcount)
+        from app.db.maintenance import prune_rows
+        return await prune_rows(self, "user_interactions", "status!='pending' AND resolved_at_ms<?", (before,))

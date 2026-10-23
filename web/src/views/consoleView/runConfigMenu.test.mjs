@@ -36,7 +36,7 @@ const models = [
 ];
 function harness(overrides = {}, tab = "main") {
   const calls = [];
-  const context = vm.createContext({computed, ref, watch, scheduleRunConfigPosition() {}, useId: () => 'menu-test', fmtTokens, modelDefaultThinking, modelLabel, modelShortLabel, thinkingLabel,
+  const context = vm.createContext({computed, ref, watch, scheduleRunConfigPosition() {}, fmtTokens, modelDefaultThinking, modelLabel, modelShortLabel, thinkingLabel,
     defineProps: schema => shallowReactive({...Object.fromEntries(Object.entries(schema).map(([key, spec]) => [key, typeof spec.default === "function" ? spec.default() : spec.default])),
       modelMenuOpen: true, modelGroups: [{provider: "OpenAI", models}], currentModel: models[0].key, currentModelInfo: models[0],
       currentThinkLevels: models[0].thinkingLevels, effectiveThinking: "xhigh", supportsThinking: true,
@@ -49,8 +49,8 @@ function harness(overrides = {}, tab = "main") {
   vm.runInContext(`runConfigTab.value = ${JSON.stringify(tab)}`, context);
   const bindings = proxyRefs(vm.runInContext(`({props, emit, runConfigTab, isAgentTab, contextPercentNumber, runConfigContextRingClass,
     runConfigModelText, runConfigMetaText, runConfigMetaParts, runConfigStrategyText, runConfigThinkingBadge, runConfigStatusLabel, menuSelectedModel, menuThinkingLevels, menuSupportsThinking, menuThinkingLevel, menuDefaultThinking,
-    agentFastTriState, fmtTokens, modelLabel, modelTags, modelFeatures, rolloverTriggerForModel, compactThinkingLabel, selectMenuModel, selectMenuThinking,
-    activeModelDetail, modelDetailId, showModelFeature, clearModelDetail, runConfigPopoverVisible,
+    agentFastTriState, fmtTokens, modelLabel, modelTags, rolloverTriggerForModel, compactThinkingLabel, selectMenuModel, selectMenuThinking,
+    runConfigPopoverVisible,
     runConfigContent, runConfigSearchInput, runConfigCompact, runConfigSettingsOpen, runConfigSettingsSummary, toggleRunConfigSettings, finishRunConfigSearch})`, context));
   let trees = [];
   const tooltips = [];
@@ -96,7 +96,7 @@ test("model rows display readable numerical attributes and feature badges, omitt
   const {html, nodes} = await h.render();
   assert.equal((html.match(/>GPT-6 Astra</g) || []).length, 1);
   assert.doesNotMatch(html, /压缩阈值占用|context-meter|72\.0%|216K/);
-  assert.match(html, />1\.05M 上下文</);
+  assert.doesNotMatch(html, />1\.05M 上下文</);
   assert.match(html, />300K 压缩</);
   assert.match(html, />128K 输出</);
   assert.match(html, />思考</);
@@ -124,8 +124,8 @@ test('model names occupy their own row and all original tags remain together bel
       const tags = walk(details.children).filter(node => hasClass(node, 'model-tag'));
       const labels = tags.map(tag => walk(tag.children).find(child => child.type === 'span' && typeof child.children === 'string').children);
       assert.deepEqual(labels, index === 0
-        ? ['1.05M 上下文', '300K 压缩', '128K 输出', '思考', 'Fast']
-        : ['1.05M 上下文', '272K 压缩', '思考']);
+        ? ['300K 压缩', '128K 输出', '思考', 'Fast']
+        : ['272K 压缩', '思考']);
       assert.ok(content.indexOf(title) < content.indexOf(details));
     }
   }
@@ -199,14 +199,14 @@ test('unreported optional properties stay absent, fallback threshold stays accur
   assert.equal(fallback, 60000);
 });
 
-test('six property meanings use official local Lucide SVGs with their license and theme-safe rendering', async () => {
+test('model property icons use official local Lucide SVGs with their license and theme-safe rendering', async () => {
   const iconUrl = new URL('./ModelFeatureIcon.vue', import.meta.url);
   const iconSource = fs.readFileSync(iconUrl, 'utf8');
   const {descriptor: icon} = parse(iconSource);
   const imports = [...icon.scriptSetup.content.matchAll(/import (\w+) from '([^']+\.svg)'/g)];
   const paths = Object.fromEntries(imports.map(([, name, path]) => [name, path]));
   assert.deepEqual(Object.fromEntries(Object.entries(paths).map(([name, path]) => [name, path.split('/').at(-1)])), {
-    brain: 'brain.svg', zap: 'zap.svg', context: 'messages-square.svg', compression: 'file-archive.svg', output: 'file-output.svg', protocol: 'webhook.svg',
+    brain: 'brain.svg', zap: 'zap.svg', compression: 'file-archive.svg',
   });
   const icons = Object.fromEntries(Object.entries(paths).map(([name, path]) => [name, '/assets/' + path.split('/').at(-1)]));
   const draw = compile(icon.template.content);

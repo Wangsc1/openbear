@@ -13,7 +13,6 @@ from app.context.configuration import conversation_strategy, migrate_context_con
 from app.context.prompts import (
     SUMMARY_SYSTEM_POLICY,
     WINDOW_SYSTEM_POLICY,
-    effective_context_prompt,
 )
 from app.context.runtime import ContextManager
 from app.context.store import ContextOwner, StaleWindow, WindowStore
@@ -23,6 +22,7 @@ from app.context.window import (
     InputEstimate,
     RequiredContextTooLarge,
     WindowPolicy,
+    estimate_request,
     mark_source,
     source_of,
 )
@@ -71,7 +71,7 @@ async def env(tmp_path):
     selected = {"strategy": "sliding_window"}
     async def resolve():
         return selected["strategy"]
-    manager = ContextManager(store, WindowPolicy(128000, trigger_tokens=8000), backend=backends["p/main"], model="main",
+    manager = ContextManager(store, WindowPolicy(128000, trigger_tokens=8000, retain_tokens=1200, dialogue_tokens=0), backend=backends["p/main"], model="main",
         strategy_resolver=resolve, strategies={"model_summary": ModelSummaryStrategy(cfg, factory, "p/main", on_model_call=account)},
         on_rotated=event)
     yield SimpleNamespace(cfg=cfg, db=db, backends=backends, factory=factory, store=store, manager=manager,
@@ -214,15 +214,6 @@ def test_configuration_migration_preserves_original_summary_settings_and_removes
     assert not migrate_context_config(raw)
 
 
-def test_strategy_prompt_is_idempotent_and_bidirectional():
-    prompt = "Custom unmodified user rules."
-    window = effective_context_prompt(prompt)
-    summary = effective_context_prompt(window, "model_summary")
-    assert effective_context_prompt(summary, "model_summary") == summary
-    assert effective_context_prompt(summary, "sliding_window") == prompt
-    assert summary == prompt
-
-
 async def test_summary_keeps_original_decisions_antecedents_and_whole_tool_batches(env):
     proposal = mark_source({"role": "assistant", "content": "Edit source only; do not deploy."})
     decision = batch(20, name="UserInteraction", text='{"confirmed":false,"status":"feedback","text":"Pause deployment; source edits only."}')
@@ -256,6 +247,46 @@ async def test_model_usage_threshold_falls_back_to_ratio_only_without_explicit_v
     assert not env.manager.pending and env.manager.policy.threshold == 12000
 
 
+async def test_window_with_images_still_anchors_estimate_at_real_usage(env, tmp_path):
+    from PIL import Image
+
+    path = tmp_path / "shot.png"
+    Image.new("RGB", (1440, 900)).save(path)
+    shot = mark_source({"role": "user", "content": [
+        {"type": "text", "text": "look"}, {"type": "image", "path": str(path), "mime_type": "image/png"},
+    ]}, kind="human", source_id="u1")
+    messages = await env.manager.prepare([shot, *batch(1, text="old evidence " * 1500), *batch(2)], system="", tools=[])
+    assert env.manager.last_estimate.media_unknown and 6000 < env.manager.last_estimate.tokens < 7000
+    await env.manager.begin_request()
+    await env.manager.observe_usage(Usage(input_tokens=2, cache_read_tokens=7988))
+    assert not env.manager.pending
+    grown = [*messages, *batch(3, text="new evidence " * 100)]
+    assert estimate_request(grown, system="", tools=[]).tokens < 8000
+    await env.manager.prepare(grown, system="", tools=[])
+    assert env.events and env.events[-1]["source"] == "pre_model_request"
+    assert env.events[-1]["beforeEstimateTokens"] >= 8000 > env.events[-1]["afterEstimateTokens"]
+
+
+async def test_reduced_selection_uses_ratio_measured_without_replayed_thinking(env):
+    messages = await env.manager.prepare([human(), *batch(1, text="evidence " * 200)], system="", tools=[])
+    ticket = await env.manager.begin_request()
+    assert ticket.neutral
+    await env.manager.observe_usage(Usage(input_tokens=env.manager.last_estimate.tokens * 2))
+    thought = batch(2, text="later " * 200)
+    thought[0]["reasoning"], thought[0]["signature"] = "long private thinking " * 400, "sig" * 300
+    grown = await env.manager.prepare([*messages, *thought, *batch(3)], system="", tools=[])
+    assert env.manager.last_estimate.reasoning
+    ticket = await env.manager.begin_request()
+    assert not ticket.neutral
+    # Replayed thinking is not billed like its text: this usage must not replace the neutral ratio.
+    await env.manager.observe_usage(Usage(input_tokens=5000))
+    assert (await env.store.load())["state"]["neutralCalibration"]["tokens"] < 5000
+    selected = await env.manager.prepare([*grown, *batch(4)], system="", tools=[], force=True)
+    raw = estimate_request(selected, system=env.manager.system, tools=[])
+    assert not raw.reasoning
+    assert env.events[-1]["afterEstimateTokens"] == round(raw.tokens * 2)
+
+
 async def test_summary_larger_than_threshold_rolls_back_without_silent_window_fallback(env):
     original = [human(), *batch(1), *batch(2)]
     await env.manager.prepare(original, system="", tools=[])
@@ -267,9 +298,3 @@ async def test_summary_larger_than_threshold_rolls_back_without_silent_window_fa
     assert (await env.store.load())["state"] == before["state"]
     assert await SummaryDAO(env.db).latest(7) is None
     assert len(env.calls) == 1 and not env.events
-
-
-def test_user_authored_runtime_text_is_not_rewritten_or_stripped():
-    original = 'Custom constraint. No summary model or forced memory-writing checkpoint is used.\n' + WINDOW_SYSTEM_POLICY
-    assert effective_context_prompt(original, 'model_summary') == original
-    assert effective_context_prompt(original, 'sliding_window') == original

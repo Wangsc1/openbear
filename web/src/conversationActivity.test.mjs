@@ -4,27 +4,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
-import postcss from "postcss";
-import {compile, computed, createSSRApp, h, nextTick, reactive, ref, watch} from "vue";
-import {renderToString} from "vue/server-renderer";
-import {parse, compileTemplate, compileStyle} from "@vue/compiler-sfc";
-import {activityInteractionTarget, activityLabel, activityState, activityReadRequests, applyActivityReadVersions, createActivityReadTracker, eligibleActivityRead, groupActivityItems, withActivityReadVersion} from "./conversationActivity.js";
+import {computed, nextTick, reactive, ref} from "vue";
+import {parse} from "@vue/compiler-sfc";
+import {isActivityWaiting, pendingConversationRows, pendingFolderCounts, folderActivityCounts, activityInteractionTarget, activityLabel, activityState, activityReadRequests, applyActivityReadVersions, createActivityReadTracker, eligibleActivityRead, groupActivityItems, withActivityReadVersion} from "./conversationActivity.js";
 import {acceptActivityReadReceipt, applyCatalogPacket, referenceCatalog, stopReferenceCatalog} from "./references/catalog.js";
 import {treeItemId as rowId, treeItemParent, compareTreeItems, resolveTreeDrop} from "./components/conversationTreeInteractions.js";
+import * as conversationGroupsTree from "./components/conversationGroupsTree.js";
 const read = file => fs.readFileSync(new URL(file, import.meta.url), "utf8");
 const row = (id, extra = {}) => ({conversationUuid: id, kind: "conversation", title: id, folderId: "original-folder", activityVersion: 1, activityReadVersion: 0, activityUnread: true, activityState: "completed", running: false, activityAtMs: 10, activityResult: {opId: "run:" + id, opRevision: 2, status: "completed"}, ...extra});
 const snapshot = () => ({item: row("a"), conversationUuid: "a", loadedConversationUuid: "a", visible: true, focused: true, ready: true, atLatest: true, running: false, operation: {opId: "run:a", revision: 2}});
-
-test("virtual directory deduplicates, groups urgent/running/unread, and sorts by state transitions only", () => {
-  const items = [row("older"), row("newer", {activityAtMs: 20}), row("run", {running: true}), row("urgent", {running: true, activityState: "waiting"}), row("fail", {activityState: "failed"}), row("older"), row("archive", {archived: true})];
-  const before = JSON.stringify(items);
-  const groups = groupActivityItems(items);
-  assert.deepEqual(groups.map(group => group.key), ["attention", "running", "unread"]);
-  assert.deepEqual(groups[2].items.map(item => item.conversationUuid), ["newer", "older"]);
-  assert.equal(groups.flatMap(group => group.items).length, 5);
-  assert.equal(JSON.stringify(items), before, "no original folder or item mutation");
-  assert.equal(activityLabel(items[3]), "待处理");
-});
 
 test("waiting types and targets remain actionable after reading, sort ahead of errors and clear only with live state", () => {
   const waiting = row("b", {running: true, activityState: "waiting", activityAtMs: 1, activityPending: [{interactionId: "form-b", action: "questionnaire"}]});
@@ -113,117 +101,12 @@ test("failed HTTP never consumes a completion and unmount clears the pending ret
   h.tracker.dispose(); await h.tick(); assert.equal(h.calls.length, 1);
 });
 
-test("real recent folder renders one compact list and keeps just-read selected row until leaving", async t => {
-  const source = read("./components/ConversationActivityFolder.vue");
-  const {descriptor} = parse(source);
-  assert.deepEqual(compileTemplate({source: descriptor.template.content, filename: "activity.vue", id: "activity"}).errors, []);
-  const props = reactive({items: [row("completed", {activityAtMs: Date.now() - 180000}), row("working", {running: true, activityUnread: false})], activeConversationUuid: "completed", readVersions: new Map(), titleGenerating: new Set(), busy: false});
-  const ctx = vm.createContext({useRecentConversationRows, computed, ref, onMounted() {}, onBeforeUnmount() {}, watch: (...args) => {const stop = watch(...args); t.after(stop); return stop;}, activityLabel, activityState, groupActivityItems,
-    referenceItem: () => null, defineProps: () => props, defineEmits: () => () => {}});
-  vm.runInContext(descriptor.scriptSetup.content.replace(/^import .*?;\n/gm, ""), ctx);
-  for (const icon of ["ArrowRight", "Folder", "FolderOpened", "Check", "MoreFilled"]) ctx[icon] = {render: () => h("svg")};
-  ctx.AnimatedConversationTitle = {props: ["text"], render() {return h("span", this.text);}};
-  // New SSR app per render, keeping the component's actual reactive state.
-  const renderFolder = () => renderToString(createSSRApp({components: {ArrowRight: ctx.ArrowRight, Check: ctx.Check, MoreFilled: ctx.MoreFilled, AnimatedConversationTitle: ctx.AnimatedConversationTitle}, render: compile(descriptor.template.content), setup: () => vm.runInContext("({...props, props, emit, expanded, rows, unreadCount, waitingCount, rowState, rowLabel, rowTitle, liveTitle, isTitleGenerating, ArrowRight, Folder, FolderOpened, Check, MoreFilled, AnimatedConversationTitle})", ctx)}));
-  let html = await renderFolder();
-  assert.match(html, /最近会话/); assert.match(html, /完成待查看/); assert.match(html, /全部标为已读/);
-  assert.doesNotMatch(html, /运行与未读|<h5|data-activity-group/);
-  assert.doesNotMatch(html, /draggable=|data-tree-id=/);
-  assert.doesNotMatch(html, /activity-unread-slot/, "no invisible unread slot on read or running rows");
-  assert.equal((html.match(/class="activity-unread-dot"/g) || []).length, 1, "only the actual unread row has a dot");
-  const unreadRow = html.match(/data-activity-id="completed"[\s\S]*?<\/div>/)[0];
-  assert.ok(unreadRow.indexOf('class="activity-row-read"') < unreadRow.indexOf('class="activity-row-status activity-row-status-desktop"'), "the actual action is before the right-aligned status, never a blank column after it");
-  assert.equal((html.match(/class="activity-row-read"/g) || []).length, 1, "only unread rows have an actual action, no invisible button for running rows");
-  props.titleGenerating = new Set(["working"]); await nextTick();
-  html = await renderFolder(); assert.match(html, /data-activity-id="working"[^>]*aria-busy="true"/); assert.match(html, /正在生成名称/);
-  props.titleGenerating = new Set();
-  props.readVersions = new Map([["completed", 1]]); props.items = [row("working", {running: true})]; await nextTick();
-  html = await renderFolder(); assert.match(html, /3 分钟前/); assert.match(html, /data-activity-id="completed"/);
-  const justRead = html.match(/data-activity-id="completed"[\s\S]*?<\/div>/)[0];
-  assert.doesNotMatch(justRead, /activity-row-read|activity-unread-dot|activity-unread-slot/);
-  assert.match(justRead, /class="activity-row-status activity-row-status-desktop"[^>]*>3 分钟前<\/span><\/div>$/, "read normal result uses time as the last content, with no trailing placeholder");
-  props.activeConversationUuid = "working"; await nextTick();
-  html = await renderFolder(); assert.doesNotMatch(html, /data-activity-id="completed"/);
-  props.items = [row("wait", {running: true, activityState: "waiting", activityUnread: false, activityPending: [{interactionId: "form", action: "questionnaire"}]})];
-  await nextTick();
-  html = await renderFolder(); assert.match(html, /待处理 1/); assert.match(html, /待填写问卷/);
-  vm.runInContext("expanded.value = false", ctx);
-  html = await renderFolder(); assert.match(html, /待处理 1/); assert.doesNotMatch(html, /data-activity-id="wait"/);
-  props.items = []; await nextTick();
-  html = await renderFolder(); assert.doesNotMatch(html, /activity-waiting-count/);
-  assert.match(source, /max-height: min\(32vh, 260px\)/);
-  const tree = read("./components/ConversationTree.vue");
-  assert.ok(tree.indexOf("<ConversationActivityFolder") < tree.indexOf('<div ref="listRef"'));
-});
-
-test("phone and touch activity styles keep 44px single-line rows and separate actions with bounded scrolling", () => {
-  const {descriptor} = parse(read("./components/ConversationActivityFolder.vue"));
-  const css = postcss.parse(descriptor.styles[0].content);
-  const mobile = css.nodes.find(node => node.type === "atrule" && node.params === "(max-width: 760px), (pointer: coarse)");
-  assert.ok(mobile);
-  const rule = (parent, selector) => Object.fromEntries(parent.nodes.filter(node => node.type === "rule" && node.selector === selector).flatMap(node => node.nodes.filter(decl => decl.type === "decl").map(decl => [decl.prop, decl.value])));
-  assert.equal(rule(css, ".activity-row-open").height, "29px");
-  assert.equal(rule(css, ".activity-row").display, "flex");
-  assert.equal(rule(css, ".activity-row")["grid-template-columns"], undefined, "desktop must not reserve an absent read button");
-  assert.equal(rule(mobile, ".activity-row")["grid-template-columns"], undefined, "touch must not reserve an absent 44px action either");
-  assert.equal(rule(css, ".activity-row-status-desktop").margin, "0 5px 0 6px", "all desktop statuses end at the same small right inset");
-  assert.equal(rule(css, ".activity-row-status-touch").display, "none");
-  assert.equal(rule(mobile, ".activity-row-status-desktop").display, "none");
-  assert.equal(rule(mobile, ".activity-row-status-touch").display, "block");
-  assert.equal(rule(css, ".activity-row-read").opacity, "1", "read action is visible without hover on desktop too");
-  css.walkRules(node => {
-    if (node.selector.includes(".activity-row-read") && /:hover|:focus-within/.test(node.selector)) {
-      assert.equal(node.nodes.some(decl => decl.prop === "opacity"), false, "hover must not control whether the action exists visually");
-    }
-  });
-  assert.equal(rule(css, ".activity-row-copy").display, "contents");
-  assert.equal(rule(css, ".activity-touch-label").display, "none");
-  assert.equal(rule(mobile, ".activity-row-copy")["flex-direction"], "row");
-  assert.equal(rule(mobile, ".activity-row-title")["white-space"], "nowrap");
-  assert.equal(rule(mobile, ".activity-row-title")["text-overflow"], "ellipsis");
-  assert.equal(rule(mobile, ".activity-row-read").width, "44px");
-  assert.equal(rule(mobile, ".activity-row-read").height, "44px");
-  assert.equal(rule(mobile, ".activity-row-read").opacity, "1");
-  assert.equal(rule(mobile, ".activity-read-all").height, "44px");
-  assert.equal(rule(mobile, ".activity-row-open")["min-height"], "44px");
-  assert.equal(rule(mobile, ".activity-folder")["max-height"], "40%");
-  assert.equal(rule(mobile, ".activity-folder-content")["max-height"], "min(28dvh, 220px)");
-  assert.equal(rule(css, ".activity-folder-content")["overflow-y"], "auto");
-  const template = descriptor.template.content;
-  assert.match(template, /emit\('read-all'\)[\s\S]*?全部已读/);
-  assert.match(template, /emit\('read', item\)[\s\S]*?标已读/);
-  assert.match(template, /<\/button>\s*<button v-if="item.activityUnread"/, "read action is not nested in the conversation-opening button; one merged row has one action");
-});
-
-test("compiled recent running indicator keeps a valid rotating animation with either motion preference", () => {
-  const {descriptor} = parse(read("./components/ConversationActivityFolder.vue"));
-  const compiled = compileStyle({source: descriptor.styles[0].content, filename: "activity.vue", id: "data-v-activity", scoped: true});
-  assert.deepEqual(compiled.errors, []);
-  const css = postcss.parse(compiled.code);
-  for (const reduced of [false, true]) {
-    let animation;
-    css.walkRules(rule => {
-      if (!rule.selector.includes(".activity-state-dot.is-running")) return;
-      for (let parent = rule.parent; parent; parent = parent.parent) {
-        if (parent.type === "atrule" && parent.name === "media" && parent.params.includes("prefers-reduced-motion")
-          && parent.params.includes("reduce") && !reduced) return;
-      }
-      rule.walkDecls("animation", decl => {animation = decl.value;});
-    });
-    assert.match(animation, /^activity-spin-[\w-]+ 1s linear infinite$/, `running status must keep moving; reduced=${reduced}`);
-    const name = animation.split(" ")[0];
-    const frames = css.nodes.find(node => node.type === "atrule" && node.name === "keyframes" && node.params === name);
-    assert.ok(frames, "scoped animation refers to the emitted keyframes");
-    assert.ok(frames.nodes.some(rule => rule.nodes.some(decl => decl.prop === "transform" && decl.value === "rotate(360deg)")));
-  }
-});
-
 test("real tree alias opens the same row without moving/expanding folders; stale read cannot clear a new completion", async () => {
   const source = parse(read("./components/ConversationTree.vue")).descriptor.scriptSetup.content.replace(/^import[\s\S]*?;\n/gm, "");
   const emitted = [], sent = [];
   let resolve;
   const catalog = {connected: false, ready: false, activityReadVersions: new Map()};
-  const ctx = vm.createContext({normalizePromptPolicy, promptPolicyFlags, useRecentConversationRows, computed, nextTick, reactive, ref, rowId, treeItemParent, compareTreeItems, resolveTreeDrop, activityLabel, activityState, activityReadRequests,
+  const ctx = vm.createContext({...conversationGroupsTree, normalizePromptPolicy, promptPolicyFlags, useRecentConversationRows, computed, nextTick, reactive, ref, rowId, treeItemParent, compareTreeItems, resolveTreeDrop, activityLabel, activityState, activityReadRequests, isActivityWaiting, pendingConversationRows, pendingFolderCounts, folderActivityCounts,
     // UI import seam only; alias navigation and read-receipt behavior remain real.
     defineLazyView: () => ({}),
     clearTimeout, defineProps: () => ({activeConversationUuid: "", draftConversation: null}), defineEmits: () => (...args) => emitted.push(args), defineExpose() {},
@@ -270,9 +153,24 @@ test("ConsoleView snapshot rejects stale global status until matching rendered o
   ctx.window.matchMedia = () => ({matches: true});
   ctx.props.navigationObscured = false;
   assert.ok(eligibleActivityRead(vm.runInContext("activityReadSnapshot()", ctx)), "closing phone drawer permits viewing again");
-  assert.match(read("./App.vue"), /:navigation-obscured="sidebarOpen"/);
+  assert.match(read("./App.vue"), /:navigation-obscured="sidebarOpen \|\| pendingConversationsOpen"/);
   assert.match(source, /watch\(\(\) => \[props\.conversationUuid, props\.navigationObscured/);
   assert.match(source, /window\.addEventListener\("resize", scheduleActivityRead\)/);
   assert.match(source, /window\.removeEventListener\("resize", scheduleActivityRead\)/);
   assert.match(source, /activityReadTracker\?\.dispose\(\)/);
+});
+
+test("collapsed directories count running and unread descendants by folder path; waiting counts only as waiting", () => {
+  const counts = folderActivityCounts([
+    row("done", {folderId: "c", folderPath: ["a", "b", "c"]}),
+    row("busy", {folderId: "b", folderPath: ["a", "b"], running: true, activityState: "running"}),
+    row("ask", {folderId: "c", folderPath: ["a", "b", "c"], running: true, activityState: "waiting", activityPending: [{action: "confirm"}]}),
+    row("temp", {folderId: "", folderPath: []}),
+    row("seen", {folderId: "c", folderPath: ["a", "b", "c"], activityUnread: false}),
+    row("gone", {folderId: "c", folderPath: ["a", "b", "c"], archived: true}),
+    row("busy", {folderId: "b", folderPath: ["a", "b"], running: true, activityState: "running"}),
+  ]);
+  assert.deepEqual(counts, {
+    a: {running: 1, unread: 1}, b: {running: 1, unread: 1}, c: {running: 0, unread: 1}, __temporary: {running: 0, unread: 1},
+  });
 });

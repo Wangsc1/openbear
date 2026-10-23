@@ -7,7 +7,7 @@ import {contextCompactionView} from "./agentPlanPresentation.js";
 import {toolArgumentsRawPayload} from "./toolArgumentsPresentation.js";
 import {toolDisplayState, toolResultText} from "./display.js";
 import {highlightCodeHtml} from "./markdown.js";
-import {useToolDetailCache} from "./toolDetailCache.js";
+import {detailIsAtLeast, useToolDetailCache} from "./toolDetailCache.js";
 import {agentInfoResultView, shortAgentId} from "./agentInstancePresentation.js";
 
 const props = defineProps({
@@ -73,6 +73,7 @@ function hasFullToolDetail(operationValue) {
 const operation = computed(() => object(props.event?.operation));
 const operationId = computed(() => String(operation.value.opId || "").trim());
 const operationRevision = computed(() => Number(operation.value.revision || 0) || 0);
+const operationLiveRev = computed(() => Number(operation.value.liveRev || 0) || 0);
 const loadedDetailMatchesOperation = computed(() => {
 	const detail = object(loadedToolDetail.value);
 	return Boolean(
@@ -83,7 +84,7 @@ const loadedDetailMatchesOperation = computed(() => {
 // Keep the last full body on screen while a newer revision loads. Freshness
 // still controls requests, but must not clear the user's current reading view.
 const loadedDetailIsCurrent = computed(() => loadedDetailMatchesOperation.value
-	&& Number(loadedToolDetail.value.revision || 0) >= operationRevision.value);
+	&& detailIsAtLeast(loadedToolDetail.value, operationRevision.value, operationLiveRev.value));
 const hasLoadedToolDetail = computed(() => hasFullToolDetail(operation.value) || loadedDetailIsCurrent.value);
 const detailAvailable = computed(() => Boolean(operationId.value && operation.value.detailAvailable));
 
@@ -230,6 +231,7 @@ onBeforeUnmount(() => {
 async function loadToolDetail() {
 	const operationIdValue = operationId.value;
 	const requestedRevision = operationRevision.value;
+	const requestedLiveRev = operationLiveRev.value;
 	const conversationUuid = String(props.conversationUuid || "").trim();
 	const matchesRequest = () => operationId.value === operationIdValue
 		&& String(props.conversationUuid || "").trim() === conversationUuid;
@@ -256,6 +258,7 @@ async function loadToolDetail() {
 				conversationUuid,
 				operationId: operationIdValue,
 				revision: requestedRevision,
+				liveRev: requestedLiveRev,
 				loader: requestDetail,
 			})
 			: await requestDetail();
@@ -299,7 +302,7 @@ watch([() => props.conversationUuid, operationId], () => {
 	toolDetailError.value = "";
 });
 
-watch([() => props.open, () => props.conversationUuid, operationId, operationRevision, detailAvailable, isContextCompaction], () => {
+watch([() => props.open, () => props.conversationUuid, operationId, operationRevision, operationLiveRev, detailAvailable, isContextCompaction], () => {
 	void loadToolDetail();
 }, {immediate: true});
 

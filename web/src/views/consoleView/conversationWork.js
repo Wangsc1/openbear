@@ -10,9 +10,33 @@ export function lastAnswerIndex(events = []) {
 		if (event?.kind !== 'answer' || !String(event.message?.content || '').trim()) continue;
 		// A cut marks a progress segment, not a final answer. Do not hide an
 		// interrupted run's only explanation behind a completed-work label.
-		return event.operation?.payload?.segmentBoundary ? -1 : index;
+		if (event.operation?.payload?.segmentBoundary) return -1;
+		return requestReplyIndex(events, index);
 	}
 	return -1;
+}
+
+// A request handler may write its reply, declare the outcome, then close with
+// a one-line acknowledgement. The reply is what the requester receives, so it
+// is the turn's result; the acknowledgement stays in the work trail.
+function requestReplyIndex(events, last) {
+	let respond = -1;
+	for (let index = last - 1; index >= 0; index--) {
+		const event = events[index];
+		if (event?.kind === 'answer' && String(event.message?.content || '').trim()) {
+			if (respond < 0) return last;
+			const lastText = String(events[last].message?.content || '').trim();
+			return lastText.length < Math.min(160, String(event.message.content).trim().length / 3) ? index : last;
+		}
+		if (respond < 0 && isRespondCall(event)) respond = index;
+	}
+	return last;
+}
+
+function isRespondCall(event) {
+	const call = (event?.calls || [])[0];
+	if (!call || (call.name || event.toolName) !== 'ConversationRequest') return false;
+	try { return JSON.parse(String(call.arguments || '{}')).action === 'respond'; } catch { return String(call.arguments || '').includes('"respond"'); }
 }
 
 export function isInlineProcess(entry) {

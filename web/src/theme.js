@@ -1,3 +1,5 @@
+import { themeManifestPath } from "./pwa/manifest.js";
+
 export const THEME_STORAGE_KEY = "openbear.theme.v1";
 export const THEME_MODES = Object.freeze(["light", "dark", "auto"]);
 const DARK_QUERY = "(prefers-color-scheme: dark)";
@@ -38,6 +40,11 @@ function syncBrowserChrome(doc, resolvedTheme) {
   const colorScheme = doc.querySelector?.('meta[name="color-scheme"]');
   themeColor?.setAttribute?.("content", color);
   colorScheme?.setAttribute?.("content", resolvedTheme);
+  const manifest = doc.querySelector?.('link[rel="manifest"]');
+  const manifestPath = themeManifestPath(resolvedTheme);
+  if (manifest && manifest.getAttribute("href") !== manifestPath) {
+    manifest.setAttribute("href", manifestPath);
+  }
 }
 
 export function createThemeController({ windowObject, documentObject, storageObject } = {}) {

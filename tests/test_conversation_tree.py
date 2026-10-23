@@ -203,6 +203,7 @@ async def test_running_leaf_and_every_ancestor_increment_then_clear_without_load
     h._web_starting_turns[archived_uuid] = {"turn-archived"}
     started = await h._tree_running_state(7)
     assert [item["conversationUuid"] for item in started["items"]] == [uuid]
+    assert started["items"][0]["folderPath"] == ["a", "b"]
     assert started["folderRunningCounts"] == {"a": 1, "b": 1}
 
     h._web_starting_turns.clear()
@@ -437,6 +438,20 @@ async def test_default_selection_uses_visible_message_time_not_updated_at(tree_h
     assert data["initialExpandedPaths"] == [[]]
 
 
+async def test_default_selection_skips_system_created_conversations(tree_harness):
+    h = tree_harness
+    human_uuid, human_chat = await _conversation(h, 1, "", created=10)
+    for index, origin in ((2, "cron"), (3, "webhook"), (4, "recommendation")):
+        uuid, chat = await _conversation(h, index, "", created=100)
+        await h.db.conn.execute("UPDATE web_conversations SET origin_kind=? WHERE conversation_uuid=?", (origin, uuid))
+        await h.db.conn.execute("INSERT INTO messages(chat_id,role,content,created_at) VALUES (?,?,?,?)", (chat, "assistant", "run", 900))
+    await h.db.conn.execute("INSERT INTO messages(chat_id,role,content,created_at) VALUES (?,?,?,?)", (human_chat, "user", "mine", 20))
+    await h.db.conn.commit()
+    data = json.loads((await h.handle_api_conversation_tree_bootstrap(_Request())).text)
+    assert data["selected"]["item"]["conversationUuid"] == human_uuid
+    assert data["selected"]["item"]["origin"] == "user"
+
+
 async def test_folder_cycle_rejected_and_agent_params_receive_no_folder_values(tree_harness):
     h = tree_harness
     await _folder(h, "a", "", "A")
@@ -586,17 +601,3 @@ async def test_archive_successor_is_same_level_and_reaches_next_page(tree_harnes
     # Empty source folder does not pick an archived item or another folder.
     await h.db.conn.execute("UPDATE web_conversations SET archived_at=100 WHERE folder_uuid='a'")
     assert await h._tree_archive_successor(7,"conversation-50") is None
-
-
-async def test_move_and_archive_update_direct_counts_without_loading_archive(tree_harness):
-    h = tree_harness
-    await _folder(h,"a","","A")
-    await _folder(h,"b","","B")
-    uuid,_ = await _conversation(h,1,"a")
-    await h.db.conn.commit()
-    await h.handle_api_conversation_tree_move(_Request(body={"kind":"conversation","id":uuid,"targetFolderId":"b"}))
-    counts = {row["folderId"]: row["conversationCount"] for row in await h._tree_direct_folder_nodes(7)}
-    assert counts == {"a":0,"b":1}
-    await h.db.conn.execute("UPDATE web_conversations SET archived_at=100 WHERE conversation_uuid=?",(uuid,))
-    counts = {row["folderId"]: row["conversationCount"] for row in await h._tree_direct_folder_nodes(7)}
-    assert counts == {"a":0,"b":0}

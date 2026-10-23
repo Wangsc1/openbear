@@ -2,6 +2,9 @@
 import { computed, onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Api, apiError } from "../api";
+import ManagedAccountForm from './ManagedAccountForm.vue';
+import { isGateway, endPageSession } from '../sessionBoundary.js';
+import { retireGatewayPush } from '../pwa/pushClient.js';
 import {
   describeSessionUserAgent,
   formatSessionTime,
@@ -9,7 +12,7 @@ import {
 } from "../sessionPresentation.js";
 
 const loading = ref(false);
-const revokingId = ref(0);
+const revokingId = ref('');
 const sessions = ref([]);
 
 const activeCount = computed(() => sessions.value.length);
@@ -55,24 +58,26 @@ async function revokeSession(item) {
     return;
   }
 
-  revokingId.value = Number(item.id);
+  revokingId.value = String(item.id);
   try {
-    const data = okOrThrow(await Api.revokeAuthSession(item.id));
+    if (item.current && isGateway()) await retireGatewayPush();
+    const data = item.current && isGateway() ? {...okOrThrow(await Api.logout()), current: true} : okOrThrow(await Api.revokeAuthSession(item.id));
     if (data.current) {
+      endPageSession({broadcast: true});
       window.location.replace("/login");
       return;
     }
-    sessions.value = sessions.value.filter((entry) => Number(entry.id) !== Number(item.id));
+    sessions.value = sessions.value.filter((entry) => String(entry.id) !== String(item.id));
     ElMessage.success("该设备的登录已撤销");
   } catch (error) {
     if (error?.response?.data?.error === "session_not_found") {
-      sessions.value = sessions.value.filter((entry) => Number(entry.id) !== Number(item.id));
+      sessions.value = sessions.value.filter((entry) => String(entry.id) !== String(item.id));
       ElMessage.info("该登录已经失效或被撤销");
     } else {
       ElMessage.error(apiError(error));
     }
   } finally {
-    revokingId.value = 0;
+    revokingId.value = '';
   }
 }
 
@@ -96,6 +101,7 @@ onMounted(loadSessions);
 
     <main class="sessions-content flex-1 min-h-0 overflow-y-auto p-3 sm:p-4 lg:p-6">
       <div class="sessions-workspace">
+        <ManagedAccountForm />
         <section class="sessions-overview" aria-label="登录设备概况">
           <div>
             <span>有效会话</span>
@@ -165,9 +171,9 @@ onMounted(loadSessions);
                 :disabled="Boolean(revokingId)"
                 @click="revokeSession(item)"
               >
-                <el-icon v-if="revokingId === Number(item.id)" class="is-spinning"><Loading /></el-icon>
+                <el-icon v-if="revokingId === String(item.id)" class="is-spinning"><Loading /></el-icon>
                 <el-icon v-else><SwitchButton /></el-icon>
-                <span>{{ revokingId === Number(item.id) ? '处理中…' : (item.current ? '退出本机' : '撤销登录') }}</span>
+                <span>{{ revokingId === String(item.id) ? '处理中…' : (item.current ? '退出本机' : '撤销登录') }}</span>
               </button>
             </article>
           </div>

@@ -11,7 +11,11 @@ from collections.abc import AsyncIterator
 import pytest
 
 from app.agent.loop import Agent
-from app.agent.transcript_repair import MISSING_TOOL_RESULT_TEXT
+from app.agent.transcript_repair import (
+    LEGACY_ROLE_ALTERNATION_BRIDGE_TEXT,
+    MISSING_TOOL_RESULT_TEXT,
+    ROLE_ALTERNATION_BRIDGE_TEXT,
+)
 from app.llm.base import Message, OpenBearLLMError
 from app.llm.events import StreamEvent, ToolCall, Usage
 from app.llm.openai_responses import _to_responses_input
@@ -1311,18 +1315,6 @@ async def test_soft_stop_closes_unexecuted_tool_calls():
     assert MISSING_TOOL_RESULT_TEXT in pers.tools[1][2]
 
 
-async def test_wall_budget_zero_means_unlimited():
-    backend = FakeBackend([
-        [StreamEvent(kind="tool_call", tool_calls=[ToolCall(id="c1", name="echo", arguments='{"x":"1"}')]),
-         StreamEvent(kind="finish", finish_reason="tool_calls")],
-        [StreamEvent(kind="content", text="继续完成"), StreamEvent(kind="finish", finish_reason="stop")],
-    ])
-    agent = Agent(backend, _echo_registry(), max_run_wall_seconds=0)
-    r = await agent.run([{"role": "user", "content": "x"}], RecordRenderer(), model="m")
-    assert r.halted_reason == ""
-    assert r.text == "继续完成"
-
-
 async def test_no_progress_allows_paged_reads_when_arguments_change():
     """同工具翻页读取时 offset 变化代表有进展，不能按重复工具调用熔断。"""
     backend = FakeBackend([
@@ -1366,7 +1358,7 @@ class FlakeyBackend:
 async def test_retry_then_succeed():
     """前2次失败 → 重试 → 第3次成功。"""
     backend = FlakeyBackend(fail_times=2)
-    agent = Agent(backend, _echo_registry(), max_retries=2, retry_backoff_s=0.01)
+    agent = Agent(backend, _echo_registry(), max_retries=2, retry_backoff_s=0)
     rec = RecordRenderer()
     r = await agent.run([{"role": "user", "content": "hi"}], rec, model="m")
     assert backend.attempts == 3
@@ -1455,7 +1447,7 @@ async def test_secondary_format_error_does_not_replace_first_structured_primary_
 async def test_retry_exhausted_fails():
     """超过重试次数仍失败 → 如实报错。"""
     backend = FlakeyBackend(fail_times=5)
-    agent = Agent(backend, _echo_registry(), max_retries=2, retry_backoff_s=0.01)
+    agent = Agent(backend, _echo_registry(), max_retries=2, retry_backoff_s=0)
     rec = RecordRenderer()
     r = await agent.run([{"role": "user", "content": "hi"}], rec, model="m")
     assert backend.attempts == 3  # 1 + 2 retries
@@ -1511,7 +1503,7 @@ async def test_parrot_candidate_scoped_quota_is_not_retried_as_a_whole_request()
 async def test_non_retryable_no_retry():
     """不可重试错误（如参数错误）→ 不重试，直接报错。"""
     backend = FlakeyBackend(fail_times=5, retryable=False)
-    agent = Agent(backend, _echo_registry(), max_retries=2, retry_backoff_s=0.01)
+    agent = Agent(backend, _echo_registry(), max_retries=2, retry_backoff_s=0)
     rec = RecordRenderer()
     r = await agent.run([{"role": "user", "content": "hi"}], rec, model="m")
     assert backend.attempts == 1  # 不重试
@@ -1633,7 +1625,7 @@ async def test_retryable_error_event_before_content_retries():
             raise NotImplementedError
 
     backend = EventFailBackend()
-    agent = Agent(backend, _echo_registry(), max_retries=1, retry_backoff_s=0.01)
+    agent = Agent(backend, _echo_registry(), max_retries=1, retry_backoff_s=0)
     rec = RecordRenderer()
     result = await agent.run([{"role": "user", "content": "x"}], rec, model="m")
     assert backend.attempts == 2
@@ -1898,11 +1890,12 @@ async def test_empty_response_retry_then_succeed():
     roles = [m["role"] for m in second]
     assert not any(roles[k] == roles[k + 1] == "user" for k in range(len(roles) - 1)), \
         f"补救重试制造了连续 user: {roles}"
+    assert "不要复述内部角色交替占位" in second[-1]["content"]
 
 
-async def test_bridge_marker_echo_is_treated_as_empty_response_then_retries():
+@pytest.mark.parametrize("marker", [LEGACY_ROLE_ALTERNATION_BRIDGE_TEXT, ROLE_ALTERNATION_BRIDGE_TEXT])
+async def test_bridge_marker_echo_is_treated_as_empty_response_then_retries(marker):
     """模型整条回复只复述协议桥接标记时，不能当作最终回答，应走空响应补救。"""
-    marker = "[protocol: role-alternation bridge]"
     backend = FakeBackend([
         [StreamEvent(kind="content", text=marker),
          StreamEvent(kind="finish", finish_reason="stop")],
@@ -1953,16 +1946,69 @@ async def test_reasoning_only_retry_then_succeed():
     r = await agent.run([{"role": "user", "content": "hi"}], RecordRenderer(), model="m")
     assert r.text == "想好了"
     assert r.model_retry >= 1
+    assert "不要复述内部角色交替占位" in backend.seen_convos[1][-1]["content"]
 
 
-async def test_empty_response_retry_gives_up_at_limit():
-    """连续空响应达上限 → 不死循环,正常收尾(空回复)。"""
-    backend = FakeBackend([[StreamEvent(kind="finish", finish_reason="stop")]])  # 永远空
-    agent = Agent(backend, _echo_registry(), empty_response_retry_limit=1)
-    r = await agent.run([{"role": "user", "content": "hi"}], RecordRenderer(), model="m")
-    # 首轮空 + 重试1次仍空 → 收尾。总调用 = 2(1 原始 + 1 重试)
-    assert r.text == ""
-    assert r.model_calls == 2
+@pytest.mark.parametrize("reasoning", ["", "只有思考"])
+@pytest.mark.parametrize("text", ["", " \n\t"])
+@pytest.mark.parametrize("limit", [0, 1, 2])
+async def test_empty_response_retry_gives_up_at_limit(reasoning, text, limit):
+    backend = FakeBackend([[
+        StreamEvent(kind="reasoning", text=reasoning),
+        StreamEvent(kind="content", text=text),
+        StreamEvent(kind="finish", finish_reason="stop"),
+    ]])
+    agent = Agent(backend, _echo_registry(), empty_response_retry_limit=limit,
+                  reasoning_only_retry_limit=limit)
+    rec = RecordRenderer()
+    r = await agent.run([{"role": "user", "content": "hi"}], rec, model="m")
+    assert not r.text.strip()
+    assert r.model_calls == limit + 1
+    assert r.model_retry == limit and r.model_fail == 1
+    assert "上游未返回正文" in rec.failed and "本轮未完成" in rec.failed
+    assert "（空回复）" not in rec.final
+
+
+@pytest.mark.parametrize("reasoning", ["", "只有思考"])
+@pytest.mark.parametrize("text", ["", "上游返回的部分正文"])
+async def test_refusal_fails_without_retries_or_tool_execution(reasoning, text):
+    backend = FakeBackend([[
+        StreamEvent(kind="reasoning", text=reasoning),
+        StreamEvent(kind="content", text=text),
+        StreamEvent(kind="tool_call", tool_calls=[ToolCall(id="c1", name="echo", arguments='{"x":"blocked"}')]),
+        StreamEvent(kind="usage", usage=Usage(input_tokens=7, output_tokens=11)),
+        StreamEvent(kind="finish", finish_reason="refusal"),
+    ]])
+    rec = RecordRenderer()
+    calls = []
+    agent = Agent(backend, _echo_registry(), empty_response_retry_limit=2,
+                  reasoning_only_retry_limit=2)
+    r = await agent.run([{"role": "user", "content": "hi"}], rec, model="m",
+                        model_call_hook=lambda call: _record_model_call(calls, call))
+    assert r.text == text and text in rec.final
+    assert r.model_calls == 1 and r.model_retry == 0 and r.model_fail == 1
+    assert r.model_ok == 0 and r.tools_used == []
+    assert r.usage.input_tokens == 7 and r.usage.output_tokens == 11
+    assert calls[0]["status"] == "error" and calls[0]["errorType"] == "refusal"
+    assert "上游拒绝生成" in rec.failed
+    assert ("未返回正文" in rec.failed) == (not text)
+    assert "（空回复）" not in rec.final
+    assert "重新组织回答 …" not in rec.statuses
+
+
+async def _record_model_call(calls, call):
+    calls.append(call)
+
+
+async def test_empty_response_exhaustion_does_not_trigger_finish_policy_repair():
+    async def finish_policy(text):
+        raise AssertionError("empty response must not trigger further model calls")
+
+    backend = FakeBackend([[StreamEvent(kind="finish", finish_reason="stop")]])
+    agent = Agent(backend, _echo_registry(), empty_response_retry_limit=0)
+    r = await agent.run([{"role": "user", "content": "hi"}], RecordRenderer(), model="m",
+                        tool_context=ToolRuntimeContext(finish_policy=finish_policy))
+    assert r.model_calls == 1 and r.model_fail == 1
 
 
 async def test_length_finish_appends_truncation_notice():

@@ -1,3 +1,4 @@
+import { contextResourceUrl } from '../../sessionBoundary.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -11,7 +12,7 @@ const script = descriptor.scriptSetup.content.replace(/^import .*;\n/gm, '');
 function drawer({phone = false, previewRequest} = {}) {
   const scope = effectScope(), mounted = [], cleanup = [], calls = [];
   const visibility = {managing: ref(true), items: ref([{opId: 'u', type: 'user_message', createdAtMs: 1000}]), busy: ref(false), restoreAll: async () => calls.push('restore-all')};
-  const context = vm.createContext({ref, computed, watch, defineProps: () => ({conversationUuid: 'A'}), useMessageVisibility: () => visibility,
+  const context = vm.createContext({contextResourceUrl,ref, computed, watch, defineProps: () => ({conversationUuid: 'A'}), useMessageVisibility: () => visibility,
     onMounted: fn => mounted.push(fn), onBeforeUnmount: fn => cleanup.push(fn),
     window: {matchMedia: () => ({matches: phone, addEventListener() {}, removeEventListener() {}})},
     Api: {hiddenMessagePreview: async (uuid, id) => {calls.push(['preview', uuid, id]); return previewRequest ? previewRequest() : {operation: {opType: 'user_message', payload: {text: 'private text', attachments: [{fileName: 'private.pdf', contentUrl: '/private.pdf'}]}}};}},

@@ -1,4 +1,5 @@
 import * as promptPolicy from './promptPolicy.js';
+import * as conversationActivity from '../conversationActivity.js';
 import test from 'node:test';
 import {useRecentConversationRows} from './conversationRecentRows.js';
 import assert from 'node:assert/strict';
@@ -6,10 +7,11 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import {computed, nextTick, reactive, ref} from 'vue';
 import {treeItemId as rowId, treeItemParent, compareTreeItems, resolveTreeDrop} from './conversationTreeInteractions.js';
+import * as conversationGroupsTree from './conversationGroupsTree.js';
 const source=fs.readFileSync(new URL('./ConversationTree.vue',import.meta.url),'utf8');
 const script=source.match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import[\s\S]*?;\n/gm,'');
 function harness(Api={}){
- const context=vm.createContext({...promptPolicy,useRecentConversationRows,computed,nextTick,reactive,ref,rowId,treeItemParent,compareTreeItems,resolveTreeDrop,Api,apiError:String,referenceCatalog:{connected:false,ready:false},
+ const context=vm.createContext({...conversationGroupsTree,...promptPolicy,...conversationActivity,useRecentConversationRows,computed,nextTick,reactive,ref,rowId,treeItemParent,compareTreeItems,resolveTreeDrop,Api,apiError:String,referenceCatalog:{connected:false,ready:false},
  // Stub only the new UI import seam; all original tree/count/archive assertions remain intact.
  defineLazyView:()=>({}),
  defineProps:()=>({activeConversationUuid:'',draftConversation:null}),defineEmits:()=>()=>{},defineExpose(){},watch(){},onMounted(){},onBeforeUnmount(){},ElMessage:{error(){},warning(){}},document:{querySelector:()=>null},CSS:{escape:s=>s}});

@@ -58,6 +58,8 @@ import {
 	toolResultKey,
 } from "./display.js";
 import {Api, apiError, conversationWsUrl} from "../../api.js";
+import { userStorage, contextWebSocket, pageSession } from '../../sessionBoundary.js';
+import { authMode } from '../../authMode.js';
 import {copyTextToClipboard} from "../../utils/clipboard.js";
 import {
 	createTerminalStateRefreshScheduler,
@@ -78,15 +80,18 @@ import {
 } from "./contextUsage.js";
 import {combineTimingStats, reconcileAgentTaskUsage, timingStatsFromRows} from "./turnStats.js";
 import {
+	applyLiveOperationUpdate,
 	applyOperationFrame,
 	convergeStoppedAcknowledgement,
 	deriveOperationRunState,
 	isRootRunTerminalFrame,
 	isTerminalOperationFrame,
 	normalizeOperations,
+	preferNewerLiveOperations,
 	projectOperationMessages as projectOperationMessagesFromOperations,
 	shouldApplyOperationFrame,
 	withTransientIdleThinking as projectTransientIdleThinking,
+	findActiveTurnIndex,
 } from "../../timelineProjection.js";
 import {
 	TASK_MEMORY_CHANGED_EVENT_KEY,
@@ -112,6 +117,7 @@ import {
 	createToolDetailCache,
 	TOOL_DETAIL_CACHE_KEY,
 } from "./toolDetailCache.js";
+import {COLLAB_REQUESTS_KEY, createCollabRequestStore} from "./collabRequests.js";
 import {
 	createOutboundSendTracker,
 	probeSocket,
@@ -145,10 +151,8 @@ const props = defineProps({
 	// an explicit reassignment confirmation; persisted conversations use it as the
 	// target for cross-family "new conversation" creation.
 	folderId: {type: String, default: ""},
-	// A recommendation card's "continue" request: fill the composer only.
-	recommendationDraft: {type: Object, default: null},
 });
-const emit = defineEmits(["conversation-created", "conversations-refresh", "properties", "recommendation-draft-applied"]);
+const emit = defineEmits(["conversation-created", "conversations-refresh"]);
 
 const loading = ref(false);
 // A replacement state request must finish an outstanding entry scroll instead
@@ -166,7 +170,10 @@ const sendPending = ref(false);
 const foregroundRunning = ref(false);
 const rootTurnRunning = ref(false);
 const modelOutputProgress = ref(null);
+// Set only from operation-derived run state; shown only while the root turn runs.
+const runWaitingLabel = ref("");
 const activeRunTurnUuid = ref("");
+const activeRunId = ref("");
 const messages = ref([]);
 const draftByConversation = ref(loadDraftStore());
 // Bind persisted text before the first editable render, not after options/state
@@ -239,10 +246,16 @@ const pendingInteractionFocus = ref(null);
 const confirmationSubmitting = ref({});
 const confirmationErrors = ref({});
 const pendingSteering = ref([]);
+const promptSuggestions = ref({conversationUuid: "", items: []});
+const visiblePromptSuggestions = computed(() => (
+	promptSuggestions.value.conversationUuid === String(activeConversationUuid.value || "") ? promptSuggestions.value.items : []
+));
 const taskMemoryChangedEvent = ref(null);
 provide(TASK_MEMORY_CHANGED_EVENT_KEY, taskMemoryChangedEvent);
 const toolDetailCache = createToolDetailCache();
 provide(TOOL_DETAIL_CACHE_KEY, toolDetailCache);
+const collabRequests = createCollabRequestStore(Api);
+provide(COLLAB_REQUESTS_KEY, collabRequests);
 const hasMoreBefore = ref(false);
 const nextBeforeDisplaySeq = ref(null);
 const timelinePageInFlight = ref(null);
@@ -276,6 +289,10 @@ let streamFlushFrame = 0;
 let streamFlushPending = false;
 let pendingProjectionOps = null;
 let pendingScrollImpact = "none";
+// Live progress is never stored; while an HTTP snapshot is loading it is held
+// here and replayed on top of that snapshot (stale updates are ignored).
+let pendingLiveUpdates = [];
+let lastLiveResyncAt = 0;
 let pendingPreserveAnchor = null;
 let pendingTerminalFrame = null;
 let programmaticScrollDepth = 0;
@@ -299,6 +316,7 @@ let appliedDefaultsRevision = 0;
 let localDefaultsFolderId = null;
 let localFolderDefaults = {};
 let localDefaultsOverrides = {};
+let localDefaultsOverridesFolderId = null;
 let localDefaultsLoading = null;
 let localDefaultsSaveTail = Promise.resolve();
 let optionsLoadPromise = null;
@@ -400,6 +418,7 @@ const modelCallRows = computed(() => Array.isArray(chatState.value?.modelCalls) 
 const toolCallRows = computed(() => Array.isArray(chatState.value?.toolCalls) ? chatState.value.toolCalls : []);
 const reuseTurns = createTimelineReuse();
 const turns = computed(() => reuseTurns(withTransientIdleThinking(attachTurnStats(buildTurns(displayMessages.value), modelCallRows.value, toolCallRows.value))));
+const activeRunTurnIndex = computed(() => findActiveTurnIndex(turns.value, {activeRootTurnId: activeRunTurnUuid.value, activeRunId: activeRunId.value}));
 const activeTurn = computed(() => turns.value[Math.min(Math.max(0, activeTurnIndex.value), Math.max(0, turns.value.length - 1))] || null);
 const activeConversationUuid = computed(() => props.conversationUuid || chatState.value?.conversationUuid || "");
 const messageVisibility = createMessageVisibility({
@@ -567,7 +586,7 @@ const modelGroups = computed(() => {
 function loadDraftStore() {
 	if (typeof window === "undefined") return {};
 	try {
-		const parsed = JSON.parse(window.localStorage.getItem(DRAFT_STORAGE_KEY) || "{}");
+		const parsed = JSON.parse(userStorage(window.localStorage).getItem(DRAFT_STORAGE_KEY) || "{}");
 		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
 	} catch {
 		return {};
@@ -577,7 +596,7 @@ function loadDraftStore() {
 function loadAgentPanelIntents() {
 	if (typeof window === "undefined") return {};
 	try {
-		return normalizeAgentPanelIntents(JSON.parse(window.sessionStorage.getItem(AGENT_PANEL_INTENT_STORAGE_KEY) || "{}"));
+		return normalizeAgentPanelIntents(JSON.parse(userStorage(window.sessionStorage).getItem(AGENT_PANEL_INTENT_STORAGE_KEY) || "{}"));
 	} catch {
 		return {};
 	}
@@ -586,7 +605,7 @@ function loadAgentPanelIntents() {
 function saveAgentPanelIntents() {
 	if (typeof window === "undefined") return;
 	try {
-		window.sessionStorage.setItem(AGENT_PANEL_INTENT_STORAGE_KEY, JSON.stringify(normalizeAgentPanelIntents(detailOpen.value)));
+		userStorage(window.sessionStorage).setItem(AGENT_PANEL_INTENT_STORAGE_KEY, JSON.stringify(normalizeAgentPanelIntents(detailOpen.value)));
 	} catch {
 		// sessionStorage may be unavailable; in-memory intent remains authoritative for this mount.
 	}
@@ -596,7 +615,7 @@ function saveDraftStore(next) {
 	draftByConversation.value = next;
 	if (typeof window === "undefined") return;
 	try {
-		window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(next));
+		userStorage(window.localStorage).setItem(DRAFT_STORAGE_KEY, JSON.stringify(next));
 	} catch {
 		// localStorage may be unavailable or full; in-memory drafts still work for this tab.
 	}
@@ -652,6 +671,7 @@ function discardConversationDraft(conversationUuid) {
 	const key = String(conversationUuid || "");
 	if (!key) return;
 	clearDraftForConversation(key);
+	if (key.startsWith("local:")) forgetLocalDraftChoices();
 	// Deleting a conversation invalidates the read even if it is still off screen.
 	attachmentHydrations.delete(draftKey(key));
 	if (activeAttachmentKey() === draftKey(key)) attachmentRestoring.value = false;
@@ -680,6 +700,7 @@ async function persistForProperties() {
 		const created = await Api.createConversation({title:'新会话',runConfig:completeLocalRunConfig(),folderId:props.folderId || ''});
 		const uuid = created.conversation?.conversationUuid || created.state?.conversationUuid;
 		if (!uuid) throw new Error('conversation_create_failed');
+		forgetLocalDraftChoices();
 		migrateAttachmentDraft(sourceUuid, uuid);
 		if (props.conversationUuid === sourceUuid) {
 			localToServerTransitionUuid.value = uuid;
@@ -755,11 +776,23 @@ function completeLocalRunConfig() {
 	};
 }
 
-async function loadLocalRunDefaults(uuid = props.conversationUuid, {preserveManual = false} = {}) {
+// Explicit draft choices last until the draft is sent, deleted or retargeted;
+// navigating away and back to the same draft must not reset them.
+function forgetLocalDraftChoices() {
+	localDefaultsOverrides = {};
+	localDefaultsOverridesFolderId = null;
+}
+
+function rememberLocalDraftChoices(patch, folderId) {
+	localDefaultsOverrides = {...localDefaultsOverrides, ...patch};
+	localDefaultsOverridesFolderId = folderId;
+}
+
+async function loadLocalRunDefaults(uuid = props.conversationUuid) {
 	const requestSeq = ++defaultsRequestSeq;
 	const expectedUuid = String(uuid || "");
 	const folderId = String(props.folderId || "");
-	if (!preserveManual) localDefaultsOverrides = {};
+	if (localDefaultsOverridesFolderId !== folderId) forgetLocalDraftChoices();
 	localDefaultsFolderId = null;
 	const pending = {uuid: expectedUuid, folderId, promise: null};
 	localDefaultsLoading = pending;
@@ -811,7 +844,7 @@ async function saveLocalRunDefaults(patch, expectedUuid, folderId) {
 	if (props.conversationUuid !== expectedUuid || String(props.folderId || "") !== folderId || !isLocalConversation.value) return null;
 	const requestSeq = ++defaultsRequestSeq;
 	if (Object.keys(localFolderDefaults).length || Object.hasOwn(patch, "contextStrategy")) {
-		localDefaultsOverrides = {...localDefaultsOverrides, ...patch};
+		rememberLocalDraftChoices(patch, folderId);
 		// A one-off choice in a project draft is not a global preference update
 		// and must not reset the other fields inherited from that project.
 		applyLocalRunDefaults({...completeLocalRunConfig(), ...patch});
@@ -825,24 +858,24 @@ async function saveLocalRunDefaults(patch, expectedUuid, folderId) {
 		return defaults || null;
 	}
 	appliedDefaultsRevision = revision;
-	localDefaultsOverrides = {...localDefaultsOverrides, ...patch};
+	rememberLocalDraftChoices(patch, folderId);
 	applyLocalRunDefaults({...defaults, ...(Object.hasOwn(localDefaultsOverrides, "contextStrategy") ? {contextStrategy: localDefaultsOverrides.contextStrategy} : {})});
 	resetLocalConversationState(expectedUuid || "local:new");
 	return defaults || null;
 }
 
-async function refreshFolderRunDefaults({preserveManual = false} = {}) {
+async function refreshFolderRunDefaults() {
 	if (!isLocalConversation.value || outboundSends.current) return;
 	const uuid = String(props.conversationUuid || "");
 	const folderId = String(props.folderId || "");
 	await loadOptions();
-	const loaded = await loadLocalRunDefaults(uuid, {preserveManual});
+	const loaded = await loadLocalRunDefaults(uuid);
 	if (loaded && isLocalConversation.value && props.conversationUuid === uuid && String(props.folderId || "") === folderId && !outboundSends.current) resetLocalConversationState(uuid);
 }
 
 function handleFolderPropertiesChanged(event) {
 	const temporary = event?.detail?.folderId === "__temporary";
-	if (isLocalConversation.value && Boolean(props.folderId) !== temporary) void refreshFolderRunDefaults({preserveManual: true});
+	if (isLocalConversation.value && Boolean(props.folderId) !== temporary) void refreshFolderRunDefaults();
 }
 
 function statsUsageSnapshot(stats = {}) {
@@ -928,6 +961,7 @@ function resetTimelinePagination(conversationUuid = "") {
 function resetOperationStore(conversationUuid = "") {
 	conversationStateRequests.invalidate();
 	operationFrameBuffer.reset();
+	pendingLiveUpdates = [];
 	pendingLoadReplaceOperations = false;
 	operationsById.value = new Map();
 	orderedOpIds.value = [];
@@ -963,6 +997,11 @@ function clearUiCaches() {
 	toolResultTabs.value = {};
 	detailOpen.value = loadAgentPanelIntents();
 	pendingSteering.value = [];
+	promptSuggestions.value = {conversationUuid: "", items: []};
+	pendingConfirmations.value = [];
+	pendingInteractionFocus.value = null;
+	confirmationSubmitting.value = {};
+	confirmationErrors.value = {};
 }
 
 function resetLocalConversationState(uuid = props.conversationUuid || "local:new") {
@@ -1145,7 +1184,13 @@ function updatePendingConfirmations(list = []) {
 async function answerPendingConfirmation(item, answer = {}) {
 	const confirmationId = item?.confirmationId;
 	const conversationUuid = activeConversationUuid.value;
-	if (!confirmationId || !conversationUuid || confirmationSubmitting.value[confirmationId]) return;
+	if (!confirmationId || !conversationUuid || isLocalConversation.value
+		|| chatState.value?.conversationUuid !== conversationUuid
+		|| !pendingConfirmations.value.some(pending => pending.confirmationId === confirmationId)
+		|| confirmationSubmitting.value[confirmationId]) return;
+	const generation = conversationSwitchGeneration;
+	const isCurrent = () => componentMounted && generation === conversationSwitchGeneration
+		&& conversationUuid === props.conversationUuid;
 	confirmationSubmitting.value = {...confirmationSubmitting.value, [confirmationId]: true};
 	const nextErrors = {...confirmationErrors.value};
 	delete nextErrors[confirmationId];
@@ -1155,8 +1200,10 @@ async function answerPendingConfirmation(item, answer = {}) {
 			...answer,
 			revision: interactionRevision(item),
 		});
+		if (!isCurrent()) return;
 		pendingConfirmations.value = pendingConfirmations.value.filter((x) => x.confirmationId !== confirmationId);
 	} catch (error) {
+		if (!isCurrent()) return;
 		const statusCode = Number(error?.response?.status || 0);
 		const errorCode = interactionErrorCode(error);
 		if (isTerminalInteractionError(error)) {
@@ -1174,9 +1221,11 @@ async function answerPendingConfirmation(item, answer = {}) {
 					: `提交失败：${message || "请稍后重试。"}`),
 		};
 	} finally {
-		const nextSubmitting = {...confirmationSubmitting.value};
-		delete nextSubmitting[confirmationId];
-		confirmationSubmitting.value = nextSubmitting;
+		if (isCurrent()) {
+			const nextSubmitting = {...confirmationSubmitting.value};
+			delete nextSubmitting[confirmationId];
+			confirmationSubmitting.value = nextSubmitting;
+		}
 	}
 }
 
@@ -1630,6 +1679,7 @@ async function selectModel(model) {
 	const finishMutation = beginModelMutation();
 	const switchNow = async () => {
 		let applied = true;
+		let nextRun = wasRunning;
 		if (localAtRequest) {
 			await patchLocalRunDefaults({mainModel: model.key});
 		} else if (conversationUuid) {
@@ -1638,41 +1688,17 @@ async function selectModel(model) {
 				() => Api.conversationSetModel(conversationUuid, model.key),
 			);
 			applied = outcome.applied;
+			nextRun = outcome.response?.nextRun ?? wasRunning;
 		} else throw new Error("conversation_required");
 		if (!applied || !isRunConfigInteractionCurrent(conversationUuid, localAtRequest)) return;
 		modelQuery.value = "";
-		ElMessage.success(wasRunning ? `已保存模型：${model.key}，下一次调用生效` : `已切换模型：${model.key}`);
+		ElMessage.success(nextRun ? `已保存模型：${model.key}，下一轮运行生效` : `已切换模型：${model.key}`);
 	};
 	try {
 		await switchNow();
 	} catch (error) {
 		if (!isRunConfigInteractionCurrent(conversationUuid, localAtRequest)) return;
 		const code = apiError(error);
-		if (code === "cross_family_requires_new_session") {
-			try {
-				await ElMessageBox.confirm("这个模型和当前会话历史不是同一 family。要开启新会话后再切换吗？", "需要新会话", {
-					type: "warning",
-					confirmButtonText: "新会话切换",
-					cancelButtonText: "取消",
-				});
-				if (!isRunConfigInteractionCurrent(conversationUuid, localAtRequest)) return;
-				const created = await Api.createConversation({title: "新会话", model: model.key, folderId: props.folderId || ""});
-				if (!isRunConfigInteractionCurrent(conversationUuid, localAtRequest)) return;
-				const uuid = created.conversation?.conversationUuid || created.state?.conversationUuid || "";
-				if (uuid) {
-					const nextThinking = modelDefaultThinking(model);
-					if (nextThinking) await Api.conversationSetThinking(uuid, nextThinking);
-					if (!isRunConfigInteractionCurrent(conversationUuid, localAtRequest)) return;
-					emit("conversation-created", uuid);
-				}
-				await load({scrollMode: "bottom"});
-				window.dispatchEvent(new CustomEvent("openbear:conversations-refresh"));
-			} catch (inner) {
-				if (inner === "cancel" || inner === "close" || !isRunConfigInteractionCurrent(conversationUuid, localAtRequest)) return;
-				ElMessage.error(apiError(inner));
-			}
-			return;
-		}
 		if (code === "run_is_active") ElMessage.warning("当前有运行中的任务，结束后再切换模型");
 		else ElMessage.error(code);
 	} finally {
@@ -2041,7 +2067,7 @@ function combineControllerAndAgentStats(controller, current) {
 
 function shouldCombineControllerStats(turn, prevTurn) {
 	if (!turn?.stats || !prevTurn?.stats) return false;
-	if (plainText(turn.user?.content || "")) return false;
+	if (plainText(turn.user?.content || "") || turn.user?.continuation) return false;
 	return Number(turn.stats.expertTasks || turn.stats.expertToolCalls || 0) > 0;
 }
 
@@ -2184,6 +2210,7 @@ function projectOperationMessages(operations = orderedOperationsList()) {
 function clearActiveRun() {
 	modelOutputProgress.value = null;
 	activeRunTurnUuid.value = "";
+	activeRunId.value = "";
 }
 
 function replaceOperationSnapshots(operations = [], {frameSeq = null} = {}) {
@@ -2210,7 +2237,7 @@ function loadOperationsFromState(state = {}, {merge = false, replace = false} = 
 	// tail page cannot erase the searched historical window being read.
 	const ops = (merge || (searchWindowActive.value && !replace))
 		? mergeOperationSnapshots(orderedOperationsList(), incoming)
-		: incoming;
+		: preferNewerLiveOperations(incoming, operationsById.value);
 	// HTTP owns this baseline. Frames crossing the snapshot boundary are replayed
 	// from the buffer, never acknowledged via an unrelated newer high-water mark.
 	lastFrameSeq.value = Number(state.frameSeq || state.facts?.latestFrameSeq || 0) || 0;
@@ -2232,7 +2259,7 @@ function frameDebugEnabled() {
 	try {
 		const params = new URLSearchParams(window.location.search || "");
 		if (params.get("debugFrames") === "1") return true;
-		return window.localStorage.getItem(FRAME_DEBUG_STORAGE_KEY) === "1";
+		return userStorage(window.localStorage).getItem(FRAME_DEBUG_STORAGE_KEY) === "1";
 	} catch {
 		return false;
 	}
@@ -2290,7 +2317,9 @@ function syncRunStateFromOperations(operations = orderedOperationsList(), stateF
 	foregroundRunning.value = hasForeground;
 	rootTurnRunning.value = Boolean(derived.rootTurnRunning);
 	modelOutputProgress.value = derived.modelOutput || null;
+	runWaitingLabel.value = derived.waitingLabel || "";
 	activeRunTurnUuid.value = derived.activeRootTurnId || "";
+	activeRunId.value = derived.activeRunId || "";
 	runStartedAt.value = Number(derived.activeStartedAtMs || 0)
 		|| (stateForegroundRunning ? Number(stateFacts?.live?.startedAtMs || 0) : 0)
 		|| (stateBackgroundRunning ? Number(stateFacts?.backgroundStartedAtMs || 0) : 0)
@@ -2589,6 +2618,45 @@ function applyOperationFrameMessage(frame, options = {}) {
 	return {applied: true, scrollImpact, visibleChanged: changed};
 }
 
+function applyLiveOperationMessage(updates = []) {
+	if (!updates.length) return;
+	if (conversationStateRequests.pending || operationResyncInFlight || operationFrameBuffer.blocked) {
+		// Dropping the oldest leaves a liveRev gap, which requests a live snapshot.
+		pendingLiveUpdates = [...pendingLiveUpdates, ...updates].slice(-2000);
+		return;
+	}
+	const store = {operationsById: operationsById.value};
+	let changed = false;
+	let gap = false;
+	let impact = "none";
+	for (const update of updates) {
+		const result = applyLiveOperationUpdate(store, update);
+		if (result.gap) gap = true;
+		if (!result.applied) continue;
+		changed = true;
+		const operation = store.operationsById.get(update.opId);
+		if (operation?.opType === "stats") mergeStatsUsageIntoState(update.opId, operation.payload);
+		else mergeLedgerUsageIntoState(operation?.payload?.ledgerUsage);
+		impact = mergeScrollImpact(impact, operationScrollImpact(update, operation, {visibleChanged: true}));
+	}
+	operationsById.value = store.operationsById;
+	if (gap && ws && ws.readyState === WebSocket.OPEN && Date.now() - lastLiveResyncAt > 1000) {
+		lastLiveResyncAt = Date.now();
+		ws.send(JSON.stringify({type: "live_resync"}));
+	}
+	if (!changed) return;
+	pendingProjectionOps = orderedOperationsList();
+	pendingScrollImpact = mergeScrollImpact(pendingScrollImpact, impact);
+	scheduleProjectedMessagesFlush();
+}
+
+// A live update changes an operation without a new stored revision.
+function operationVersionSignal(operation) {
+	const revision = Number(operation?.revision || 0) || 0;
+	const liveRev = Number(operation?.liveRev || 0) || 0;
+	return revision ? (liveRev ? `${revision}.${liveRev}` : revision) : 0;
+}
+
 function textSignal(text) {
 	const source = String(text || "");
 	if (!source) return "";
@@ -2614,9 +2682,9 @@ function visibleEventSignatureForMessages(list = []) {
 					parts.push(["answer", event.id || event.eventKey || "", textSignal(event.message?.content || ""), textSignal(event.message?.reasoning || ""), event.reasoningActive ? "live" : "done"].join(":"));
 				} else if (event.kind === "tool" || event.kind === "tool_group") {
 					if (isAgentEvent(event)) continue;
-					parts.push(["tool", event.id || toolResultKey(event) || "", event.live ? "live" : "done", resultTextLength(event, activeToolResult(event)), Number(event.operation?.revision || 0) || ""].join(":"));
+					parts.push(["tool", event.id || toolResultKey(event) || "", event.live ? "live" : "done", resultTextLength(event, activeToolResult(event)), operationVersionSignal(event.operation) || ""].join(":"));
 				} else {
-					parts.push([event.kind || "event", event.id || "", Number(event.operation?.revision || 0) || textSignal(event.status || event.preview || "")].join(":"));
+					parts.push([event.kind || "event", event.id || "", operationVersionSignal(event.operation) || textSignal(event.status || event.preview || "")].join(":"));
 				}
 			}
 			continue;
@@ -2644,10 +2712,12 @@ function withTransientIdleThinking(turnList = []) {
 	return projectTransientIdleThinking(turnList, {
 		rootTurnRunning: rootTurnRunning.value,
 		activeRootTurnId: activeRunTurnUuid.value,
+		activeRunId: activeRunId.value,
 	}, {
 		startedAtMs: runStartedAt.value,
 		lastVisibleOutputAtMs: lastVisibleOutputAt,
 		modelOutput: modelOutputProgress.value,
+		waitingLabel: rootTurnRunning.value ? runWaitingLabel.value : "",
 	});
 }
 
@@ -3345,6 +3415,26 @@ function updatePendingSteering(items = []) {
 	pendingSteering.value = normalizePendingSteering(items);
 }
 
+function updatePromptSuggestions(data, conversationUuid = activeConversationUuid.value) {
+	const items = (Array.isArray(data?.items) ? data.items : []).map((item) => String(item || "").trim()).filter(Boolean);
+	promptSuggestions.value = {conversationUuid: String(conversationUuid || ""), items};
+}
+
+async function pickPromptSuggestion(text) {
+	draft.value = String(text || "");
+	await focusComposer();
+}
+
+async function dismissPromptSuggestions() {
+	const uuid = String(activeConversationUuid.value || "");
+	updatePromptSuggestions(null, uuid);
+	try {
+		await Api.dismissPromptSuggestions(uuid);
+	} catch (error) {
+		ElMessage.error(apiError(error) || "关闭推荐失败");
+	}
+}
+
 function applyPendingSteeringEvent(data = {}) {
 	const action = String(data.action || "snapshot");
 	if (action === "drain" || action === "clear") {
@@ -3441,7 +3531,7 @@ async function responsiveOutboundSocket(pending, isCurrent) {
 		// timeline may now show B, so its current lastFrameSeq is not A's cursor.
 		const cursor = timelinePageInitialized && timelinePageConversationUuid === pending.conversationUuid
 			? lastFrameSeq.value : pending.sendFrameSeq;
-		const socket = new WebSocket(conversationWsUrl(pending.conversationUuid, cursor, {bootstrap: "incremental"}));
+		const socket = contextWebSocket(conversationWsUrl(pending.conversationUuid, cursor, {bootstrap: "incremental"}));
 		pending.sendSocket = socket;
 		socket.onmessage = (event) => {
 			let data;
@@ -3479,7 +3569,8 @@ function leavePendingSend() {
 }
 
 function handleWsMessage(raw, source = {}) {
-	if (source.socket && (source.socket !== ws || source.conversationUuid !== wsConversationUuid)) return;
+	if (source.socket && (source.socket !== ws || source.conversationUuid !== wsConversationUuid
+		|| source.conversationUuid !== props.conversationUuid)) return;
 	let data = null;
 	try {
 		data = JSON.parse(raw?.data || raw || "{}");
@@ -3500,10 +3591,15 @@ function handleWsMessage(raw, source = {}) {
 		messageVisibility.apply(data.visibility);
 		return;
 	}
+	if (data.type === "collab_requests") {
+		collabRequests.changed(String(data.conversationUuid || ""));
+		return;
+	}
 	if (data.type === "bootstrap") {
 		messageVisibility.apply(data.messageVisibility);
 		updatePendingConfirmations(data.pendingConfirmations || []);
 		updatePendingSteering(data.pendingSteering || []);
+		if (data.promptSuggestions) updatePromptSuggestions(data.promptSuggestions, source.conversationUuid);
 		return;
 	}
 	if (data.type === "resync_required") {
@@ -3527,6 +3623,7 @@ function handleWsMessage(raw, source = {}) {
 		};
 		updatePendingConfirmations(state.pendingConfirmations || []);
 		updatePendingSteering(state.pendingSteering || []);
+		if (state.promptSuggestions) updatePromptSuggestions(state.promptSuggestions, source.conversationUuid);
 		lastStats.value = null;
 		if (ops.length) syncRunStateFromOperations(ops, state);
 		else {
@@ -3566,6 +3663,12 @@ function handleWsMessage(raw, source = {}) {
 		});
 		return;
 	}
+	if (data.type === "live" || data.type === "live_snapshot") {
+		const ops = Array.isArray(data.ops) ? data.ops : [];
+		// Snapshot entries replace the payload whatever action they were serialized with.
+		applyLiveOperationMessage(data.type === "live_snapshot" ? ops.map((op) => ({...op, action: "snapshot"})) : ops);
+		return;
+	}
 	if (data.type === "frame") {
 		const frame = data.frame || {};
 		if (conversationStateRequests.pending || operationResyncInFlight || operationFrameBuffer.blocked) operationFrameBuffer.add(frame);
@@ -3583,6 +3686,10 @@ function handleWsMessage(raw, source = {}) {
 	if (data.type === "event") return;
 	if (data.type === "web_confirmation") {
 		updatePendingConfirmations(data.confirmations || data.confirmation || []);
+		return;
+	}
+	if (data.type === "prompt_suggestions") {
+		updatePromptSuggestions(data, source.conversationUuid);
 		return;
 	}
 	if (data.type === "pending_steering") {
@@ -3607,12 +3714,13 @@ function handleWsMessage(raw, source = {}) {
 }
 
 async function connectWs(conversationUuid = props.conversationUuid) {
+	if (pageSession.blocked) return null;
 	const uuid = conversationUuid;
 	if (!uuid || String(uuid).startsWith("local:")) return null;
 	if (ws && wsConversationUuid === uuid && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return ws;
 	closeWs();
 	wsConversationUuid = uuid;
-	const socket = new WebSocket(conversationWsUrl(uuid, lastFrameSeq.value, {bootstrap: "incremental"}));
+	const socket = contextWebSocket(conversationWsUrl(uuid, lastFrameSeq.value, {bootstrap: "incremental"}));
 	ws = socket;
 	socket.onmessage = (event) => handleWsMessage(event, {socket, conversationUuid: uuid});
 	// Keep the baseline user-visible connection acknowledgement even though the
@@ -3691,6 +3799,7 @@ async function ensureServerConversationForSend(firstText, pending) {
 	if (!outboundSends.isCurrent(pending)) return "";
 	const uuid = created.conversation?.conversationUuid || created.state?.conversationUuid || "";
 	if (!uuid) throw new Error("conversation_create_failed");
+	forgetLocalDraftChoices();
 	const sourceUuid = pending.conversationUuid;
 	pending.conversationUuid = uuid;
 	const stillViewingSource = props.conversationUuid === sourceUuid;
@@ -3739,6 +3848,7 @@ function applyLoadedConversationState(data, conversationUuid, {replaceOperations
 		&& mayRetireRunConfigOverride(runConfigVersionAtRequest, runConfigSaves.appliedVersion)
 	) runConfigOverride.value = null;
 	updatePendingSteering(data.pendingSteering || []);
+	updatePromptSuggestions(data.promptSuggestions, conversationUuid);
 	lastStats.value = null;
 	let operationRunState = null;
 	if (ops.length) operationRunState = syncRunStateFromOperations(ops, data);
@@ -3758,7 +3868,13 @@ function applyLoadedConversationState(data, conversationUuid, {replaceOperations
 }
 
 function replayBufferedOperationFrames(cursor) {
-	return operationFrameBuffer.replayAfter(cursor, frame => applyOperationFrameMessage(frame, {resyncing: true}));
+	const replayed = operationFrameBuffer.replayAfter(cursor, frame => applyOperationFrameMessage(frame, {resyncing: true}));
+	if (replayed && pendingLiveUpdates.length) {
+		const updates = pendingLiveUpdates;
+		pendingLiveUpdates = [];
+		applyLiveOperationMessage(updates);
+	}
+	return replayed;
 }
 
 async function load(options = {}) {
@@ -3939,24 +4055,31 @@ async function deleteTurnSuffix(turn) {
 
 
 
-async function send() {
+// A composed message (an assistant-panel follow-up) is sent as its own text and
+// never touches the user's draft or pending attachments.
+async function send({text: composed = null} = {}) {
 	// Enter and click must share the same single-flight guard. A model-source save
 	// must commit before WebSocket send refreshes and freezes the next run model.
-	if (sendPending.value || outboundSends.current || modelMutating.value || attachmentRestoring.value) return;
-	const text = draft.value.trim();
-	const referenceOrder = composer.value?.getReferenceOrder?.() || [];
-	if (!text && !pendingAttachments.value.length) return;
+	if (sendPending.value || outboundSends.current || modelMutating.value || attachmentRestoring.value) return false;
+	const isComposed = typeof composed === "string";
+	const text = isComposed ? composed.trim() : draft.value.trim();
+	const referenceOrder = isComposed ? [] : composer.value?.getReferenceOrder?.() || [];
+	if (!text && (isComposed || !pendingAttachments.value.length)) return false;
 	if (referencesInText(text).length && (!referenceCatalog.ready || !referenceCatalog.connected)) {
-		ElMessage.warning("引用目录尚未连接，请稍后发送；草稿已保留");
-		return;
+		ElMessage.warning(isComposed ? "引用目录尚未连接，请稍后再试" : "引用目录尚未连接，请稍后发送；草稿已保留");
+		return false;
 	}
-	if (running.value && pendingAttachments.value.length) {
+	if (!isComposed && running.value && pendingAttachments.value.length) {
 		ElMessage.warning("运行中暂不追加附件，可以先停止或等当前轮完成");
-		return;
+		return false;
 	}
-	const wasRunning = running.value;
+	// Only a live controller takes input as an interjection. With background
+	// Agents alone the server starts a new turn, so show it as one.
+	const wasRunning = rootTurnRunning.value || foregroundRunning.value;
+	// The server clears them when the run starts; hide them now so they do not flash back.
+	updatePromptSuggestions(null);
 	const requestId = globalThis.crypto?.randomUUID?.() || `send-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-	const attachments = [...pendingAttachments.value];
+	const attachments = isComposed ? [] : [...pendingAttachments.value];
 	const files = attachments.map((item) => item.file);
 	const sentPreviewUrls = Object.values(attachmentPreviews.value).filter(Boolean);
 	const optimisticAttachments = localAttachmentPayload(attachments);
@@ -3964,25 +4087,27 @@ async function send() {
 	const pending = outboundSends.begin({
 		requestId,
 		conversationUuid: activeConversationUuid.value,
-		draftText: draft.value,
+		draftText: isComposed ? "" : draft.value,
 		attachments,
-		previewUrls: sentPreviewUrls,
+		previewUrls: isComposed ? [] : sentPreviewUrls,
 		wasRunning,
-		editorDraft: "",
+		editorDraft: isComposed ? draft.value : "",
 		localFolderId: props.folderId || "",
 		localRunConfig: isLocalConversation.value && localDefaultsFolderId === String(props.folderId || "") ? completeLocalRunConfig() : null,
 		sendFrameSeq: timelinePageInitialized && timelinePageConversationUuid === activeConversationUuid.value ? lastFrameSeq.value : 0,
 		optimisticId: "",
 	});
-	if (!pending) return;
+	if (!pending) return false;
 	const generation = ++sendAttemptGeneration;
 	const isCurrent = () => componentMounted && outboundSends.isCurrent(pending) && generation === sendAttemptGeneration;
 	setUploadProgress(pending.conversationUuid, Object.fromEntries(attachments.map(item => [item.id, {phase: "preparing", percent: 0}])));
 	sendPending.value = true;
-	// The editor can clear immediately, but preparation is still safely unsent.
-	setDraftForConversation(pending.conversationUuid, pending.draftText);
-	draft.value = "";
-	adjustComposerHeight();
+	if (!isComposed) {
+		// The editor can clear immediately, but preparation is still safely unsent.
+		setDraftForConversation(pending.conversationUuid, pending.draftText);
+		draft.value = "";
+		adjustComposerHeight();
+	}
 	closeComposerMenus();
 	if (!wasRunning) {
 		pending.optimisticId = `local-${Date.now()}`;
@@ -4007,10 +4132,10 @@ async function send() {
 		await scrollBottom({force: true, isCurrent});
 		if (!isCurrent()) return;
 		const conversationUuid = await ensureServerConversationForSend(finalText, pending);
-		if (!isCurrent()) return;
+		if (!isCurrent()) return false;
 		// Do not read B's editor when preparation finishes offscreen. Keep A's
 		// reloadable recovery text even across local draft -> server ID migration.
-		setDraftForConversation(conversationUuid, restoreOutboundDraft(pending.draftText,
+		if (!isComposed) setDraftForConversation(conversationUuid, restoreOutboundDraft(pending.draftText,
 			conversationUuid === activeConversationUuid.value ? draft.value : pending.editorDraft));
 		let uploadedFiles = [];
 		if (files.length) {
@@ -4047,13 +4172,16 @@ async function send() {
 			if (!cleared) throw new Error("attachment_draft_clear_failed");
 		}
 		// The preparation copy was kept for recovery; release only its own text.
-		const ownDraft = conversationUuid === activeConversationUuid.value ? draft.value : pending.editorDraft;
-		setDraftForConversation(conversationUuid, ownDraft);
+		if (!isComposed) {
+			const ownDraft = conversationUuid === activeConversationUuid.value ? draft.value : pending.editorDraft;
+			setDraftForConversation(conversationUuid, ownDraft);
+		}
 		sock.send(JSON.stringify({type: "send", requestId, text, files: uploadedFiles, referenceOrder}));
 		outboundSends.markSent(pending);
 		emit("conversations-refresh");
+		return true;
 	} catch (error) {
-		if (!isCurrent()) return;
+		if (!isCurrent()) return false;
 		if (pending.conversationUuid === activeConversationUuid.value) localToServerTransitionUuid.value = "";
 		restorePendingOutboundSend(requestId, "send_failed");
 		ElMessage.error(apiError(error));
@@ -4174,48 +4302,19 @@ watch(() => props.conversationUuid, async (next, prev) => {
 	if (next === prev) return;
 	await switchConversation(next, prev);
 }, {immediate: false});
+watch(() => props.conversationUuid, next => collabRequests.reset(next), {immediate: true});
 
-// Apply after the draft's folder defaults are loaded: the card's model is a
-// one-off choice for this draft (never a global default), and nothing is sent.
-let appliedRecommendationNonce = 0;
-async function applyRecommendationDraft(request) {
-	if (!request || request.nonce === appliedRecommendationNonce || !isLocalConversation.value) return;
-	appliedRecommendationNonce = request.nonce;
-	await loadOptions();
-	// A folder change may start another defaults load; apply only after it settles.
-	for (let attempt = 0; attempt < 5; attempt++) {
-		await ensureLocalRunDefaults().catch(() => {});
-		const pending = localDefaultsLoading;
-		if (!pending) break;
-		await pending.promise.catch(() => {});
-	}
-	if (!isLocalConversation.value) return;
-	const model = modelOptions.value.find((item) => item.key === request.model);
-	if (model) {
-		localDefaultsOverrides = {...localDefaultsOverrides, mainModel: model.key};
-		applyLocalRunDefaults({...completeLocalRunConfig(), mainModel: model.key, mainThinkingLevel: ""});
-		resetLocalConversationState(String(props.conversationUuid || "local:new"));
-	}
-	restoringDraft.value = true;
-	draft.value = String(request.text || "");
-	setDraftForConversation(props.conversationUuid, draft.value);
-	await nextTick();
-	restoringDraft.value = false;
-	adjustComposerHeight();
-	emit("recommendation-draft-applied");
-	await focusComposer();
-}
-watch(() => [props.recommendationDraft, props.conversationUuid, props.folderId], ([request]) => {
-	if (request && componentMounted) void applyRecommendationDraft(request);
-});
 
 watch(() => props.folderId, (next, prev) => {
 	if (next === prev || !isLocalConversation.value) return;
 	if (outboundSends.current?.conversationUuid === activeConversationUuid.value) leavePendingSend();
 	localDefaultsFolderId = null;
 	localFolderDefaults = {};
-	localDefaultsOverrides = {};
-	applyDefaultLocalModel();
+	// Returning from another conversation's folder keeps this draft's choices.
+	if (localDefaultsOverridesFolderId !== String(next || "")) {
+		forgetLocalDraftChoices();
+		applyDefaultLocalModel();
+	}
 	void refreshFolderRunDefaults();
 });
 
@@ -4280,7 +4379,6 @@ onMounted(async () => {
 	// applied before remote state, so no temporary model placeholder can render.
 	await loadOptions();
 	await load({scrollMode: "bottom", refreshDefaults: isLocalConversation.value});
-	if (props.recommendationDraft) await applyRecommendationDraft(props.recommendationDraft);
 	adjustComposerHeight();
 	observeScrollerReflow();
 	await nextTick();
@@ -4328,7 +4426,6 @@ onBeforeUnmount(() => {
 		<div class="console-main min-w-0 flex flex-1 flex-col">
 			<ConsoleHeader
 				:title="conversationTitle"
-				@properties="emit('properties')"
 				:title-identity="activeConversationUuid"
 				:conversation-path="props.conversationPath"
 				:running="running"
@@ -4342,7 +4439,6 @@ onBeforeUnmount(() => {
 				:cost-text="totalCostDisplay"
 			>
 				<template #mobile-navigation><slot name="mobile-navigation"/></template>
-				<template #mobile-recommendations><slot name="mobile-recommendations"/></template>
 				<template #mobile-actions>
 					<MobileConversationTools
 						:conversation-uuid="activeConversationUuid"
@@ -4379,7 +4475,7 @@ onBeforeUnmount(() => {
 						</div>
 					</div>
 					<div v-if="searchReturnPosition" class="search-return-bar" role="status">
-					<span>{{ searchLocating ? '正在定位历史消息…' : '正在阅读搜索定位内容' }}</span>
+					<span>{{ searchLocating ? '正在定位历史消息…' : '正在查看定位的历史消息' }}</span>
 					<button type="button" @click="returnFromSearch">返回原位置</button>
 					<button type="button" @click="returnToLatestFromSearch">最新消息</button>
 				</div>
@@ -4411,8 +4507,9 @@ onBeforeUnmount(() => {
 						<ChatLineRound/>
 					</div>
 					<h2 class="mt-5 text-2xl font-semibold tracking-tight">今天想让 OpenBear 做什么？</h2>
-					<p class="mt-2 max-w-lg text-sm leading-6 text-ob-subtle">浏览器负责长对话、富文本和过程可视化；Telegram
+					<p v-if="authMode === 'controller'" class="mt-2 max-w-lg text-sm leading-6 text-ob-subtle">浏览器负责长对话、富文本和过程可视化；Telegram
 						继续保留熟悉的模型、思考、工具和本轮统计交互语义。</p>
+					<p v-else class="mt-2 max-w-lg text-sm leading-6 text-ob-subtle">在这里开始对话，管理模型、工具与任务；聊天、记忆和文件属于此实例。</p>
 					<div class="mt-5 grid w-full max-w-2xl gap-2 sm:grid-cols-3">
 						<button v-for="prompt in quickPrompts" :key="prompt" type="button" class="quick-prompt"
 						        @click="applyQuickPrompt(prompt)">{{ prompt }}
@@ -4425,6 +4522,8 @@ onBeforeUnmount(() => {
 						:turns="turns"
 						:conversation-uuid="activeConversationUuid"
 						:running="running"
+						:controller-running="rootTurnRunning || foregroundRunning"
+						:active-turn-index="activeRunTurnIndex"
 						:deleting-turn-uuid="deletingTurnUuid"
 						:auto-scroll-locked="autoScrollLocked"
 						:retry-action-pending="retryActionPending"
@@ -4433,6 +4532,7 @@ onBeforeUnmount(() => {
 						:active-tool-result-index="activeToolResultIndex"
 						@details-toggle="onDetailsToggle"
 						@reasoning-toggle="onReasoningDetailsToggle"
+						@locate-turn="opId => locateSearchResult({opId})"
 						@select-tool-result="selectToolResult"
 						@cancel-retry="controlActiveRetry($event, 'cancel')"
 						@retry-now="controlActiveRetry($event, 'retry')"
@@ -4496,6 +4596,7 @@ onBeforeUnmount(() => {
 				:confirmation-submitting="confirmationSubmitting"
 				:confirmation-errors="confirmationErrors"
 				:pending-steering="pendingSteering"
+				:prompt-suggestions="visiblePromptSuggestions"
 				:model-menu-open="modelMenuOpen"
 				:model-groups="modelGroups"
 				:current-model="currentModel"
@@ -4549,6 +4650,8 @@ onBeforeUnmount(() => {
 				@send="send"
 				@stop="stop"
 				@answer-confirmation="answerPendingConfirmation"
+				@pick-suggestion="pickPromptSuggestion"
+				@dismiss-suggestions="dismissPromptSuggestions"
 				@close-menus="closeComposerMenus"
 				@height-change="onComposerHeightChange"
 			/>

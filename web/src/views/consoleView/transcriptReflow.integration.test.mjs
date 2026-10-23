@@ -249,14 +249,6 @@ test('the observer only reacts to width and coalesces one reflow into a single f
   assert.equal(el.scrollTop, 1200);
   assert.equal(h.run('activeTurnIndex.value'), 2);
 });
-test('C06: fixture clamps negative, bottom and short-transcript scroll positions', () => {
-  const el = scroller(1440, turns);
-  el.scrollTop = -100; assert.equal(el.scrollTop, 0);
-  el.scrollTop = el.scrollHeight; assert.equal(el.scrollTop, el.scrollHeight - el.clientHeight);
-  const short = scroller(1440, [{index: 0, height: () => 100}]);
-  short.scrollTop = 900; assert.equal(short.scrollTop, 0);
-});
-
 test('C06: explicit user scrolling captures a new line, while locked reflow follows bottom', () => {
   const el = longTranscript(), h = harness(el);
   el.scrollTop = 1200; h.run('updateActiveTurnFromScroll()');

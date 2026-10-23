@@ -440,8 +440,12 @@ def test_runtime_rejects_broken_isolation(config, monkeypatch, bad):
         assert not any("nsenter" in args for args in calls)
 
 
-@pytest.mark.parametrize("case", ["A", "B"])
-def test_real_case_orchestration_keeps_install_and_old_updater_paths(config, monkeypatch, case):
+@pytest.mark.parametrize("case,late_delete", [("A", False), ("B", False), ("B", True)])
+@pytest.mark.parametrize("requires_restart", [True, False])
+def test_real_case_orchestration_keeps_install_and_old_updater_paths(config, monkeypatch, case, requires_restart, late_delete):
+    meta = pathlib.Path(config["currentAssets"]) / "release-meta.json"
+    meta.write_text(json.dumps({"requiresRestart": requires_restart}))
+    config["assets"] = metadata(meta.parent)
     run = make_run(config, case)
     state = run.dir / "state"
     state.mkdir()
@@ -449,8 +453,14 @@ def test_real_case_orchestration_keeps_install_and_old_updater_paths(config, mon
     calls = []
     monkeypatch.setattr(run, "start_container", lambda chosen: (name, state, {"hostMountUnchanged": True}))
     monkeypatch.setattr(run, "prepare_container", lambda *args: None)
-    monkeypatch.setattr(run, "collect_runtime", lambda *args: {"installedVersion": args[-1], "configMode": "600",
-        "serviceShow": "MainPID=" + ("100" if args[-1] == config["previousVersion"] else "200") + "\nExecMainStartTimestamp=started\n"})
+    def collect_runtime(*args):
+        label = args[-2]
+        pid = "300" if label == "b-second-boot" else "200"
+        if args[-1] == config["previousVersion"] or (label == "b-post-upgrade" and not requires_restart):
+            pid = "100"
+        return {"installedVersion": args[-1], "configMode": "600",
+                "serviceShow": f"MainPID={pid}\nExecMainStartTimestamp=started\n"}
+    monkeypatch.setattr(run, "collect_runtime", collect_runtime)
     monkeypatch.setattr(run, "live_probe", lambda *args, **kw: {"version": args[-1], "saveSession": bool(kw.get("save_session")), "frontendBuild": {"buildId": "a" * 16}})
 
     def exec_command(container, args, label, **kwargs):
@@ -461,18 +471,35 @@ def test_real_case_orchestration_keeps_install_and_old_updater_paths(config, mon
             output = "+ uv sync --frozen --no-dev\n"
         if label == "b-seed-upgrade":
             harness.write_json(state / "upgrade-baseline.json", {"version": config["previousVersion"],
-                "files": {"openbear.json": {"mode": 0o600}}, "tables": {"messages": []}, "conversationUuid": "seeded"})
+                "files": {"openbear.json": {"mode": 0o600}}, "tables": {"messages": []}, "conversationUuid": "seeded",
+                "heavyHistory": {"frameCount": 120000, "latestFrames": [{}] * 24}})
             assert "--legacy-terminal-time" not in args
         if label == "b-updater-collected-state":
             output = "LoadState=not-found\n"
         if label == "b-update-result":
-            output = json.dumps({"status": "success", "toVersion": config["version"], "requiresRestart": True})
+            output = json.dumps({"status": "success", "toVersion": config["version"], "requiresRestart": requires_restart})
         if label == "b-old-session-probe":
             harness.write_json(state / "old-session-after-upgrade.json", {"oldSessionSurvived": True})
         if label == "b-verify-preservation":
             harness.write_json(state / "upgrade-preservation.json", {"ok": True, "additionalChecks": {}})
+        if label == "b-second-verify-preservation":
+            harness.write_json(state / "second-preservation.json", {"ok": True, "additionalChecks": {}})
+            assert args[-1] == ("restart" if requires_restart else "refresh")
+            if late_delete:
+                with (state / "startup-audit.jsonl").open("a") as handle:
+                    handle.write(json.dumps({"pid": 300, "bootId": "300", "event": "frameDeleteAttempt"}) + "\n")
+        if label in {"b-first-startup-history", "b-second-startup-history"}:
+            harness.write_json(state / f"{label}.json", {"ok": True, "observedBoots": int(args[args.index("--boot-number") + 1])})
+            pid = args[args.index("--pid") + 1]
+            with (state / "startup-audit.jsonl").open("a") as handle:
+                for event in ("observerInstalled", "startupEntered", "sqliteObserved", "startupReturned"):
+                    handle.write(json.dumps({"pid": pid, "bootId": pid, "event": event,
+                        "database": "/opt/openbear/data/openbear.db", "startupReady": True, "elapsedSeconds": 0.5}) + "\n")
         if label == "b-verify-removed":
             harness.write_json(state / "removed-files.json", {"ok": True, "checked": 0})
+        if label.endswith("-package-extras"):
+            assert args[2:4] == ["/opt/openbear", f"/obaccept/assets/{config['version']}/openbear-{config['version']}.zip"]
+            harness.write_json(state / f"{label}.json", {"ok": True, "checked": ["Dockerfile"], "errors": []})
         if label.endswith("fixture-counts"):
             output = json.dumps({f"release_metadata_{v}": 1 for v in (config["version"], config["previousVersion"])} |
                                 {f"asset_{v}_openbear-{v}.zip": 1 for v in (config["version"], config["previousVersion"])} |
@@ -480,12 +507,23 @@ def test_real_case_orchestration_keeps_install_and_old_updater_paths(config, mon
         return subprocess.CompletedProcess(args, 0, output, "")
 
     monkeypatch.setattr(run, "docker_exec", exec_command)
+    if late_delete:
+        with pytest.raises(ValueError, match="final startup observation failed"):
+            run.run_b()
+        assert not run.results["heavyHistoryGate"]["finalAudit"]["ok"]
+        return
     result = run.run_a() if case == "A" else run.run_b()
     assert result["status"] == "PASS"
     installed = config["version"] if case == "A" else config["previousVersion"]
     installs = [args for args, label, kwargs in calls if args[:2] == ["bash", "-x"]]
     assert installs == [["bash", "-x", f"/obaccept/assets/{installed}/install.sh"]]
+    assert result["packageExtras"]["ok"]
+    labels = [label for args, label, kwargs in calls]
+    if case == "A":
+        assert labels.index(f"a-install-{config['version']}") < labels.index("a-package-extras")
     if case == "B":
+        # The new code restores files the old updater left out on its first start.
+        assert labels.index("b-first-startup-history") < labels.index("b-package-extras") < labels.index("b-second-restart")
         updater = next(args for args, label, kwargs in calls if label == "b-transient-updater")
         assert updater[0] == "systemd-run" and "--wait" in updater and "--collect" in updater
         assert "/opt/openbear/scripts/updater.py" in updater
@@ -497,6 +535,49 @@ def test_real_case_orchestration_keeps_install_and_old_updater_paths(config, mon
         assert (state / "update-request.json").stat().st_mode & 0o777 == 0o600
         removed = next(args for args, label, kwargs in calls if label == "b-verify-removed")
         assert f"/obaccept/assets/{config['previousVersion']}/openbear-{config['previousVersion']}.zip" in removed
+        labels = [label for args, label, kwargs in calls]
+        assert labels.index("b-arm-startup-audit") < labels.index("b-transient-updater")
+        assert labels.index("b-first-startup-history") < labels.index("b-second-restart") < labels.index("b-second-startup-history")
+        assert ("b-first-boot-after-refresh" in labels) is not requires_restart
+        assert [boot["observedBoots"] for boot in result["heavyHistoryGate"]["boots"]] == [1, 2]
+        assert result["heavyHistoryGate"]["secondPreservation"]["ok"]
+        assert result["heavyHistoryGate"]["finalAudit"]["ok"]
+
+
+def test_missing_instance_and_gateway_files_fail_acceptance(config, monkeypatch):
+    run = make_run(config)
+    state = run.dir / "state"
+    state.mkdir()
+
+    def exec_command(container, args, label, **kwargs):
+        harness.write_json(state / f"{label}.json", {"ok": False, "errors": ["missing Dockerfile"]})
+        return subprocess.CompletedProcess(args, 1, "", "")
+
+    monkeypatch.setattr(run, "docker_exec", exec_command)
+    with pytest.raises(AssertionError, match="missing Dockerfile"):
+        run.verify_package_extras("c", state, "a", config["version"])
+
+
+def test_package_extras_helper_compares_installed_tree_with_the_package(tmp_path, monkeypatch):
+    from scripts.release_support.acceptance_helpers import verify_package_extras as helper
+    archive = tmp_path / "openbear.zip"
+    files = {"gateway/bin/openbear-gateway-linux-amd64": b"ELF", "Dockerfile": b"FROM x", "docs/instances.md": b"doc", "app/main.py": b""}
+    with zipfile.ZipFile(archive, "w") as package:
+        for name, data in files.items():
+            package.writestr(name, data)
+    root = tmp_path / "install"
+    for name, data in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_bytes(data)
+    output = tmp_path / "report.json"
+    monkeypatch.setattr(sys, "argv", ["verify_package_extras.py", str(root), str(archive), str(output)])
+
+    assert helper.main() == 0
+    assert json.loads(output.read_text())["checked"] == ["Dockerfile", "docs/instances.md", "gateway/bin/openbear-gateway-linux-amd64"]
+    (root / "Dockerfile").write_bytes(b"changed")
+    (root / "gateway/bin/openbear-gateway-linux-amd64").unlink()
+    assert helper.main() == 1
+    assert json.loads(output.read_text())["errors"] == ["missing gateway/bin/openbear-gateway-linux-amd64", "differs from package: Dockerfile"]
 
 
 def test_installer_unfrozen_fallback_is_failure(config, monkeypatch):
@@ -621,3 +702,37 @@ def test_certificate_failure_cleans_partial_secrets_without_docker_creation(conf
     assert not run.certs.exists()
     assert read_report(run)["cleanup"]["ok"]
     assert not any("create" in args or "run" in args for args in calls)
+
+
+@pytest.mark.parametrize("failure", ["delete", "missing-report", "nonzero-exit"])
+def test_history_gate_failure_is_retained_in_existing_case_report(config, monkeypatch, failure):
+    run = make_run(config, "B")
+    attach_fake(monkeypatch, run)
+
+    def exec_probe(name, args, label, **kwargs):
+        if failure != "missing-report":
+            harness.write_json(run.dir / "state" / f"{label}.json", {
+                "ok": failure == "nonzero-exit", "errors": ["startup DELETE observed"] if failure == "delete" else [],
+                "startup": {"frameDeleteAttempts": 1 if failure == "delete" else 0},
+            })
+        return subprocess.CompletedProcess(args, 1, "", "")
+
+    def case():
+        name, state, _ = run.start_container("b")
+        run.results["heavyHistoryGate"] = {"boots": []}
+        run.verify_history_boot(name, state, "b-first-startup-history", {
+            "serviceShow": "MainPID=123\nExecMainStartTimestamp=started\n",
+        }, 1)
+        pytest.fail("failed history gate must not produce PASS")
+
+    monkeypatch.setattr(run, "docker_exec", exec_probe)
+    monkeypatch.setattr(run, "run_b", case)
+    assert run.execute() == 1
+    report = read_report(run)
+    assert not report["ok"] and report["cleanup"]["ok"]
+    assert report["failure"]["stage"] == "b-first-startup-history"
+    boot = report["result"]["heavyHistoryGate"]["boots"][0]
+    if failure == "delete":
+        assert boot["startup"]["frameDeleteAttempts"] == 1
+    elif failure == "missing-report":
+        assert "missing startup probe report" in boot["errors"]

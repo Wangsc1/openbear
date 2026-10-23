@@ -5,6 +5,7 @@ import copy
 import json
 import time
 from dataclasses import replace
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -224,6 +225,7 @@ async def test_single_agent_runner_forwards_fast_request_to_every_model_call(env
     await runner.run()
 
     assert backend.opts
+    assert "cache_ttl" not in backend.opts[0]  # Agents keep the default 5m prompt cache.
     assert backend.opts[0]["fast_request"] == {
         "body": {"service_tier": "priority"},
         "headers": {"x-fast-mode": "enabled"},
@@ -1172,6 +1174,7 @@ async def test_single_agent_runner_retries_retryable_model_error(env):
         model="gpt",
         max_tokens=2048,
         tools=ToolRegistry(),
+        retry_backoff_s=0,
         on_model_call=lambda detail: calls.append(detail),
     )
 
@@ -1221,7 +1224,7 @@ async def test_single_agent_physical_retry_deduplicates_task_memory_and_keeps_pr
         model="gpt",
         max_tokens=2048,
         tools=ToolRegistry(),
-        retry_backoff_s=0.001,
+        retry_backoff_s=0,
         retry_max_delay_s=0.001,
         retry_jitter_ratio=0,
         plan_protocol_enabled=False,
@@ -1502,13 +1505,6 @@ def test_safe_agent_llm_session_id_is_ascii_for_chinese_agent_key():
     assert "项目开发专家" not in value
 
 
-def test_safe_agent_llm_session_id_isolates_parallel_tasks_but_stays_stable_for_continuation():
-    first = safe_agent_llm_session_id("shared-agent-session", "task-a", "general-purpose")
-    second = safe_agent_llm_session_id("shared-agent-session", "task-b", "general-purpose")
-    assert first != second
-    assert first == safe_agent_llm_session_id("shared-agent-session", "task-a", "general-purpose")
-
-
 async def test_single_agent_model_call_hook_runs_before_task_completes(env):
     dao, task_uuid, agent = env
     observed = []
@@ -1776,8 +1772,8 @@ async def test_single_agent_user_prompt_carries_runtime_facts_only(
         assert forced not in backend.first_user, forced
 
 
-async def test_direct_agent_exposes_control_ack_only_when_intervention_pending(env):
-    """direct 模式收到干预时必须能看到 AgentControlAck，否则回执门禁会死锁任务。"""
+async def test_direct_agent_keeps_control_ack_stable_across_interventions(env):
+    """direct 模式始终能看到 AgentControlAck：收到干预时才加入会让工具前缀整段失去缓存，回执门禁也不能死锁。"""
     dao, task_uuid, agent = env
     agent.tool_allowlist = ["Read"]
     reg = ToolRegistry()
@@ -1802,7 +1798,7 @@ async def test_direct_agent_exposes_control_ack_only_when_intervention_pending(e
     )
 
     names = {s["name"] for s in await runner._allowed_tool_schemas()}
-    assert names == {"Read"}
+    assert names == {"Read", "AgentControlAck"}
 
     runner.steers.append({"controlUuid": "c-1", "message": "补一个缺口"})
     names = {s["name"] for s in await runner._allowed_tool_schemas()}
@@ -1815,7 +1811,7 @@ async def test_direct_agent_exposes_control_ack_only_when_intervention_pending(e
 
     runner._pending_control_acks.clear()
     names = {s["name"] for s in await runner._allowed_tool_schemas()}
-    assert names == {"Read"}
+    assert names == {"Read", "AgentControlAck"}
 
 
 async def test_tool_budget_pause_persists_only_paired_tool_calls(env):
@@ -1929,7 +1925,24 @@ async def test_task_memory_requires_explicit_agent_tool_grant(env):
     assert "TaskMemory" in {schema["name"] for schema in await with_grant._allowed_tool_schemas()}
 
 
-async def test_agent_task_memory_state_keeps_cross_second_tool_round_provider_prefix(env):
+def _advance_wall_clock(monkeypatch, seconds: float) -> None:
+    """Move the wall clocks read on this path forward without really sleeping."""
+    import app.context.user_message_template as user_message_template
+    import app.utils
+
+    real_time = time.time
+    monkeypatch.setattr(time, "time", lambda: real_time() + seconds)
+
+    class ShiftedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) + timedelta(seconds=seconds)
+
+    for module in (app.utils, user_message_template):
+        monkeypatch.setattr(module, "datetime", ShiftedDatetime)
+
+
+async def test_agent_task_memory_state_keeps_cross_second_tool_round_provider_prefix(env, monkeypatch):
     dao, task_uuid, agent = env
     memories = TaskMemoryDAO(dao.db)
     await memories.create(
@@ -1972,7 +1985,8 @@ async def test_agent_task_memory_state_keeps_cross_second_tool_round_provider_pr
 
     async def mutate_catalog(_args):
         nonlocal own
-        await asyncio.sleep(1.05)
+        # Cross a wall-clock second between the two physical model calls.
+        _advance_wall_clock(monkeypatch, 1.05)
         own = await memories.update(
             own["memoryUuid"],
             conversation_uuid="session-1",

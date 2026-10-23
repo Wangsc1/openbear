@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {readFile, unlink, writeFile} from "node:fs/promises";
 import test from "node:test";
+import {isActiveAgentEvent} from "./agentPlanPresentation.js";
 
 const sourceUrl = new URL("./display.js", import.meta.url);
 const generatedUrl = new URL(`./.display-test-${process.pid}.mjs`, import.meta.url);
@@ -27,6 +28,28 @@ test("model retry uses human summary and never puts nested HTTP JSON on the main
 	assert.equal(display.modelRetryReasonLabel({reason: "rate_limit", error: raw}), "上游限流");
 	assert.equal(display.modelRetryReasonLabel({reason: "billing", error: raw}), "上游余额/额度不足");
 	assert.ok(!display.modelRetryReasonLabel({reason: "rate_limit", error: raw}).includes("{"));
+});
+
+
+test("Agent launch failure exposes the original error without a task", () => {
+	const error = "error: 工具 Agent 执行失败: AttributeError: 'NoneType' object has no attribute 'session_uuid'";
+	const event = {
+		kind: "tool",
+		toolName: "Agent",
+		calls: [{name: "Agent", arguments: JSON.stringify({description: "sheet", prompt: "work"})}],
+		result: {content: error},
+		live: false,
+		operation: {status: "failed", lifecycle: "terminal"},
+		livePayload: {status: "failed", taskUuid: "", resultText: error},
+	};
+	const state = display.agentDisplayState(event);
+	assert.equal(state.summary.cls, "error");
+	assert.equal(isActiveAgentEvent(event, state), false);
+	assert.equal(state.rows[0].taskUuid, "");
+	assert.equal(state.rows[0].current, "启动失败");
+	assert.equal(display.agentRowOutputSection(state.rows[0]).text, error);
+	const queued = {...event, live: true, result: null, livePayload: {status: "queued"}};
+	assert.equal(display.agentRows(queued)[0].hasOutput, false);
 });
 
 

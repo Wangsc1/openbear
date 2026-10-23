@@ -12,6 +12,12 @@ from app.interaction_data import explicit_authorization
 from app.logging import get_logger
 from app.mcp.audit import record_audit
 from app.mcp.client import MCPClient
+from app.mcp.exposure import (
+    MCPExposureApprovals,
+    MCPExposureNotAuthorized,
+    digest,
+    exposure_summary,
+)
 from app.mcp.output import format_mcp_result, redact_text_secrets
 from app.mcp.permissions import (
     agent_access_reason,
@@ -40,9 +46,11 @@ class MCPManager:
         db: Any = None,
         approval_updater: Callable[[str, str], Awaitable[Any]] | None = None,
         tools_changed_callback: Callable[[], Awaitable[Any]] | None = None,
+        exposure_approvals: MCPExposureApprovals | None = None,
     ) -> None:
         self.config = config
         self.mcp_config = config.mcp
+        self.exposure_approvals = exposure_approvals or MCPExposureApprovals()
         self.interactions = interactions
         self.db = db
         self.approval_updater = approval_updater
@@ -63,10 +71,25 @@ class MCPManager:
         self._draining_servers: set[str] = set()
         self._started = False
         self._closed = False
+        self._startup_tasks: set[asyncio.Task[None]] = set()
+        self._startup_generation = 0
+        self._lifecycle_lock = asyncio.Lock()
+        self._close_task: asyncio.Task[None] | None = None
+        self._prepared_managers: set[MCPManager] = set()
 
-    async def start(self) -> None:
+    async def start(
+        self, *, defer_optional: bool = False, startup_ready: asyncio.Event | None = None,
+    ) -> None:
+        """Start required dependencies now; optionally defer others until core readiness.
+
+        The default still waits for every server, including during hot reload.
+        Deferred connections and their publication callbacks belong to this manager
+        and are joined on close or before a replacement generation is committed.
+        """
         if self._started:
             return
+        if self._closed:
+            raise RuntimeError("mcp_manager_closed")
         self._started = True
         self._closed = False
         if not self.mcp_config.enabled:
@@ -74,19 +97,37 @@ class MCPManager:
             return
         tasks = []
         for server_key, server_config in self.mcp_config.servers.items():
+            self._states[server_key] = MCPServerState(
+                key=server_key,
+                transport=server_config.transport,
+                status="pending" if server_config.enabled else "disabled",
+                required=server_config.required,
+                approval=_server_approval(self.mcp_config, server_config),
+            )
             if not server_config.enabled:
-                self._states[server_key] = MCPServerState(
-                    key=server_key,
-                    transport=server_config.transport,
-                    status="disabled",
-                    required=server_config.required,
-                    approval=_server_approval(self.mcp_config, server_config),
-                )
                 continue
-            tasks.append(self._start_one(server_key, server_config))
+            deferred = defer_optional and not server_config.required
+            task = asyncio.create_task(
+                self._start_optional(server_key, server_config, startup_ready)
+                if deferred else self._start_one(server_key, server_config),
+                name=f"mcp-start-{server_key}",
+            )
+            self._startup_tasks.add(task)
+            task.add_done_callback(self._startup_tasks.discard)
+            if not deferred:
+                tasks.append(task)
         if not tasks:
             return
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            await self.close()
+            raise
+        # A concurrent close can cancel individual connections without cancelling
+        # the caller's gather. Do not report that interrupted startup as success.
+        if any(isinstance(item, asyncio.CancelledError) for item in results):
+            await self.close()
+            raise asyncio.CancelledError
         required_errors = [str(item) for item in results if isinstance(item, Exception)]
         if required_errors:
             # Required server startup may fail after other MCP child processes have
@@ -95,8 +136,30 @@ class MCPManager:
             await self.close()
             raise RuntimeError("; ".join(required_errors))
 
+    async def _start_optional(
+        self, server_key: str, server_config: MCPServerConfig,
+        startup_ready: asyncio.Event | None,
+    ) -> None:
+        generation = self._startup_generation
+        try:
+            if startup_ready is not None:
+                await startup_ready.wait()
+            if self._closed or generation != self._startup_generation:
+                return
+            await self._start_one(server_key, server_config)
+            if (not self._closed and generation == self._startup_generation
+                    and server_key in self._clients and self.tools_changed_callback is not None):
+                await self.tools_changed_callback()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Observe background publication errors after core startup returned.
+            log.warning("mcp.tools.publish_failed", server=server_key, error=_short_error(exc))
+            await record_audit(self.db, "mcp.tools.publish_failed", detail={"server": server_key, "error": _short_error(exc)})
+
     async def _start_one(self, server_key: str, server_config: MCPServerConfig) -> None:
-        self._states[server_key] = MCPServerState(
+        generation = self._startup_generation
+        state = self._states[server_key] = MCPServerState(
             key=server_key,
             transport=server_config.transport,
             status="pending",
@@ -104,13 +167,15 @@ class MCPManager:
             approval=_server_approval(self.mcp_config, server_config),
         )
         log.info("mcp.server.starting", server=server_key, transport=server_config.transport, required=server_config.required)
-        client = MCPClient(server_key, server_config.model_copy(update={
-            "tool_call_timeout_s": server_config.tool_call_timeout_s or self.mcp_config.tool_call_timeout_s,
-        }))
-        client.set_notification_handler(
-            lambda method, params, key=server_key: self._handle_server_notification(key, method, params)
-        )
+        client = None
+        completed = False
         try:
+            client = MCPClient(server_key, server_config.model_copy(update={
+                "tool_call_timeout_s": server_config.tool_call_timeout_s or self.mcp_config.tool_call_timeout_s,
+            }))
+            client.set_notification_handler(
+                lambda method, params, key=server_key: self._handle_server_notification(key, method, params)
+            )
             connect_timeout_s = float(server_config.connect_timeout_s or self.mcp_config.startup_timeout_s)
             client_connect_timeout_s = float(server_config.connect_timeout_s or 20)
             await asyncio.wait_for(
@@ -119,12 +184,11 @@ class MCPManager:
             )
             raw_tools = await asyncio.wait_for(client.list_tools(), timeout=connect_timeout_s)
             raw_prompts = await self._list_prompts(client, timeout_s=connect_timeout_s)
-            visible = 0
             async with self._registry_lock:
-                self._prompts[server_key] = raw_prompts
-                if client.instructions:
-                    self._server_instructions[server_key] = client.instructions
+                if self._closed or generation != self._startup_generation:
+                    raise asyncio.CancelledError
                 used = set(self._tools.keys())
+                discovered = []
                 for raw_tool in raw_tools:
                     meta = build_tool_meta(
                         self.mcp_config,
@@ -133,7 +197,7 @@ class MCPManager:
                         raw_tool=raw_tool,
                         used_names=used,
                     )
-                    self._all_tools.append(meta)
+                    discovered.append(meta)
                     if meta.filtered:
                         log.info(
                             "mcp.tool.filtered",
@@ -142,40 +206,50 @@ class MCPManager:
                             public=meta.public_name,
                             reason=meta.filter_reason,
                         )
-                        continue
-                    self._tools[meta.public_name] = meta
-                    visible += 1
-            self._clients[server_key] = client
-            self._states[server_key] = MCPServerState(
-                key=server_key,
-                transport=server_config.transport,
-                status="connected",
-                tool_count=visible,
-                required=server_config.required,
-                last_connected_at=time.time(),
-                approval=_server_approval(self.mcp_config, server_config),
-            )
+                # Publish complete discovery together with the callable client.
+                await self._gate_exposure(server_key, discovered, state)
+                visible = sum(not meta.filtered for meta in discovered)
+                self._all_tools.extend(discovered)
+                self._tools.update({meta.public_name: meta for meta in discovered if not meta.filtered})
+                self._prompts[server_key] = raw_prompts
+                if client.instructions:
+                    self._server_instructions[server_key] = client.instructions
+                self._clients[server_key] = client
+                state.tool_count = visible
+                state.last_connected_at = time.time()
             log.info("mcp.server.connected", server=server_key, transport=server_config.transport, tools=visible, prompts=len(raw_prompts))
             log.info("mcp.tools.discovered", server=server_key, total=len(raw_tools), visible=visible)
             if raw_prompts:
                 log.info("mcp.prompts.discovered", server=server_key, total=len(raw_prompts))
             await record_audit(self.db, "mcp.server.started", detail={"server": server_key, "transport": server_config.transport, "tools": visible, "prompts": len(raw_prompts)})
+            completed = True
+        except asyncio.CancelledError:
+            state.status = "stopped"
+            state.tool_count = 0
+            raise
         except Exception as exc:
-            await client.close()
             err = _short_error(exc)
-            self._states[server_key] = MCPServerState(
-                key=server_key,
-                transport=server_config.transport,
-                status="failed",
-                required=server_config.required,
-                error=err,
-                last_failed_at=time.time(),
-                approval=_server_approval(self.mcp_config, server_config),
-            )
+            state.status = "failed"
+            state.tool_count = 0
+            state.error = err
+            state.last_failed_at = time.time()
             log.warning("mcp.server.failed", server=server_key, transport=server_config.transport, required=server_config.required, error=err)
             await record_audit(self.db, "mcp.server.failed", detail={"server": server_key, "transport": server_config.transport, "error": err})
             if server_config.required:
                 raise RuntimeError(f"required MCP server {server_key} failed: {err}") from exc
+        finally:
+            if client is not None and not completed:
+                if self._clients.get(server_key) is client:
+                    self._clients.pop(server_key)
+                    self._tools = {name: meta for name, meta in self._tools.items() if meta.server_key != server_key}
+                    self._all_tools = [meta for meta in self._all_tools if meta.server_key != server_key]
+                    self._prompts.pop(server_key, None)
+                    self._server_instructions.pop(server_key, None)
+                # CancelledError is not an Exception. Clients cancelled before
+                # entering _clients also own transports that must be closed.
+                await _wait_for_cleanup(asyncio.create_task(
+                    _close_clients([(server_key, client)]), name=f"mcp-start-cleanup-{server_key}",
+                ))
 
     async def _list_prompts(self, client: MCPClient, *, timeout_s: float) -> list[dict[str, Any]]:
         """Best-effort prompt discovery for management UI.
@@ -199,7 +273,7 @@ class MCPManager:
         params: dict[str, Any],
     ) -> None:
         del params
-        if method != "notifications/tools/list_changed":
+        if self._closed or method != "notifications/tools/list_changed":
             return
         try:
             await self.refresh_server_tools(server_key)
@@ -227,7 +301,7 @@ class MCPManager:
                 cfg = self.mcp_config.servers[server_key]
                 raw_tools = await asyncio.wait_for(client.list_tools(), timeout=float(cfg.connect_timeout_s or self.mcp_config.startup_timeout_s))
                 async with self._registry_lock:
-                    if self._clients.get(server_key) is not client:
+                    if self._closed or self._clients.get(server_key) is not client:
                         raise ValueError("mcp_refresh_superseded")
                     cfg = self.mcp_config.servers[server_key]
                     previous_all, previous_tools = self._all_tools, self._tools
@@ -241,8 +315,13 @@ class MCPManager:
                         if raw.name in old_names:
                             meta.public_name = old_names[raw.name]
                             allowed, reason = is_tool_allowed(self.mcp_config, cfg, server_key=server_key, raw_tool_name=raw.name, public_tool_name=meta.public_name)
+                            meta.enabled = allowed
                             meta.filtered, meta.filter_reason = not allowed, reason
                         replacements.append(meta)
+                    state = self._states.get(server_key)
+                    previous_state = state.model_copy(deep=True) if state is not None else None
+                    if state is not None:
+                        await self._gate_exposure(server_key, replacements, state)
                     changed = old != replacements
                     by_server = {key: [m for m in retained if m.server_key == key] for key in self.mcp_config.servers}
                     by_server[server_key] = replacements
@@ -259,13 +338,45 @@ class MCPManager:
                     async with self._registry_lock:
                         if self._clients.get(server_key) is client and self._all_tools is published:
                             self._all_tools, self._tools = previous_all, previous_tools
-                            if state is not None:
-                                state.tool_count = sum(not meta.filtered for meta in old)
+                            if previous_state is not None:
+                                self._states[server_key] = previous_state
                     raise
                 await record_audit(self.db, "mcp.tools.list_changed", detail={"server": server_key, "total": len(replacements), "changed": changed})
                 return {"ok": True, "server": server_key, "changed": changed, "totalTools": len(replacements)}
             finally:
                 await self._end_server_call(server_key)
+
+    async def _gate_exposure(self, key: str, tools: list[MCPToolMeta], state: MCPServerState) -> None:
+        row = exposure_summary(self.mcp_config, key, tools)
+        approved = await self.exposure_approvals.is_approved(self.mcp_config, key, row["fingerprint"])
+        pending = row["exceeded"] and not approved
+        state.status = "awaiting_confirmation" if pending else "connected"
+        state.enabled_tool_count = row["enabledTools"]
+        state.total_tool_count = row["totalTools"]
+        state.definition_bytes = row["definitionBytes"]
+        state.exposure_fingerprint = row["fingerprint"]
+        for meta in tools:
+            if meta.enabled:
+                meta.filtered = bool(pending)
+                meta.filter_reason = "awaiting_confirmation" if pending else "allowed"
+        state.tool_count = sum(not meta.filtered for meta in tools)
+
+    def exposure_warnings(self) -> list[dict[str, Any]]:
+        rows = []
+        for key in self.mcp_config.servers:
+            tools = [meta for meta in self._all_tools if meta.server_key == key]
+            if tools:
+                row = exposure_summary(self.mcp_config, key, tools)
+                if row["exceeded"]:
+                    rows.append(row)
+        return rows
+
+    async def apply_exposure_approvals(self) -> None:
+        async with self._registry_lock:
+            for key, state in self._states.items():
+                if key in self._clients:
+                    await self._gate_exposure(key, [m for m in self._all_tools if m.server_key == key], state)
+            self._tools = {m.public_name: m for m in self._all_tools if not m.filtered}
 
     def agent_tool_unavailable_reason(self, public_name: str) -> str:
         meta = next((m for m in self._all_tools if m.public_name == public_name), None)
@@ -311,24 +422,43 @@ class MCPManager:
             self.mcp_config = config.mcp
         # Clients, main-session grants and in-flight calls are untouched.
 
-    async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        clients = list(self._clients.items())
-        self._clients.clear()
-        for server_key, client in clients:
-            try:
-                await client.close()
-            except Exception as exc:
-                log.warning("mcp.server.close_failed", server=server_key, error=_short_error(exc))
-            state = self._states.get(server_key)
-            if state is not None:
+    async def _cancel_startup_tasks(self) -> None:
+        self._startup_generation += 1
+        tasks = list(self._startup_tasks)
+        for task in tasks:
+            if not task.done() and not task.cancelling():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._startup_tasks.difference_update(tasks)
+        for state in self._states.values():
+            if state.status == "pending":
                 state.status = "stopped"
-            log.info("mcp.server.stopped", server=server_key)
-            await record_audit(self.db, "mcp.server.stopped", detail={"server": server_key})
 
-    async def prepare_reload(self, config: Config) -> tuple[Callable[[], Awaitable[None]], Callable[[], Awaitable[None]]]:
+    async def close(self) -> None:
+        # _closed rejects publication immediately; all callers still wait for the
+        # same cleanup, including callers cancelled while shutdown is in progress.
+        self._closed = True
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close_resources(), name="mcp-manager-close")
+        await _wait_for_cleanup(self._close_task)
+
+    async def _close_resources(self) -> None:
+        async with self._lifecycle_lock:
+            await self._cancel_startup_tasks()
+            prepared = list(self._prepared_managers)
+            if prepared:
+                await asyncio.gather(*(manager.close() for manager in prepared))
+                self._prepared_managers.difference_update(prepared)
+            clients = list(self._clients.items())
+            self._clients.clear()
+            await _close_clients(clients, db=self.db)
+            for server_key, _client in clients:
+                state = self._states.get(server_key)
+                if state is not None:
+                    state.status = "stopped"
+
+    async def prepare_reload(self, config: Config, *, exposure_confirmation: Callable[..., Awaitable[dict[str, Any]]] | None = None) -> tuple[Callable[[], Awaitable[None]], Callable[[], Awaitable[None]]]:
         """Prepare a hot reload and return ``(commit, abort)`` callbacks.
 
         The current manager is left untouched while this method starts new MCP
@@ -337,39 +467,53 @@ class MCPManager:
         active.  If a prepared reload is superseded before commit, call ``abort`` to
         close the fresh-but-unused clients.
         """
-        if self.access_only_change(config) and self.config.mcp != config.mcp:
+        if self._closed:
+            raise RuntimeError("mcp_manager_closed")
+        if exposure_confirmation is None and self.access_only_change(config) and self.config.mcp != config.mcp:
             async def commit_access() -> None:
-                await self.apply_agent_access_config(config)
+                async with self._lifecycle_lock:
+                    if self._closed:
+                        raise RuntimeError("mcp_manager_closed")
+                    await self.apply_agent_access_config(config)
 
             async def abort_access() -> None:
                 return None
 
             return commit_access, abort_access
         if not config.mcp.enabled:
+            if exposure_confirmation is not None:
+                answer = await exposure_confirmation([], digest(config.mcp.model_dump(mode="json")))
+                if not explicit_authorization(answer):
+                    raise MCPExposureNotAuthorized(answer)
             async def commit_disabled() -> None:
-                old_clients = list(self._clients.items())
-                self.config = config
-                self.mcp_config = config.mcp
-                self._clients = {}
-                self._tools = {}
-                self._all_tools = []
-                self._prompts = {}
-                self._server_instructions = {}
-                self._conversation_grants.clear()
-                self._states = {
-                    key: MCPServerState(
-                        key=key,
-                        transport=cfg.transport,
-                        status="disabled",
-                        required=cfg.required,
-                        approval=_server_approval(config.mcp, cfg),
-                    )
-                    for key, cfg in config.mcp.servers.items()
-                }
-                self._started = True
-                self._closed = False
-                await _close_clients(old_clients, db=self.db)
-                await record_audit(self.db, "mcp.reload.disabled", detail={"servers": len(config.mcp.servers)})
+                async with self._lifecycle_lock:
+                    if self._closed:
+                        raise RuntimeError("mcp_manager_closed")
+                    await _wait_for_cleanup(asyncio.create_task(self._cancel_startup_tasks()))
+                    if self._closed:
+                        raise RuntimeError("mcp_manager_closed")
+                    old_clients = list(self._clients.items())
+                    self.config = config
+                    self.mcp_config = config.mcp
+                    self._clients = {}
+                    self._tools = {}
+                    self._all_tools = []
+                    self._prompts = {}
+                    self._server_instructions = {}
+                    self._conversation_grants.clear()
+                    self._states = {
+                        key: MCPServerState(
+                            key=key,
+                            transport=cfg.transport,
+                            status="disabled",
+                            required=cfg.required,
+                            approval=_server_approval(config.mcp, cfg),
+                        )
+                        for key, cfg in config.mcp.servers.items()
+                    }
+                    self._started = True
+                    await _wait_for_cleanup(asyncio.create_task(_close_clients(old_clients, db=self.db)))
+                    await record_audit(self.db, "mcp.reload.disabled", detail={"servers": len(config.mcp.servers)})
 
             async def abort_disabled() -> None:
                 return None
@@ -381,55 +525,93 @@ class MCPManager:
             interactions=self.interactions,
             db=self.db,
             approval_updater=self.approval_updater,
+            exposure_approvals=self.exposure_approvals,
         )
+        self._prepared_managers.add(fresh)
+
+        async def abort_fresh() -> None:
+            try:
+                await fresh.close()
+            finally:
+                self._prepared_managers.discard(fresh)
+
         try:
             await fresh.start()
-        except asyncio.CancelledError:
-            await fresh.close()
-            raise
-        except Exception:
-            await fresh.close()
+            if exposure_confirmation is not None:
+                rows = fresh.exposure_warnings()
+                answer = await exposure_confirmation(rows, digest(config.mcp.model_dump(mode="json")))
+                if not explicit_authorization(answer):
+                    raise MCPExposureNotAuthorized(answer)
+                if rows != fresh.exposure_warnings():
+                    raise MCPExposureNotAuthorized({"status": "error", "error": "mcp_tools_changed_during_confirmation"})
+                await self.exposure_approvals.approve(rows)
+                await fresh.apply_exposure_approvals()
+            if self._closed:
+                raise RuntimeError("mcp_manager_closed")
+        except (asyncio.CancelledError, Exception):
+            await abort_fresh()
             raise
 
         # Optional servers are allowed to fail during a cold start, but an atomic hot
         # reload must not replace an already-healthy server with a failed generation.
-        failed_replacements = sorted(
-            key
-            for key, state in fresh._states.items()
-            if state.status == "failed" and key in self._clients
-        )
-        if failed_replacements:
-            await fresh.close()
-            joined = ", ".join(failed_replacements)
-            raise RuntimeError(f"MCP reload would replace healthy server(s) with failed generation: {joined}")
+        def check_replacements() -> None:
+            failed_replacements = sorted(
+                key
+                for key, state in fresh._states.items()
+                if state.status == "failed" and key in self._clients
+            )
+            if failed_replacements:
+                joined = ", ".join(failed_replacements)
+                raise RuntimeError(f"MCP reload would replace healthy server(s) with failed generation: {joined}")
+
+        try:
+            check_replacements()
+        except Exception:
+            await abort_fresh()
+            raise
 
         async def commit_fresh() -> None:
-            old_clients = list(self._clients.items())
-            self.config = config
-            self.mcp_config = config.mcp
-            self._clients = fresh._clients
-            for server_key, client in self._clients.items():
-                client.set_notification_handler(
-                    lambda method, params, key=server_key: self._handle_server_notification(key, method, params)
-                )
-            self._states = fresh._states
-            self._tools = fresh._tools
-            self._all_tools = fresh._all_tools
-            self._prompts = fresh._prompts
-            self._server_instructions = fresh._server_instructions
-            # A grant is valid only for the exact MCP config/transport generation in
-            # which the user approved it. Reloading clears all ephemeral grants.
-            self._conversation_grants.clear()
-            self._started = fresh._started
-            self._closed = False
-            # Ownership moved to this manager; prevent accidental double-close if a
-            # future cleanup touches the temporary object.
-            fresh._clients = {}
-            await _close_clients(old_clients, db=self.db)
-            await record_audit(self.db, "mcp.reload.completed", detail={"servers": len(config.mcp.servers), "tools": len(self._tools)})
-
-        async def abort_fresh() -> None:
-            await fresh.close()
+            try:
+                async with self._lifecycle_lock:
+                    if self._closed:
+                        raise RuntimeError("mcp_manager_closed")
+                    if fresh not in self._prepared_managers or fresh._closed:
+                        raise RuntimeError("mcp_reload_superseded")
+                    # A deferred old server may have become healthy since prepare.
+                    check_replacements()
+                    # Preparation leaves current connections untouched. Only the
+                    # commit boundary retires gate waiters, discovery and callbacks.
+                    await _wait_for_cleanup(asyncio.create_task(self._cancel_startup_tasks()))
+                    if self._closed:
+                        raise RuntimeError("mcp_manager_closed")
+                    if fresh not in self._prepared_managers or fresh._closed:
+                        raise RuntimeError("mcp_reload_superseded")
+                    check_replacements()
+                    old_clients = list(self._clients.items())
+                    self.config = config
+                    self.mcp_config = config.mcp
+                    self._clients = fresh._clients
+                    for server_key, client in self._clients.items():
+                        client.set_notification_handler(
+                            lambda method, params, key=server_key: self._handle_server_notification(key, method, params)
+                        )
+                    self._states = fresh._states
+                    self._tools = fresh._tools
+                    self._all_tools = fresh._all_tools
+                    self._prompts = fresh._prompts
+                    self._server_instructions = fresh._server_instructions
+                    # Grants only authorize the exact config/transport generation.
+                    self._conversation_grants.clear()
+                    self._started = fresh._started
+                    # Ownership moved; abort/close of the temporary manager must
+                    # not close the adopted clients.
+                    fresh._clients = {}
+                    self._prepared_managers.discard(fresh)
+                    await _wait_for_cleanup(asyncio.create_task(_close_clients(old_clients, db=self.db)))
+                    await record_audit(self.db, "mcp.reload.completed", detail={"servers": len(config.mcp.servers), "tools": len(self._tools)})
+            except (asyncio.CancelledError, Exception):
+                await abort_fresh()
+                raise
 
         return commit_fresh, abort_fresh
 
@@ -478,7 +660,7 @@ class MCPManager:
         return [
             {"server": key, "instructions": value}
             for key, value in self._server_instructions.items()
-            if value.strip()
+            if value.strip() and self._states.get(key) and self._states[key].status == "connected"
         ]
 
     async def begin_server_uninstall(self, server_key: str) -> tuple[bool, int]:
@@ -700,6 +882,23 @@ class MCPManager:
         except Exception as exc:
             log.warning("mcp.tool.trust_persist_failed", server=meta.server_key, error=_short_error(exc))
             await record_audit(self.db, "mcp.server.approval.update_failed", actor=_actor(context), chat_id=context.chat_id, detail={"server": meta.server_key, "approval": "allow", "source": "confirmation", "error": _short_error(exc)})
+
+
+async def _wait_for_cleanup(task: asyncio.Task[None]) -> None:
+    """Join owned resource cleanup even under repeated caller cancellation."""
+    cancelled = None
+    try:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                if task.cancelled():
+                    raise
+                cancelled = exc
+        task.result()
+    finally:
+        if cancelled is not None:
+            raise cancelled
 
 
 async def _close_clients(clients: list[tuple[str, MCPClient]], *, db: Any = None) -> None:

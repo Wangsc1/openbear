@@ -33,9 +33,8 @@ test('phone header reserves its identity width for the title with no path or pro
     assert.equal(css(header,'.header-subtitle',env).display,'none');
     assert.equal(css(header,'.header-title-row',env).flex,'1');
     assert.equal(css(header,'.header-title-row',env).overflow,'hidden');
-    assert.equal(css(header,'.header-properties-dropdown',env).display,'none');
   }
-  for(const selector of ['.header-title-stack','.header-title-row','.header-properties-dropdown']){
+  for(const selector of ['.header-title-stack','.header-title-row']){
     assert.equal(css(header,selector,desktop).display,undefined);
     assert.equal(css(header,selector,{...desktop,width:761}).display,undefined);
   }

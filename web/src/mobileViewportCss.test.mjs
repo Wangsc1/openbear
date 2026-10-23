@@ -5,9 +5,9 @@ import postcss from 'postcss';
 import { parse } from '@vue/compiler-sfc';
 const read = path => fs.readFileSync(new URL(path, import.meta.url), 'utf8');
 const css = path => path.endsWith('.vue') ? parse(read(path)).descriptor.styles.map(style => style.content).join('\n') : read(path);
-const styles = Object.fromEntries(['./App.vue', './style.css', './mobile-inputs.css', './components/ConversationTree.vue', './components/ConversationActivityFolder.vue', './views/consoleView/ConsoleComposer.vue', './views/consoleView/ConsoleView.vue', './references/ReferenceEditor.vue'].map(path => [path, postcss.parse(css(path))]));
+const styles = Object.fromEntries(['./App.vue', './style.css', './mobile-inputs.css', './components/ConversationTree.vue', './views/consoleView/ConsoleComposer.vue', './views/consoleView/ConsoleView.vue', './references/ReferenceEditor.vue'].map(path => [path, postcss.parse(css(path))]));
 const desktop = { width: 1440, height: 900, hover: 'hover', pointer: 'fine' };
-const phone = { width: 390, height: 800, hover: 'none', pointer: 'coarse' };
+const phone = { width: 390, height: 800, hover: 'none', pointer: 'coarse', 'any-pointer': 'coarse', ios: true };
 // This verifies parsed CSS media boundaries/declarations, not simulated browser
 // layout. Geometry/keyboard state and actual event handlers are tested separately.
 function matches(query, env) {
@@ -24,7 +24,11 @@ function declarations(path, selector, env) {
   const result = {};
   styles[path].walkRules(rule => {
     if (!rule.selectors.includes(selector)) return;
-    for (let parent = rule.parent; parent; parent = parent.parent) if (parent.type === 'atrule' && parent.name === 'media' && !matches(parent.params, env)) return;
+    for (let parent = rule.parent; parent; parent = parent.parent) {
+      if (parent.type !== 'atrule') continue;
+      if (parent.name === 'media' && !matches(parent.params, env)) return;
+      if (parent.name === 'supports' && parent.params === '(-webkit-touch-callout: none)' && !env.ios) return;
+    }
     rule.walkDecls(decl => { result[decl.prop] = decl.value; });
   });
   return result;
@@ -89,31 +93,6 @@ test('standalone chat with keyboard hidden uses only 16px of the bottom safe are
   assert.equal(declarations('./style.css', 'html[data-openbear-mobile-viewport][data-openbear-keyboard] .app-shell', phone)['padding-bottom'], '0');
 });
 
-test('mobile recents keep title and status on one 44px row and reserve more height for the tree without changing desktop', () => {
-  const path = './components/ConversationActivityFolder.vue';
-  for (const env of [phone, {...phone, width: 320}, {...phone, width: 844, height: 390}]) {
-    const row = declarations(path, '.activity-row-open', env);
-    assert.equal(row.height, '44px'); assert.equal(row['min-height'], '44px'); assert.equal(row.padding, '0 6px');
-    assert.equal(declarations(path, '.activity-row-copy', env)['flex-direction'], 'row');
-    const title = declarations(path, '.activity-row-title', env);
-    assert.equal(title['white-space'], 'nowrap'); assert.equal(title['text-overflow'], 'ellipsis');
-    assert.equal(title.display, 'block'); assert.equal(title['-webkit-line-clamp'], undefined);
-    const status = declarations(path, '.activity-row-status-touch', env);
-    assert.equal(status.display, 'block'); assert.equal(status['white-space'], 'nowrap');
-    assert.equal(declarations(path, '.activity-folder', env)['max-height'], '40%');
-    const content = declarations(path, '.activity-folder-content', env);
-    assert.equal(content['max-height'], 'min(28dvh, 220px)'); assert.equal(content['overflow-y'], 'auto');
-    for (const selector of ['.activity-row-read', '.activity-row-more']) {
-      const action = declarations(path, selector, env);
-      assert.equal(action.width, '44px'); assert.equal(action.height, '44px');
-    }
-  }
-  assert.equal(declarations(path, '.activity-row-open', desktop).height, '29px');
-  assert.equal(declarations(path, '.activity-row-copy', desktop).display, 'contents');
-  assert.equal(declarations(path, '.activity-row-status-touch', desktop).display, 'none');
-  assert.equal(declarations(path, '.activity-folder-content', desktop)['max-height'], 'min(32vh, 260px)');
-});
-
 test('touch targets are 44px with persistent remove/More visibility, zoom-safe input sizes and unchanged small icons', () => {
   for (const env of [phone, { ...phone, width: 1024 }, { ...desktop, width: 600 }]) {
     const composer = './views/consoleView/ConsoleComposer.vue';
@@ -127,7 +106,7 @@ test('touch targets are 44px with persistent remove/More visibility, zoom-safe i
       assert.equal(declarations(composer, `:deep(${selector})`, env)['font-size'], undefined, 'the shared input policy owns mobile typography');
       assert.equal(declarations('./references/ReferenceEditor.vue', selector, desktop)['font-size'], '14px', 'desktop retains its original editor and placeholder size');
       const mobileSelector = selector === '.reference-editor-content' ? '[contenteditable]:not([contenteditable="false"])' : selector;
-      assert.equal(declarations('./mobile-inputs.css', mobileSelector, env)['font-size'], 'var(--ob-chat-input-font-size, 16px)', 'actual editable node and placeholder retain the 16px mobile fallback; desktop overrides are scoped separately');
+      assert.equal(declarations('./mobile-inputs.css', mobileSelector, env)['font-size'], env.ios ? '16px' : undefined, 'iOS retains zoom-safe inputs; a narrow desktop window does not force mobile typography');
     }
     assert.equal(declarations('./components/ConversationTree.vue', '.tree-touch-more', env).display, 'grid');
     assert.equal(declarations('./components/ConversationTree.vue', '.tree-context-menu button', env)['min-height'], '44px');

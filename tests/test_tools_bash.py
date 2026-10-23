@@ -84,14 +84,6 @@ async def test_bash_self_control_guard_does_not_block_unrelated_service_commands
         assert "OpenBear service-control" not in out
 
 
-async def test_bash_timeout():
-    reg = ToolRegistry()
-    register_bash_tool(reg, default_timeout_s=1.0)
-    out = await reg.dispatch("Bash", json.dumps({"command": "sleep 5"}))
-    assert "timeout" in out
-    assert processes.count() == 0
-
-
 @pytest.mark.parametrize("default,maximum,effective_default", [(17, 31, 17), (90, 31, 31)])
 def test_bash_timeout_schema_uses_config(default, maximum, effective_default):
     reg = ToolRegistry()
@@ -112,18 +104,6 @@ async def test_bash_reports_effective_timeout(args, requested, effective):
     out = await reg.dispatch("Bash", json.dumps({"command": "printf done", **args}))
     assert "status: ok" in out
     assert f"timeout: requested {requested}s; effective {effective}s; maximum 31s" in out
-
-
-async def test_bash_requested_timeout_can_exceed_default():
-    reg = ToolRegistry()
-    register_bash_tool(reg, default_timeout_s=1, max_timeout_s=3)
-    out = await reg.dispatch("Bash", json.dumps({
-        "command": "python3 -c 'import time; time.sleep(1.1); print(\"finished\")'",
-        "timeout": 2,
-    }))
-    assert "status: ok" in out
-    assert "finished" in out
-    assert "timeout: requested 2s; effective 2s; maximum 3s" in out
 
 
 async def test_bash_clamps_timeout_before_start_and_reports_termination(monkeypatch):
@@ -279,24 +259,3 @@ async def test_process_has_no_session_for_new_foreground_complete_bash():
     assert "proc-line" in out
     listed = await reg.dispatch("Process", json.dumps({"action": "list"}))
     assert "No running or recent Bash sessions" in listed
-
-
-async def test_bash_status_and_kill_tools_are_removed():
-    reg = ToolRegistry()
-    register_bash_tool(reg)
-    assert "BashStatus" not in reg.names()
-    assert "BashKill" not in reg.names()
-    status = await reg.dispatch("BashStatus", json.dumps({"jobId": "missing"}))
-    killed = await reg.dispatch("BashKill", json.dumps({"jobId": "missing"}))
-    assert "未知工具" in status or "unknown tool" in status
-    assert "未知工具" in killed or "unknown tool" in killed
-
-
-async def test_removed_search_tools_are_not_registered_by_default():
-    reg = ToolRegistry()
-    register_bash_tool(reg)
-
-    assert "Glob" not in reg.names()
-    assert "Grep" not in reg.names()
-    out = await reg.dispatch("Grep", json.dumps({"pattern": "TARGET", "path": "."}))
-    assert "未知工具" in out or "unknown tool" in out

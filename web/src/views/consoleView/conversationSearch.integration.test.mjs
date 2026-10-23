@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import {parse} from '@vue/compiler-sfc';
 import {markRaw, nextTick, reactive, ref, toRaw, watch} from 'vue';
 import {mergeOperationSnapshots, findTurnIndexByIdentity, stableTurnIdentity} from './timelinePagination.js';
-import {applyOperationFrame, isRootRunTerminalFrame, isTerminalOperationFrame, normalizeOperations} from '../../timelineProjection.js';
+import {applyOperationFrame, isRootRunTerminalFrame, isTerminalOperationFrame, normalizeOperations, preferNewerLiveOperations} from '../../timelineProjection.js';
 
 const source = fs.readFileSync(new URL('./ConsoleView.vue', import.meta.url), 'utf8');
 function between(start, end) {
@@ -201,7 +201,7 @@ test('actual operation-frame projection keeps an unlocked search reader at the o
 });
 
 test('actual state refresh merges the historical search window with authoritative newer operations and preserves its frame cursor', () => {
-  const context=vm.createContext({ref,markRaw,toRaw,normalizeOperations,mergeOperationSnapshots,
+  const context=vm.createContext({ref,markRaw,toRaw,normalizeOperations,mergeOperationSnapshots,preferNewerLiveOperations,
     stateStatsByOpId:new Map(),operationsById:ref(new Map()),orderedOpIds:ref([]),
     revisionByOpId:ref(new Map()),lastFrameSeq:ref(0),searchWindowActive:ref(true),searchBaseOperationIds:new Set()});
   vm.runInContext(`function orderedOperationsList() { return orderedOpIds.value.map(id=>operationsById.value.get(id)).filter(Boolean); }

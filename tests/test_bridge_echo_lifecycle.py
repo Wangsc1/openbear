@@ -6,6 +6,7 @@ import json
 import pytest
 
 from app.agent.loop import Agent
+from app.agent.transcript_repair import LEGACY_ROLE_ALTERNATION_BRIDGE_TEXT as LEGACY_MARKER
 from app.agent.transcript_repair import ROLE_ALTERNATION_BRIDGE_TEXT as MARKER
 from app.llm.anthropic import _to_anthropic
 from app.llm.events import StreamEvent, ToolCall, Usage
@@ -38,11 +39,13 @@ def answers(rows):
             if row['op_type'] == 'assistant_message']
 
 
+@pytest.mark.parametrize('marker', [LEGACY_MARKER, MARKER])
 @pytest.mark.parametrize('steering', [False, True])
 @pytest.mark.parametrize('with_reasoning', [False, True])
 async def test_fragmented_bridge_never_enters_web_frames_or_steering_timeline(
-    presentation, steering, with_reasoning,
+    presentation, steering, with_reasoning, marker,
 ):
+    MARKER = marker
     renderer, db, events = presentation
     queued = []
 
@@ -79,11 +82,13 @@ async def test_fragmented_bridge_never_enters_web_frames_or_steering_timeline(
     assert MARKER not in json.dumps(persister.checkpoints)
 
 
+@pytest.mark.parametrize('marker', [LEGACY_MARKER, MARKER])
 @pytest.mark.parametrize('protocol', ['anthropic', 'responses'])
 @pytest.mark.parametrize('with_reasoning', [False, True])
 async def test_exhausted_bridge_drops_whole_native_turn_and_cannot_replay(
-    presentation, protocol, with_reasoning,
+    presentation, protocol, with_reasoning, marker,
 ):
+    MARKER = marker
     renderer, db, events = presentation
     if protocol == 'anthropic':
         native = [{'type': 'text', 'text': MARKER}]
@@ -122,7 +127,10 @@ async def test_exhausted_bridge_drops_whole_native_turn_and_cannot_replay(
     assert all(MARKER not in text for text in answers(await operations(db)))
 
 
-@pytest.mark.parametrize('text', ['[', '[protocol:', MARKER + ' is a protocol marker'])
+@pytest.mark.parametrize('text', [
+    '[', '[protocol:', '[openbear internal',
+    LEGACY_MARKER + ' is a protocol marker', MARKER + ' is a protocol marker',
+])
 @pytest.mark.parametrize('steering', [False, True])
 async def test_held_prefix_and_normal_marker_mentions_are_not_lost(presentation, text, steering):
     renderer, db, _ = presentation

@@ -57,6 +57,12 @@ async def seed():
     if '--legacy-terminal-time' in sys.argv[3:]:
         from legacy_terminal_time import seed_legacy_terminal_time
         await seed_legacy_terminal_time(db, row['conversation_uuid'])
+    from heavy_upgrade import seed_heavy_history
+    try:
+        heavy_history = await seed_heavy_history(db, row['conversation_uuid'])
+    except BaseException:
+        await db.close()
+        raise
     await db.conn.commit()
     await db.close()
     for relative, body in [
@@ -79,8 +85,9 @@ async def seed():
         p = root / rel
         files[rel] = {'sha256': hashlib.sha256(p.read_bytes()).hexdigest(), 'mode': p.stat().st_mode & 0o777}
     result = {'version': installed_version(), 'root': str(root), 'dbPath': str(db_path), 'conversationUuid': row['conversation_uuid'], 'chatId': chat, 'files': files, 'tables': tables, 'additionalChecks': ['legacy-terminal-time'] if '--legacy-terminal-time' in sys.argv[3:] else []}
+    result['heavyHistory'] = heavy_history
     report.write_text(json.dumps(result, ensure_ascii=False, indent=2))
     report.chmod(0o600)
-    print(json.dumps({'seededVersion': result['version'], 'tableCounts': {k:len(v) for k,v in tables.items()}, 'preservedFileCount': len(files)}))
+    print(json.dumps({'seededVersion': result['version'], 'tableCounts': {k:len(v) for k,v in tables.items()}, 'preservedFileCount': len(files), 'historicalFrames': heavy_history['frameCount'], 'historicalPayloadBytes': heavy_history['payloadBytes']}))
 
 asyncio.run(seed())

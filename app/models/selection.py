@@ -9,8 +9,7 @@ from app.logging import get_logger
 
 log = get_logger("models.selection")
 
-# 协议家族：parrot 只支持「openai 家族内」chat ↔ responses 互转；
-# anthropic 自成一家，不能与 openai 家族跨家族切换（parrot 不做这种转换）。
+# 协议家族不限制会话选模；跨模型历史由 OpenBear 的中性上下文重建。
 _PROTOCOL_FAMILY = {
     "chat": "openai",
     "responses": "openai",

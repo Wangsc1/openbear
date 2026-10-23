@@ -1,0 +1,54 @@
+# 阶段 B 第一批（iOS 冒烟）：已登录状态下 会话列表 → 目录视图 → 进入目录 → 打开会话 → 会话面板 → 会话属性（模型配置）
+# → 输入 @mem/ 弹出引用选择器。
+appId: dev.openbear.app
+---
+- extendedWaitUntil:
+    visible:
+      id: conversation-list
+    timeout: 60000
+- takeScreenshot: ios-b-01-recent
+- tapOn: 目录
+- extendedWaitUntil:
+    visible:
+      id: row-folder-6e3f1a24
+    timeout: 20000
+- takeScreenshot: ios-b-02-folders
+- tapOn:
+    id: row-folder-6e3f1a24
+- extendedWaitUntil:
+    visible:
+      id: row-conv-3ff04ebc
+    timeout: 20000
+- takeScreenshot: ios-b-03-folder
+- tapOn:
+    id: row-conv-3ff04ebc
+- extendedWaitUntil:
+    visible:
+      id: composer-input
+    timeout: 30000
+- waitForAnimationToEnd
+- takeScreenshot: ios-b-04-conversation
+# 开发构建的浮动“开发工具”按钮盖在导航栏“⋯”上：先把它拖到左下角
+- swipe:
+    start: 90%, 12%
+    end: 12%, 72%
+    duration: 800
+- waitForAnimationToEnd
+- tapOn:
+    id: more
+- extendedWaitUntil:
+    visible:
+      id: panel-properties
+    timeout: 10000
+- takeScreenshot: ios-b-05-panel
+- tapOn:
+    id: panel-properties
+- extendedWaitUntil:
+    visible: 模型配置
+    timeout: 10000
+- tapOn: 模型配置
+- extendedWaitUntil:
+    visible:
+      id: runcfg-summary
+    timeout: 15000
+- takeScreenshot: ios-b-06-run-config

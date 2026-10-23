@@ -101,11 +101,13 @@ def test_dual_strategy_settings_preserve_summary_and_remove_only_reminder():
     for key in ("agent.compactTimeoutS", "agent.compactPrompt", "agent.manualCompactMinPercent"):
         assert get_spec(key) is not None
     assert get_spec("agent.memoryReminderPrompt") is None
-    spec = get_spec("contextManagement.retainRatio")
-    assert spec is not None and spec.parse("0.15") == 0.15
-    assert len(group_specs("compaction")) == 10
+    assert get_spec("contextManagement.retainRatio") is None
+    spec = get_spec("contextManagement.retainTokens")
+    assert spec is not None and spec.parse("40000") == 40_000
+    assert get_spec("contextManagement.dialogueTokens").parse("0") == 0
+    assert len(group_specs("compaction")) == 12
     with pytest.raises(ValueError):
-        spec.parse("0")
+        spec.parse("10000")
 
 
 def test_agent_and_tool_sections_are_available():
@@ -146,7 +148,10 @@ def test_agent_and_tool_sections_are_available():
     mcp = get_spec("mcp.installDir")
     assert mcp is not None
     assert mcp.default_value == "./mcp-servers"
-    assert [s.title for s in group_specs("mcp")] == ["MCP 安装目录"]
+    assert [s.title for s in group_specs("mcp")] == ["MCP 安装目录", "MCP 工具数量确认阈值", "MCP 定义体积确认阈值"]
+    assert get_spec("mcp.toolCountThreshold").default_value == 30
+    assert get_spec("mcp.definitionSizeThresholdKB").default_value == 64
+    assert get_spec("mcp.toolCountThreshold").parse("0") == 0
     assert [s.title for s in group_specs("interface")] == [
         "显示本轮统计",
     ]

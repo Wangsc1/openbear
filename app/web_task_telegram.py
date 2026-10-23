@@ -17,7 +17,9 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, Teleg
 from app import telegram_ui
 from app.config import Config, WebTaskNotificationsConfig
 from app.db.engine import DB
+from app.db.maintenance import prune_rows
 from app.html_chunking import split_html_chunks
+from app.lifecycle import wait_for_startup
 from app.logging import get_logger
 from app.telegram_ui import send_rich
 from app.web_telegram_replies import bind_message, reply_keyboard
@@ -253,27 +255,18 @@ class WebTaskTelegramNotifier:
 
     async def prune(self, *, keep_days: int = 90) -> tuple[int, int]:
         cutoff = _now() - max(7, int(keep_days)) * 86_400
-        outbox_result = await self.db.conn.execute(
-            """
-            DELETE FROM web_tg_notification_outbox
-            WHERE state IN ('sent','cancelled','failed') AND updated_at<?
-            """,
-            (cutoff,),
+        outbox_deleted = await prune_rows(
+            self, "web_tg_notification_outbox", "state IN ('sent','cancelled','failed') AND updated_at<?", (cutoff,),
         )
-        runs_result = await self.db.conn.execute(
-            """
-            DELETE FROM web_tg_notification_runs
-            WHERE status IN ('completed','failed','interrupted','short')
-              AND updated_at<?
-              AND NOT EXISTS (
-                SELECT 1 FROM web_tg_notification_outbox AS outbox
-                WHERE outbox.root_turn_uuid=web_tg_notification_runs.root_turn_uuid
-              )
-            """,
-            (cutoff,),
+        runs_deleted = await prune_rows(
+            self, "web_tg_notification_runs",
+            """status IN ('completed','failed','interrupted','short') AND updated_at<?
+               AND NOT EXISTS (
+                   SELECT 1 FROM web_tg_notification_outbox AS outbox
+                   WHERE outbox.root_turn_uuid=web_tg_notification_runs.root_turn_uuid
+               )""", (cutoff,),
         )
-        await self.db.conn.commit()
-        return int(runs_result.rowcount or 0), int(outbox_result.rowcount or 0)
+        return runs_deleted, outbox_deleted
 
     async def send_test(self, owner_chat_id: int) -> int:
         owner = int(owner_chat_id or 0)
@@ -533,6 +526,7 @@ class WebTaskTelegramNotifier:
         self._wake.set()
 
     async def _worker_loop(self) -> None:
+        await wait_for_startup(self)
         while True:
             try:
                 delivery = await self._claim_due()

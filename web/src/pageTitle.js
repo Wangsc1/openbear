@@ -2,6 +2,7 @@ export const APP_NAME = "OpenBear";
 
 const PAGE_TITLES = Object.freeze({
   login: "登录",
+  instances: "实例管理",
   memory: "记忆管理",
   secrets: "凭证库",
   docs: "文档库",

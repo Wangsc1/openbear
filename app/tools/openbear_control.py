@@ -11,6 +11,7 @@ from typing import Any
 
 from app.interaction_data import explicit_authorization
 from app.logging import get_logger
+from app.mcp.exposure import digest, warning_text
 from app.models.thinking import (
     available_think_levels,
     clamp_think_level,
@@ -166,6 +167,8 @@ async def _action_mcp_status(svc: Any) -> str:
             "originalToolName": meta.original_tool_name,
             "risk": meta.risk,
             "approval": meta.approval,
+            "enabled": meta.enabled,
+            "definitionBytes": meta.definition_bytes,
             "visible": not meta.filtered,
             "filtered": meta.filtered,
             "filterReason": meta.filter_reason,
@@ -250,6 +253,20 @@ async def _action_skills_reload(svc: Any) -> str:
 
 
 async def _action_mcp_reload(svc: Any, reason: str) -> str:
+    gated_reload = getattr(svc, "reload_mcp_with_confirmation", None)
+    if callable(gated_reload):
+        async def confirmation(rows, config_fingerprint):
+            return await _confirm_if_needed(
+                svc, action="mcp_reload", reason=reason,
+                body="这会从磁盘重新读取 MCP 配置，可能启动、重连或关闭 MCP server，并重建后续回合的工具列表。"
+                     + ("\n\n" + warning_text(rows) if rows else ""),
+                confirm_text="确认重载 MCP", target=digest({"config": config_fingerprint, "exposure": rows}),
+            )
+        result = await gated_reload(confirmation)
+        result.setdefault("status", "ok" if result.get("ok", True) else "error")
+        result.setdefault("action", "mcp_reload")
+        result.setdefault("effective", "next_turn")
+        return _json(result)
     confirm = await _confirm_if_needed(
         svc,
         action="mcp_reload",
@@ -396,6 +413,8 @@ async def _action_stop(svc: Any, chat_id: int, args: dict[str, Any], reason: str
 async def make_openbear_control_tool(svc: Any, args: dict[str, Any]) -> str:
     ctx = current_tool_context()
     action = str(args.get("action") or "").strip().lower()
+    if action == "restart" and getattr(getattr(getattr(svc, "config", None), "managed", None), "enabled", False):
+        return _json({"status": "error", "error": "managed_restart_requires_controller_maintenance"})
     if action not in _ACTIONS:
         return _json({"status": "error", "error": "unknown_action", "allowed": sorted(_ACTIONS)})
     if ctx.chat_id == 0 and not ctx.session_uuid:

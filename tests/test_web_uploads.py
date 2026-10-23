@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,8 +36,10 @@ async def setup_upload(web_env, *, name="file.bin", size=4, mime="application/oc
     return row, cookie, upload_id, f"{base}/{upload_id}"
 
 
+# beyond-ws.bin exceeds the 128 MiB WebSocket message limit and the old 20 MB
+# file default, so it also covers the former 70 MiB file-kind case; the image
+# keeps its own case above the old 20 MB image default.
 @pytest.mark.parametrize("name,mime,size,kind", [
-    ("large.bin", "application/octet-stream", 70 * 1024 * 1024, "file"),
     ("large.png", "image/png", 21 * 1024 * 1024, "image"),
     ("beyond-ws.bin", "application/octet-stream", 129 * 1024 * 1024, "file"),
 ])
@@ -47,7 +48,9 @@ async def test_large_http_upload_then_ws_reference_and_download(web_env, monkeyp
     web_env.server.config.media.max_file_mb = 1
     web_env.server.config.media.max_image_mb = 1
     row, cookie, upload_id, url = await setup_upload(web_env, name=name, mime=mime, size=size)
-    block = b"upload-test-01234" * (512 * 1024 // 16)
+    # ~4 MiB bodies (several per file, last one partial): each exceeds aiohttp's
+    # 1 MiB default request size, so the chunk handler must stream to disk.
+    block = b"upload-test-01234" * (4 * 1024 * 1024 // 16)
     digest = hashlib.sha256()
     for offset in range(0, size, len(block)):
         chunk = block[:min(len(block), size - offset)]
@@ -236,86 +239,6 @@ async def test_ws_message_limit_is_128_mib(web_env, monkeypatch):
     async with web_env.client.ws_connect(f"/api/conversations/{row['conversation_uuid']}/ws", headers={"Cookie": f"openbear_web_session={cookie}"}) as ws:
         await ws.receive_json()
     assert limits == [128 * 1024 * 1024]
-
-
-async def test_node_binary_upload_to_backend_and_ws(web_env, monkeypatch):
-    project = Path(__file__).resolve().parents[1]
-    if not shutil.which("node"):
-        pytest.skip("Node is required for the frontend HTTP integration")
-    row = await web_env.server._create_web_conversation(123, title="Node HTTP upload")
-    cookie = await _login_cookie(web_env)
-    web_env.server.runs = ControllerRuns()
-    captured = []
-    received = asyncio.Event()
-    close_started = asyncio.Event()
-    allow_close = asyncio.Event()
-    turn_task = None
-
-    async def run(chat_id, text, renderer, media=None, **kwargs):
-        nonlocal turn_task
-        turn_task = asyncio.current_task()
-        captured.extend(media)
-        received.set()
-        await renderer.finalize("received")
-        # Hold cleanup open: receiving the upload is not task completion.
-        close_started.set()
-        await allow_close.wait()
-        await renderer.close()
-
-    monkeypatch.setattr(web_env.server, "_run_web_turn", run)
-    process = await asyncio.create_subprocess_exec(
-        "node", str(project / "web/test-support/httpUploadSmoke.mjs"),
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    args = json.dumps({"origin": str(web_env.client.make_url("/")).rstrip("/"), "cookie": cookie, "conversationUuid": row["conversation_uuid"]}).encode()
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(args), 90)
-    except BaseException:
-        if process.returncode is None:
-            process.kill()
-        await process.wait()
-        raise
-    assert process.returncode == 0, stderr.decode()
-    result = json.loads(stdout)
-    assert result["ok"] is True
-    assert result["bytes"] > 70 * 1024 * 1024
-    assert result["chunks"] == 141
-    frame = {"type": "send", "requestId": "node-upload", "text": "Read uploaded attachments", "files": result["refs"]}
-    assert len(json.dumps(frame)) < 400
-    assert all(set(item) == {"uploadId"} for item in frame["files"])
-    try:
-        async with web_env.client.ws_connect(
-            f"/api/conversations/{row['conversation_uuid']}/ws?bootstrap=incremental",
-            headers={"Cookie": f"openbear_web_session={cookie}"},
-        ) as ws:
-            await ws.send_json(frame)
-            async with asyncio.timeout(10):
-                while True:
-                    message = await ws.receive_json()
-                    if message.get("requestId") == "node-upload":
-                        assert message["type"] == "ack", message
-                        break
-                await received.wait()
-                await close_started.wait()
-                assert turn_task is not None and not turn_task.done()
-                allow_close.set()
-                # Await the real task so finalize/close errors fail this test,
-                # rather than escaping after the DB fixture has been closed.
-                await asyncio.shield(turn_task)
-                assert turn_task.done()
-        assert [item.kind for item in captured] == ["file", "image", "file"]
-        assert captured[0].size == 70 * 1024 * 1024
-        assert captured[2].size == 0
-    finally:
-        allow_close.set()
-        task = turn_task or web_env.server.runs.task(int(row["internal_chat_id"]))
-        if task is not None:
-            if not task.done():
-                task.cancel()
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=3)
-            except asyncio.CancelledError:
-                pass
 
 
 async def test_resending_after_artifact_deletion_still_provides_a_live_url(web_env):

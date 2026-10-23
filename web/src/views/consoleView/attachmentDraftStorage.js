@@ -1,3 +1,4 @@
+import { userDatabaseName, onSessionEnd, isGateway, pageSession } from '../../sessionBoundary.js';
 // Unsent attachments are real File objects. The text drafts live in
 // localStorage, which only holds strings, so each conversation's draft files are
 // kept in IndexedDB under the same conversation key and restored when that
@@ -75,15 +76,23 @@ function requestResult(request) {
 export function createIndexedDbAttachmentDraftDriver({indexedDB = globalThis.indexedDB} = {}) {
 	if (!indexedDB) return null;
 	let dbPromise = null;
+	const databaseName = userDatabaseName(ATTACHMENT_DRAFT_DB_NAME);
+	let ended = false;
+	if (isGateway()) onSessionEnd(async () => {
+		ended = true;
+		try { (await dbPromise)?.close(); } catch {}
+		indexedDB.deleteDatabase(databaseName);
+	});
 	function open() {
+		if (ended || pageSession.blocked) return Promise.reject(new Error('session_ended'));
 		if (dbPromise) return dbPromise;
 		dbPromise = new Promise((resolve, reject) => {
-			const request = indexedDB.open(ATTACHMENT_DRAFT_DB_NAME, ATTACHMENT_DRAFT_DB_VERSION);
+			const request = indexedDB.open(databaseName, ATTACHMENT_DRAFT_DB_VERSION);
 			request.onupgradeneeded = () => {
 				const db = request.result;
 				if (!db.objectStoreNames.contains(ATTACHMENT_DRAFT_STORE_NAME)) db.createObjectStore(ATTACHMENT_DRAFT_STORE_NAME, {keyPath: "key"});
 			};
-			request.onsuccess = () => resolve(request.result);
+			request.onsuccess = () => { request.result.onversionchange = () => request.result.close(); resolve(request.result); };
 			request.onerror = () => reject(request.error || new Error("attachment_draft_open_failed"));
 			request.onblocked = () => reject(new Error("attachment_draft_open_blocked"));
 		}).catch((error) => {
@@ -96,6 +105,7 @@ export function createIndexedDbAttachmentDraftDriver({indexedDB = globalThis.ind
 	// close the transaction before the request settles.
 	async function run(mode, issue) {
 		const db = await open();
+		if (ended || pageSession.blocked) throw new Error('session_ended');
 		return await new Promise((resolve, reject) => {
 			let request = null;
 			const tx = db.transaction(ATTACHMENT_DRAFT_STORE_NAME, mode);

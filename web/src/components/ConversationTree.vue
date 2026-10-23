@@ -1,12 +1,13 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import {
-  Aim, Box, ArrowDown, ArrowRight, ChatLineRound, Check, Delete, DocumentCopy,
+  Aim, Box, ArrowDown, ArrowRight, ChatLineRound, Check, Clock, Connection, Delete, DocumentCopy,
   EditPen, Folder, FolderAdd, FolderOpened, InfoFilled, Loading, MagicStick, MoreFilled,
-  Plus, Refresh, RefreshLeft, Search, Star, StarFilled, Timer,
+  Plus, Refresh, RefreshLeft, Search, Star, StarFilled, Timer, SetUp, Tools, UserFilled, User,
 } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Api, apiError } from "../api";
+import { userStorage } from '../sessionBoundary.js';
 import { MOBILE_VIEWPORT_QUERY } from "../mobileViewport.js";
 import ModelSettings from "./ModelSettings.vue";
 import PromptPolicyEditor from "./PromptPolicyEditor.vue";
@@ -16,7 +17,9 @@ import "./conversationTreeProperties.css";
 import ConversationPromptDialog from "./ConversationPromptDialog.vue";
 import WebhookEditor from "./webhooks/WebhookEditor.vue";
 import ConversationOverview from "./ConversationOverview.vue";
-import {activityReadRequests, activityLabel, activityState} from "../conversationActivity.js";
+import GroupPropertiesDialog from "./GroupPropertiesDialog.vue";
+import {groupTreeRows, leadGroupStatus} from "./conversationGroupsTree.js";
+import {activityReadRequests, activityLabel, activityState, folderActivityCounts, isActivityWaiting, pendingConversationRows, pendingFolderCounts} from "../conversationActivity.js";
 import {useRecentConversationRows} from "./conversationRecentRows.js";
 import { treeItemId as rowId, treeItemParent, compareTreeItems, resolveTreeDrop } from "./conversationTreeInteractions.js";
 import { referenceCatalog, referenceItem, acceptActivityReadReceipt } from "../references/catalog.js";
@@ -32,10 +35,10 @@ import {
 const props = defineProps({
   activeConversationUuid: { type: String, default: "" },
   draftConversation: { type: Object, default: null },
-  // Off while a page that must keep its own route (e.g. recommendations) is shown.
+  // Off while a page that must keep its own route (e.g. instances) is shown.
   autoOpenSelected: { type: Boolean, default: true },
 });
-const emit = defineEmits(["open", "new-conversation", "rows", "selected-folder", "refresh-list", "delete-conversation", "folder-removed", "conversation-properties"]);
+const emit = defineEmits(["open", "new-conversation", "rows", "selected-folder", "refresh-list", "delete-conversation", "folder-removed", "conversation-properties", "activity-status", "show-pending"]);
 
 defineExpose({
   refresh: (options = {}) => refreshTree({ preserve: true, ...options }),
@@ -44,6 +47,7 @@ defineExpose({
   openRootMenu,
   showProperties,
   revealDraft,
+  revealFolder,
   forgetConversation,
   conversationPath: (conversationUuid) => {
     const row = knownConversationRows().find((item) => item.conversationUuid === conversationUuid);
@@ -53,9 +57,10 @@ defineExpose({
 
 const activityItems = ref([]);
 const recentItems = ref([]);
+const collabGroups = ref({});
 const activityReadBusy = ref(false);
 function savedSidebarView() {
-  try { return window.localStorage?.getItem('openbear:conversation-sidebar-view') === 'folders' ? 'folders' : 'recent'; }
+  try { return userStorage(window.localStorage)?.getItem('openbear:conversation-sidebar-view') === 'folders' ? 'folders' : 'recent'; }
   catch { return 'recent'; }
 }
 const sidebarView = ref(savedSidebarView());
@@ -63,18 +68,20 @@ const sidebarScroll = {recent: 0, folders: 0, search: 0};
 const locatingConversation = ref(false);
 const recentClock = ref(Date.now());
 let recentClockTimer;
-const {rows: recentConversationRows} = useRecentConversationRows({
+const {rows: recentRowsRaw} = useRecentConversationRows({
   get items() { return activityItems.value; },
   get recentItems() { return recentItems.value; },
   get activeConversationUuid() { return props.activeConversationUuid; },
   get readVersions() { return referenceCatalog.activityReadVersions || new Map(); },
 });
+const recentConversationRows = computed(() => recentRowsRaw.value.map(row => ({...row, ...leadGroupStatus(collabGroups.value[row.conversationUuid])})));
 // Match the unread marker's visibility without consuming in-progress results.
 const recentUnreadRows = computed(() => recentConversationRows.value.filter(row =>
   row.activityUnread && !running(row) && !isTitleGenerating(row)
 ));
 const recentUnreadCount = computed(() => recentUnreadRows.value.length);
-const recentWaitingCount = computed(() => recentConversationRows.value.filter(row => !isTitleGenerating(row) && (row.activityPending?.length || activityState({...row, readWhileSelected: false}) === 'waiting')).length);
+const pendingRows = ref([]);
+const recentWaitingCount = computed(() => pendingRows.value.length);
 const recentRunningCount = computed(() => recentConversationRows.value.filter(row => !isTitleGenerating(row) && !row.activityPending?.length && activityState(row) === 'running').length);
 function recentLabel(row) {
   const state = row.activityPending?.length ? 'waiting' : activityState({...row, readWhileSelected: false});
@@ -139,6 +146,29 @@ const moveFolderQuery = ref("");
 const moveUnarchive = ref(true);
 const moveUpdateSnapshots = ref(true);
 const allFolders = ref([]);
+const waitingFolderCounts = computed(() => pendingFolderCounts(pendingRows.value, [
+  ...allFolders.value, ...rootFolders.value,
+  ...Object.values(branchState).flatMap(branch => (branch.items || []).filter(row => row.kind === 'folder')),
+]));
+function folderWaitingCount(row) { return waitingFolderCounts.value.get(row.kind === 'system' ? row.id : row.folderId) || 0; }
+// Expanded directories leave these to their own rows; "待处理 N" stays as is.
+const folderActivity = ref({});
+function collapsedFolderActivity(row) {
+  const id = row.kind === 'system' ? row.id : row.folderId;
+  if (!id || isExpanded(id)) return null;
+  const counts = folderActivity.value[id];
+  return counts?.running || counts?.unread ? counts : null;
+}
+watch(() => pendingRows.value.map(row => `${row.conversationUuid}:${row.folderId}:${row.path}`).join('|'), async (key, _, onCleanup) => {
+  if (!key) return;
+  let cancelled = false;
+  onCleanup(() => { cancelled = true; });
+  try {
+    const data = await Api.conversationTreeFolders();
+    if (!cancelled) allFolders.value = data.items || [];
+  } catch { /* Loaded branches still provide their known ancestor counts. */ }
+});
+const groupProperties = ref({ open: false, groupId: "" });
 const impactDialog = ref(false);
 const impactState = reactive({ action: "移动", impact: null, resolve: null });
 let bootstrapGeneration = 0;
@@ -195,11 +225,24 @@ function running(row) { return Boolean(row?.running || row?.status === "running"
 function hasFolderChildren(row) { return Number(row?.childFolderCount || 0) + Number(row?.conversationCount || 0) > 0; }
 function liveConversationTitle(row) {
   if (!row || row.local) return row?.title || "新会话";
-  return referenceItem({kind: "chat", id: row.conversationUuid})?.label || row.title || "新会话";
+  const title = referenceItem({kind: "chat", id: row.conversationUuid})?.label || row.title || "新会话";
+  // Under its group node a member needs only its own name; elsewhere keep the full title.
+  return row.groupMember && row.groupName && title.endsWith(` · ${row.groupName}`) ? title.slice(0, -(row.groupName.length + 3)) : title;
 }
 function rowLabel(row) { return row?.kind === "folder" ? row.name : liveConversationTitle(row); }
 function hasConversationMessages(row) { return Number(row?.lastConversationAt || row?.lastInteractionAtMs || 0) > 0; }
 function isTitleGenerating(row) { return titleGenerating.value.has(String(row?.conversationUuid || "")); }
+// Same icons as the Cron / Webhook entries in the main navigation.
+function conversationOrigin(row) {
+  switch (row?.origin || row?.originKind || row?.origin_kind) {
+    case 'deployment': return {icon: SetUp, label: '实例部署会话'};
+    case 'maintenance': return {icon: Tools, label: '实例维护会话'};
+    case 'cron': return {icon: Clock, label: '定时任务创建'};
+    case 'webhook': return {icon: Connection, label: '触发器创建'};
+    case 'collab': return {icon: User, label: '小组成员'};
+    default: return {icon: ChatLineRound, label: undefined};
+  }
+}
 function setTitleGenerating(conversationUuid, generating) {
   const uuid = String(conversationUuid || "");
   if (!uuid) return;
@@ -224,8 +267,8 @@ function withDraft(items, folderId) {
   const draft = props.draftConversation;
   if (draft && String(draft.folderId || "") === String(folderId || "") && !rows.some((item) => item.conversationUuid === draft.conversationUuid)) {
     rows.push({ ...draft, kind: "conversation", id: draft.conversationUuid, parentId: folderId, path: folderId ? folderPath(folderId) : "临时会话" });
-    // A local draft is still a conversation: respect folder/pin/manual ordering
-    // before and after its first send instead of jumping ahead of child folders.
+    // A local draft stays below child folders and pinned conversations, at the
+    // head of the unpinned group where its first send will persist it.
     rows.sort(compareTreeRows);
   }
   return rows;
@@ -237,12 +280,18 @@ function appendFolderRows(output, folders, depth) {
     const branch = stateFor(folder.folderId);
     for (const child of withDraft(branch.items, folder.folderId)) {
       if (child.kind === "folder") appendFolderRows(output, [child], depth + 1);
-      else output.push({ ...child, depth: depth + 1 });
+      else appendConversationRow(output, child, depth + 1);
     }
     if (branch.error) output.push({ kind: "error", id: `error:${folder.folderId}`, depth: depth + 1, parentId: folder.folderId, message: branch.error });
     else if ((branch.loaded || branch.pages > 0) && !withDraft(branch.items, folder.folderId).length) output.push({ kind: "empty", id: `empty:${folder.folderId}`, depth: depth + 1, parentId: folder.folderId });
     if (branch.hasMore) output.push({ kind: "more", id: `more:${folder.folderId}`, depth: depth + 1, parentId: folder.folderId, cursor: branch.nextCursor });
   }
+}
+function appendConversationRow(output, row, depth) {
+  output.push({ ...row, depth, ...leadGroupStatus(collabGroups.value[row.conversationUuid]) });
+  output.push(...groupTreeRows(collabGroups.value[row.conversationUuid], {
+    depth, expanded: expanded.value, lookup: latestStatusState?.lookup, activityLookup: latestStatusState?.activityLookup,
+  }));
 }
 const visibleRows = computed(() => {
   const output = [];
@@ -251,7 +300,7 @@ const visibleRows = computed(() => {
   output.push(temporary);
   if (isExpanded("__temporary")) {
     const branch = stateFor("", "temporary");
-    for (const row of withDraft(branch.items, "")) output.push({ ...row, depth: 1, parentId: "" });
+    for (const row of withDraft(branch.items, "")) appendConversationRow(output, { ...row, parentId: "" }, 1);
     if (branch.error) output.push({ kind: "error", id: "error:temporary", depth: 1, systemNode: "temporary", message: branch.error });
     else if ((branch.loaded || branch.pages > 0) && !withDraft(branch.items, "").length) output.push({ kind: "empty", id: "empty:temporary", depth: 1, systemNode: "temporary" });
     if (branch.hasMore) output.push({ kind: "more", id: "more:temporary", depth: 1, systemNode: "temporary", cursor: branch.nextCursor });
@@ -279,7 +328,7 @@ async function switchSidebarView(view) {
   if (!['recent', 'folders'].includes(view)) return;
   closeOverview(); closeMenu(); clearDrag();
   sidebarView.value = view;
-  try { window.localStorage?.setItem('openbear:conversation-sidebar-view', view); } catch { /* storage may be unavailable */ }
+  try { userStorage(window.localStorage)?.setItem('openbear:conversation-sidebar-view', view); } catch { /* storage may be unavailable */ }
   await nextTick();
 }
 async function sidebarTabKeydown(event) {
@@ -389,7 +438,8 @@ function statusAdjustedRow(row) {
   if (row.kind !== "conversation" || row.archived) return row;
   const status = latestStatusState.lookup.get(row.conversationUuid);
   const activity = latestStatusState.activityLookup.get(row.conversationUuid);
-  const next = { ...row, ...(status || {}), ...(activity || {activityUnread: false, activityState: "", activityPending: []}), running: Boolean(status), status: status ? "running" : "idle" };
+  const next = { ...row, ...(status || {}), ...(activity || {activityUnread: false, activityState: "", activityPending: []}), running: Boolean(status), status: status ? "running" : "idle",
+    groupCount: 0, groupRunning: 0, groupMembers: 0, ...leadGroupStatus(latestStatusState.raw?.collabGroups?.[row.conversationUuid]) };
   return sameRowShape(row, next) ? row : next;
 }
 function mergeLocatedFolders(rows = []) {
@@ -495,6 +545,23 @@ function knownFolderIdPath(folderId, extraRows = []) {
   }
   return path;
 }
+function rebaseStatusFolderPaths(original, newFolderIds) {
+  if (!latestStatusState) return;
+  const head = original.kind === "folder" && !newFolderIds.includes(original.folderId) ? [...newFolderIds, original.folderId] : newFolderIds;
+  const rebase = item => {
+    if (original.kind !== "folder") return item.conversationUuid === original.conversationUuid ? { ...item, folderPath: head } : item;
+    const index = (item.folderPath || []).indexOf(original.folderId);
+    return index < 0 ? item : { ...item, folderPath: [...head, ...item.folderPath.slice(index + 1)] };
+  };
+  for (const key of ["items", "activityItems", "recentItems"]) {
+    if (Array.isArray(latestStatusState.raw?.[key])) latestStatusState.raw[key] = latestStatusState.raw[key].map(rebase);
+  }
+  for (const map of [latestStatusState.lookup, latestStatusState.activityLookup]) {
+    for (const [uuid, item] of map) map.set(uuid, rebase(item));
+  }
+  activityItems.value = activityItems.value.map(rebase);
+  folderActivity.value = folderActivityCounts([...(latestStatusState.raw?.items || []).map(withLocalRead), ...activityItems.value]);
+}
 function adjustRunningFolderCounts(ids, delta) {
   if (!latestStatusState || !delta) return;
   for (const id of ids) {
@@ -524,6 +591,7 @@ function applyMoveOrganization(original, targetFolderId, organization = {}) {
     cacheLocatedConversation(moved);
   }
   if (original.kind === "folder" && moved) rebaseKnownPaths(oldPath, String(moved.path || oldPath));
+  if (Array.isArray(organization.folderPath)) rebaseStatusFolderPaths(original, newFolderIds);
   applyTargetOrder(original.kind, organization.targetOrder || []);
   if (original.kind === "conversation") {
     const oldParent = String(original.folderId || ""), nextParent = String(targetFolderId || "");
@@ -738,20 +806,26 @@ async function refreshTree({
     if (generation === bootstrapGeneration) loading.value = false;
   }
 }
+function withLocalRead(item) {
+  const read = Math.max(Number(item.activityReadVersion || 0), Number(referenceCatalog.activityReadVersions?.get(item.conversationUuid) || 0));
+  return {...item, activityReadVersion: read, activityUnread: Number(item.activityVersion || 0) > read};
+}
 function applyStatus(data = {}) {
   const revision = Number(data.revision || 0);
   if (revision) statusServerRevision = Math.max(statusServerRevision, revision);
-  const adjust = item => {
-    const read = Math.max(Number(item.activityReadVersion || 0), Number(referenceCatalog.activityReadVersions?.get(item.conversationUuid) || 0));
-    return {...item, activityReadVersion: read, activityUnread: Number(item.activityVersion || 0) > read};
-  };
-  activityItems.value = (data.activityItems || data.items || []).map(adjust).filter(item => !item.archived && (item.running || item.activityUnread));
+  const adjust = withLocalRead;
+  activityItems.value = (data.activityItems || data.items || []).map(adjust).filter(item => !item.archived && (item.running || item.activityUnread || isActivityWaiting(item)));
+  // Every running conversation, including automatic ones, plus user-visible unread results.
+  folderActivity.value = folderActivityCounts([...(data.items || []).map(adjust), ...activityItems.value]);
+  pendingRows.value = pendingConversationRows(data);
+  emit('activity-status', data);
   // Recency is independent of completion/read state; server supplies the newest
   // fifteen actual interactions, including rows absent from the loaded tree pages.
   recentItems.value = (data.recentItems || []).map(adjust).filter(item => !item.archived && !item.local).slice(0, 15);
+  collabGroups.value = data.collabGroups || {};
   latestStatusState = {
     raw: data,
-    activityLookup: new Map(activityItems.value.map(item => [item.conversationUuid, item])),
+    activityLookup: new Map([...activityItems.value, ...pendingRows.value].map(item => [item.conversationUuid, item])),
     lookup: new Map((data.items || []).map((item) => [item.conversationUuid, item])),
     folderRunningCounts: { ...(data.folderRunningCounts || {}) },
     folderConversationCounts: { ...(data.folderConversationCounts || {}) },
@@ -799,6 +873,8 @@ function scheduleStatus() {
 }
 
 async function toggleRow(row) {
+  if (row.recentAlias) return;
+  if (row.kind === "conversation" || row.kind === "group") { setExpanded(row.expandId, !isExpanded(row.expandId)); return; }
   const id = row.kind === "system" ? row.id : row.folderId;
   const opening = !isExpanded(id);
   setExpanded(id, opening);
@@ -835,8 +911,24 @@ async function revealDraft(folderId = "") {
     document.querySelector(`[data-tree-id="${CSS.escape(props.draftConversation.conversationUuid)}"]`)?.scrollIntoView({ block: "nearest" });
   } catch (error) { ElMessage.error(apiError(error)); }
 }
+async function revealFolder(folderId) {
+  const target = String(folderId || "");
+  if (!target) return;
+  query.value = "";
+  await switchSidebarView('folders');
+  try {
+    const data = await Api.locateConversationFolderInTree(target);
+    await ensurePaths([data.folderPath || [target]], data.folderItems || []);
+    setExpanded(target, true);
+    await loadChildren(target);
+    selectFolder(target);
+    await nextTick();
+    document.querySelector(`[data-tree-id="${CSS.escape(target)}"]`)?.scrollIntoView({ block: "nearest" });
+  } catch (error) { ElMessage.error(apiError(error)); }
+}
 async function activateRow(row) {
   closeOverview();
+  if (row.kind === "group") { await toggleRow(row); return; }
   if (row.kind === "folder") { selectFolder(row.folderId); await toggleRow(row); return; }
   if (row.kind === "system") {
     if (row.systemNode === "temporary") selectFolder("");
@@ -849,7 +941,7 @@ async function activateRow(row) {
     openActivityConversation(original);
     return;
   }
-  if (!row.archived) selectFolder(String(row.folderId || ""));
+  if (!row.archived && !row.groupMember) selectFolder(String(row.folderId || ""));
   emit("open", row);
 }
 async function locateAndOpen(row) {
@@ -930,7 +1022,7 @@ watch(() => props.draftConversation, () => emitRows(), { deep: true });
 
 async function openMenu(event, row) {
   closeOverview();
-  if (!["folder", "conversation", "system", "root"].includes(row?.kind)) return;
+  if (!["folder", "conversation", "system", "root", "group"].includes(row?.kind)) return;
   event?.preventDefault?.(); event?.stopPropagation?.();
   const recent = Boolean(row.recentAlias);
   if (row.recentAlias) { const {recentAlias, depth, ...original} = row; row = original; }
@@ -1453,6 +1545,7 @@ async function runMenuAction(action) {
     else if (action === "cron" && row.kind === "folder" && row.folderId) {
       window.dispatchEvent(new CustomEvent('openbear:open-cron', {detail:{folderId:String(row.folderId)}}));
     }
+    else if (action === "properties" && row.kind === "group") groupProperties.value = { open: true, groupId: row.groupId };
     else if (action === "properties") await showProperties(row);
     else if (action === "conversation-properties") emit('conversation-properties', row);
     else if (action === "refresh-prompt" && !row.local && !running(row)) {
@@ -1543,10 +1636,15 @@ function clearDrag() {
   drag.value = { row: null, target: null, zone: "", busy: false };
 }
 function rowKeydown(event, row) {
+  if (!row.recentAlias && row.expandId && (event.key === "ArrowRight" || event.key === "ArrowLeft") && (event.key === "ArrowRight") !== isExpanded(row.expandId)) { event.preventDefault(); void toggleRow(row); return; }
   if (event.key === "Enter") { event.preventDefault(); void (row.search ? locateAndOpen(row) : activateRow(row)); }
   else if (event.key === "ArrowRight" && ["folder", "system"].includes(row.kind) && !isExpanded(row.kind === "system" ? row.id : row.folderId)) { event.preventDefault(); void toggleRow(row); }
   else if (event.key === "ArrowLeft" && ["folder", "system"].includes(row.kind) && isExpanded(row.kind === "system" ? row.id : row.folderId)) { event.preventDefault(); void toggleRow(row); }
-  else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openMenu({ preventDefault(){}, stopPropagation(){}, clientX: rect.right - 8, clientY: rect.top + 8 }, row); }
+  else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    openMenu({ preventDefault(){}, stopPropagation(){}, clientX: rect.right - 8, clientY: rect.top + 8 }, row);
+  }
   else if (event.key === "Escape") { closeMenu(); clearDrag(); }
 }
 function globalKeydown(event) { if (event.key === "Escape") { closeMenu(); clearDrag(); if (impactDialog.value) finishImpact(null); } }
@@ -1596,13 +1694,13 @@ onBeforeUnmount(() => {
         <button class="tree-tool" type="button" title="刷新目录树" :disabled="loading" @click="refreshTree({ preserve: true })"><el-icon :class="loading && 'is-spinning'"><Refresh /></el-icon></button>
       </div>
     </header>
-    <div class="sidebar-activity">
-      <button class="sidebar-activity-summary" type="button" aria-label="查看最近会话动态" @click="showRecentActivity">
-        <span class="recent-waiting-count" :class="{'is-empty': !recentWaitingCount}">待处理 {{ recentWaitingCount }}</span>
-        <span class="sidebar-unread-count" :class="{'is-empty': !recentUnreadCount}">未读 {{ recentUnreadCount }}</span>
-        <span :class="{'is-empty': !recentRunningCount}">运行 {{ recentRunningCount }}</span>
-      </button>
-      <button v-if="recentUnreadCount" class="recent-read-all" type="button" :disabled="activityReadBusy" aria-label="全部标为已读" title="全部标为已读" @click="markActivityRead(recentUnreadRows)"><el-icon><Check /></el-icon></button>
+    <div class="sidebar-activity" role="group" aria-label="会话动态">
+      <button class="activity-cell recent-waiting-count" :class="{'is-empty': !recentWaitingCount}" type="button" :aria-label="`查看待处理会话，共 ${recentWaitingCount} 个`" @click="emit('show-pending')">待处理 {{ recentWaitingCount }}</button>
+      <div class="activity-cell sidebar-unread-cell" :class="{'is-empty': !recentUnreadCount}">
+        <button class="sidebar-unread-count" type="button" :aria-label="`查看最近会话动态，未读 ${recentUnreadCount} 个`" @click="showRecentActivity">未读 {{ recentUnreadCount }}</button>
+        <button v-if="recentUnreadCount" class="recent-read-all" type="button" :disabled="activityReadBusy" aria-label="全部标为已读" title="全部标为已读" @click="markActivityRead(recentUnreadRows)"><el-icon><Check /></el-icon></button>
+      </div>
+      <button class="activity-cell sidebar-running-count" :class="{'is-empty': !recentRunningCount}" type="button" :aria-label="`查看最近会话动态，运行中 ${recentRunningCount} 个`" @click="showRecentActivity">运行 {{ recentRunningCount }}</button>
     </div>
     <div class="sidebar-tabs" role="tablist" aria-label="会话视图" @keydown="sidebarTabKeydown">
       <button id="conversation-recent-tab" data-sidebar-view="recent" type="button" role="tab" aria-controls="conversation-sidebar-panel" :aria-selected="sidebarView === 'recent'" :tabindex="sidebarView === 'recent' ? 0 : -1" @click="switchSidebarView('recent')">最近</button>
@@ -1627,9 +1725,9 @@ onBeforeUnmount(() => {
           class="tree-row-wrap" :class="[`kind-${row.kind}`, { 'is-chat-active-row': row.kind === 'conversation' && activeConversationRow === row, 'drop-inside': drag.target && rowId(drag.target) === rowId(row) && drag.zone === 'inside', 'drop-before': drag.target && rowId(drag.target) === rowId(row) && drag.zone === 'before', 'drop-after': drag.target && rowId(drag.target) === rowId(row) && drag.zone === 'after' }]"
           :style="{ '--indent': indentation(row.depth) }"
           :role="isDirectoryView ? 'treeitem' : 'listitem'" :aria-level="isDirectoryView ? Number(row.depth || 0) + 1 : undefined" :aria-busy="rowLoading(row) || isTitleGenerating(row)"
-          :aria-expanded="['folder','system'].includes(row.kind) ? String(isExpanded(row.kind === 'system' ? row.id : row.folderId)) : undefined"
-          :tabindex="['folder','conversation','system'].includes(row.kind) ? 0 : -1"
-          :draggable="!row.local && !moveInFlight && (row.kind === 'conversation' || (row.kind === 'folder' && !query && !row.archived))"
+          :aria-expanded="['folder','system'].includes(row.kind) ? String(isExpanded(row.kind === 'system' ? row.id : row.folderId)) : !row.recentAlias && row.expandId ? String(isExpanded(row.expandId)) : undefined"
+          :tabindex="['folder','conversation','system','group'].includes(row.kind) ? 0 : -1"
+          :draggable="!row.local && !moveInFlight && !row.groupMember && (row.kind === 'conversation' || (row.kind === 'folder' && !query && !row.archived))"
           @keydown="rowKeydown($event, row)" @contextmenu="openMenu($event, row)"
           @pointerenter="enterOverview($event, row)" @pointerleave="leaveOverview"
           @dragstart="dragStart($event, row)" @dragover="dragOver($event, row)" @drop="drop($event, row)" @dragend="clearDrag"
@@ -1641,29 +1739,48 @@ onBeforeUnmount(() => {
             <button class="tree-node-main" type="button" :class="{ 'is-folder-target': (row.kind === 'folder' && selectedFolderId === row.folderId) || (row.kind === 'system' && row.systemNode === 'temporary' && selectedFolderId === '') }" :title="row.path || row.name" @click="row.search ? locateAndOpen(row) : activateRow(row)" @contextmenu="openMenu($event, row)">
               <el-icon class="node-icon" :class="{ 'is-spinning': rowLoading(row) }"><component :is="rowLoading(row) ? Loading : row.kind === 'system' ? (row.systemNode === 'archive' ? Box : ChatLineRound) : (isExpanded(row.folderId) ? FolderOpened : Folder)" /></el-icon>
               <span class="node-label">{{ row.name }}</span>
-              <span v-if="row.managedBy === 'recommendations'" class="node-managed" title="由推荐功能管理" aria-label="由推荐功能管理"><el-icon><MagicStick /></el-icon></span>
               <span v-if="row.pinned" class="node-star" title="同级置顶"><el-icon><StarFilled /></el-icon></span>
+              <span v-if="folderWaitingCount(row)" class="tree-waiting-state" :aria-label="`${folderWaitingCount(row)} 个会话待处理`">待处理 {{ folderWaitingCount(row) }}</span>
+              <span v-if="collapsedFolderActivity(row)?.running" class="running-leaf" role="img" :aria-label="`${collapsedFolderActivity(row).running} 个会话运行中`" :title="`${collapsedFolderActivity(row).running} 个会话运行中`"></span>
+              <span v-if="collapsedFolderActivity(row)?.unread" class="conversation-unread-dot" role="img" :aria-label="`${collapsedFolderActivity(row).unread} 个会话有未读结果`" :title="`${collapsedFolderActivity(row).unread} 个会话有未读结果`"></span>
               <span class="node-count" :aria-label="`${row.kind === 'system' ? row.count : Number(row.conversationCount || 0)} 个会话`">{{ row.kind === 'system' ? row.count : Number(row.conversationCount || 0) }}</span>
             </button>
           </template>
 
+          <template v-else-if="row.kind === 'group'">
+            <button class="tree-chevron" type="button" :aria-label="isExpanded(row.expandId) ? '折叠小组' : '展开小组'" @click.stop="toggleRow(row)">
+              <el-icon><component :is="isExpanded(row.expandId) ? ArrowDown : ArrowRight" /></el-icon>
+            </button>
+            <button class="tree-node-main group-node" type="button" :title="row.description || row.name" @click="activateRow(row)" @contextmenu="openMenu($event, row)">
+              <el-icon class="node-icon" :class="{ 'is-working': row.runningCount > 0 }"><UserFilled /></el-icon>
+              <span class="node-label">{{ row.name }}</span>
+              <span v-if="row.runningCount" class="group-running-state" role="status" :aria-label="`${row.runningCount} 位成员运行中`">运行中 {{ row.runningCount }}/{{ row.memberCount }}</span>
+              <span v-else class="node-count" :aria-label="`${row.memberCount} 位成员`">{{ row.memberCount }}</span>
+            </button>
+          </template>
+
           <template v-else-if="row.kind === 'conversation'">
-            <span v-if="!row.recentAlias" class="tree-leaf-spacer"></span>
+            <button v-if="row.groupCount && !row.recentAlias && !row.search" class="tree-chevron" type="button" :aria-label="isExpanded(row.expandId) ? '收起小组' : '展开小组'" @click.stop="toggleRow(row)">
+              <el-icon><component :is="isExpanded(row.expandId) ? ArrowDown : ArrowRight" /></el-icon>
+            </button>
+            <span v-else-if="!row.recentAlias" class="tree-leaf-spacer"></span>
             <button class="tree-node-main conversation" type="button" :class="{ 'is-chat-active': activeConversationRow === row, 'is-title-generating': isTitleGenerating(row) }" :title="isTitleGenerating(row) ? '正在生成会话名称' : (row.local ? row.title : undefined)" @click="row.search ? locateAndOpen(row) : activateRow(row)" @contextmenu="openMenu($event, row)">
-              <el-icon class="node-icon" :class="{ 'is-spinning': rowLoading(row) || isTitleGenerating(row), 'is-working': running(row) && !rowLoading(row) && !isTitleGenerating(row) }"><component :is="rowLoading(row) || isTitleGenerating(row) ? Loading : ChatLineRound" /></el-icon>
+              <el-icon class="node-icon" :class="{ 'is-spinning': rowLoading(row) || isTitleGenerating(row), 'is-working': running(row) && !isActivityWaiting(row) && !rowLoading(row) && !isTitleGenerating(row) }" :title="conversationOrigin(row).label" :aria-label="conversationOrigin(row).label"><component :is="rowLoading(row) || isTitleGenerating(row) ? Loading : conversationOrigin(row).icon" /></el-icon>
               <span class="node-copy"><span class="node-label"><AnimatedConversationTitle :text="liveConversationTitle(row)" :identity="row.conversationUuid" /></span><small v-if="row.search || row.recentAlias">{{ nodePath(row) }}</small></span>
               <span v-if="row.pinned" class="node-star"><el-icon><StarFilled /></el-icon></span>
-              <span v-if="isTitleGenerating(row)" class="title-generating-state" role="status" aria-live="polite">命名中</span>
+              <span v-if="row.groupRunning && !running(row)" class="group-running-state" role="status" :title="`小组成员运行中 ${row.groupRunning}/${row.groupMembers}`" :aria-label="`小组成员运行中 ${row.groupRunning}/${row.groupMembers}`">小组运行 {{ row.groupRunning }}/{{ row.groupMembers }}</span>
+              <span v-if="isActivityWaiting(row)" class="tree-waiting-state" role="status">{{ activityLabel(row) }}</span>
+              <span v-else-if="isTitleGenerating(row)" class="title-generating-state" role="status" aria-live="polite">命名中</span>
               <span v-else-if="running(row)" class="running-leaf" role="img" :aria-label="`${activityLabel(row)}${row.activityUnread ? ' · 未读' : ''}`" :title="`${row.currentStatus || activityLabel(row)}${row.activityUnread ? ' · 未读' : ''}`"></span>
               <span v-else-if="row.activityUnread" class="conversation-unread-dot" aria-label="未读" :title="`${activityLabel(row)} · 未读`"></span>
-              <span v-if="row.recentAlias && !isTitleGenerating(row)" class="recent-row-status" :class="{'is-waiting': row.activityPending?.length}">{{ recentLabel(row) }}</span>
+              <span v-if="row.recentAlias && !isTitleGenerating(row) && !isActivityWaiting(row)" class="recent-row-status" :class="{'is-waiting': row.activityPending?.length}">{{ recentLabel(row) }}</span>
             </button>
           </template>
 
           <button v-else-if="row.kind === 'more'" class="tree-inline-action" type="button" :disabled="stateFor(row.parentId || '', row.systemNode || '').loading" @click="loadChildren(row.parentId || '', row.systemNode || '', { append: true })">加载更多</button>
           <button v-else-if="row.kind === 'error'" class="tree-inline-action error" type="button" @click="loadChildren(row.parentId || '', row.systemNode || '', { force: true })">加载失败，点击重试</button>
           <span v-else class="tree-muted">此目录为空</span>
-          <button v-if="['folder', 'conversation', 'system'].includes(row.kind)"
+          <button v-if="['folder', 'conversation', 'system', 'group'].includes(row.kind)"
             class="tree-touch-more" type="button" :aria-label="`${row.name || rowLabel(row)}：更多操作`"
             aria-haspopup="menu" :aria-expanded="menu.open && rowId(menu.row) === rowId(row)"
             @pointerdown.stop @keydown="moreMenuKeydown" @dragstart.prevent.stop @click.stop="openMoreMenu($event, row)">
@@ -1693,7 +1810,7 @@ onBeforeUnmount(() => {
             <button role="menuitem" @click="runMenuAction('cron')"><el-icon><Timer /></el-icon><span>定时任务</span></button>
             <button role="menuitem" @click="runMenuAction('properties')"><el-icon><InfoFilled /></el-icon><span>目录属性</span></button>
             <hr />
-            <button class="danger" role="menuitem" :disabled="menu.row?.managedBy === 'recommendations'" :title="menu.row?.managedBy === 'recommendations' ? '由推荐功能管理，在推荐设置里关闭推荐后可删除' : ''" @click="runMenuAction('delete-folder')"><el-icon><Delete /></el-icon><span>{{ menu.row?.managedBy === 'recommendations' ? '删除目录（先关闭推荐）' : '删除目录' }}</span></button>
+            <button class="danger" role="menuitem" @click="runMenuAction('delete-folder')"><el-icon><Delete /></el-icon><span>删除目录</span></button>
           </template>
           <template v-else-if="['system', 'root'].includes(menu.row?.kind)">
             <button v-if="menu.row?.systemNode === 'temporary' || menu.row?.kind === 'root'" role="menuitem" @click="runMenuAction('new-conversation')"><el-icon><ChatLineRound /></el-icon><span>新建临时会话</span></button>
@@ -1702,6 +1819,9 @@ onBeforeUnmount(() => {
               <hr />
               <button role="menuitem" @click="runMenuAction('properties')"><el-icon><InfoFilled /></el-icon><span>临时会话属性</span></button>
             </template>
+          </template>
+          <template v-else-if="menu.row?.kind === 'group'">
+            <button role="menuitem" @click="runMenuAction('properties')"><el-icon><InfoFilled /></el-icon><span>小组属性</span></button>
           </template>
           <template v-else>
             <button role="menuitem" @click="runMenuAction('new-sibling')"><el-icon><ChatLineRound /></el-icon><span>新建同级会话</span></button>
@@ -1788,6 +1908,8 @@ onBeforeUnmount(() => {
       <template #footer><el-button @click="moveDialog = false">取消</el-button><el-button type="primary" :loading="moveBusy" @click="submitMove">{{ moveMode === 'delete' ? '下一步' : '移动' }}</el-button></template>
     </el-dialog>
 
+    <GroupPropertiesDialog v-model="groupProperties.open" :group-id="groupProperties.groupId" />
+
     <PromptImpactDialog :model-value="impactDialog" :action="impactState.action" :impact="impactState.impact" @choose="finishImpact" />
   </section>
 </template>
@@ -1812,12 +1934,17 @@ onBeforeUnmount(() => {
 .sidebar-tabs { display:flex; flex:none; gap:3px; margin:0 10px 8px; padding:3px; border-radius:8px; background:var(--ob-hover); }
 .sidebar-tabs button { flex:1; min-width:0; min-height:28px; padding:3px 8px; border:0; border-radius:6px; background:transparent; color:var(--ob-text-muted); font-size:12px; cursor:pointer; }
 .sidebar-tabs button[aria-selected="true"] { background:var(--ob-surface-raised); color:var(--ob-text); box-shadow:0 1px 3px rgb(0 0 0 / .06); }
-.sidebar-tabs button:focus-visible,.sidebar-activity-summary:focus-visible { outline:2px solid var(--ob-blue); outline-offset:-2px; }
-.sidebar-activity { display:flex; flex:none; height:27px; align-items:center; gap:5px; margin:0 11px 5px; }
-.sidebar-activity-summary { display:flex; flex:1; min-width:0; flex-wrap:nowrap; align-items:center; justify-content:space-between; gap:8px; height:100%; min-height:27px; padding:3px 6px; border:0; border-radius:6px; background:transparent; color:var(--ob-text-subtle); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; cursor:pointer; }
-.sidebar-activity-summary .is-empty { color:var(--ob-text-muted); }
-.sidebar-activity-summary:hover { background:var(--ob-hover); }
-.sidebar-unread-count { color:var(--ob-blue); }
+.sidebar-tabs button:focus-visible { outline:2px solid var(--ob-blue); outline-offset:-2px; }
+.sidebar-activity { display:grid; flex:none; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:2px; height:27px; align-items:stretch; margin:0 11px 5px; }
+.activity-cell { display:flex; min-width:0; min-height:27px; align-items:center; justify-content:center; gap:2px; border:0; border-radius:6px; background:transparent; color:var(--ob-text-subtle); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+button.activity-cell,.sidebar-unread-count { padding:3px 6px; cursor:pointer; }
+.activity-cell:hover { background:var(--ob-hover); }
+.activity-cell.is-empty,.activity-cell.is-empty .sidebar-unread-count { color:var(--ob-text-muted); }
+.recent-waiting-count { color:var(--ob-warning); }
+.sidebar-unread-cell { position:relative; }
+.sidebar-unread-count { display:flex; flex:1; height:100%; align-items:center; justify-content:center; border:0; border-radius:6px; background:transparent; color:var(--ob-blue); font:inherit; white-space:nowrap; }
+.sidebar-unread-cell .recent-read-all { position:absolute; top:50%; right:3px; transform:translateY(-50%); }
+.activity-cell:focus-visible,.sidebar-unread-count:focus-visible { outline:2px solid var(--ob-focus); outline-offset:-2px; }
 .sidebar-panel { display:flex; flex:1; min-height:0; flex-direction:column; }
 .recent-list .tree-node-main { height:auto; min-height:43px; padding:5px 7px; }
 .tree-search { display:flex; align-items:center; gap:6px; margin:0 10px 7px; padding:0 9px; height:31px; border:1px solid var(--ob-border-soft); border-radius:9px; background:var(--ob-chat-hover); color:var(--ob-chat-muted); }
@@ -1852,6 +1979,8 @@ onBeforeUnmount(() => {
 .node-copy small { overflow:hidden; margin-top:2px; color:var(--ob-text-muted); font-size:9px; text-overflow:ellipsis; white-space:nowrap; }
 .node-star { display:grid; color:var(--ob-warning); font-size:11px; }
 .node-count { color:var(--ob-text-muted); font-size:10px; }
+.group-running-state { flex:none; padding:1px 5px; border-radius:5px; background:rgb(var(--ob-blue-rgb) / .1); color:var(--ob-blue); font-size:10px; line-height:18px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.tree-node-main.group-node { color:var(--ob-text-subtle); }
 .title-generating-state { flex:0 0 auto; padding:1px 5px; border-radius:5px; background:rgb(var(--ob-blue-rgb) / .1); color:var(--ob-blue); font-size:10px; font-weight:600; line-height:16px; white-space:nowrap; }
 
 .running-leaf { width:6px; height:6px; flex:0 0 6px; margin-right:2px; border-radius:50%; background:var(--ob-blue); box-shadow:0 0 0 3px rgb(var(--ob-blue-rgb) / .12); animation:tree-pulse 1.8s ease-in-out infinite; }
@@ -1870,15 +1999,16 @@ onBeforeUnmount(() => {
 .tree-touch-more { display:none; }
 .recent-row-status { flex:0 1 auto; min-width:0; max-width:42%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; color:var(--ob-text-subtle); }
 .recent-row-status.is-waiting { color:var(--ob-warning); }
-.recent-waiting-count { flex:none; font-size:11px; white-space:nowrap; color:var(--ob-warning); }
-.recent-read-all { display:grid; flex:0 0 27px; width:27px; height:27px; padding:0; place-items:center; border:0; border-radius:7px; background:transparent; color:var(--ob-text-subtle); cursor:pointer; }
-.recent-read-all:hover { background:var(--ob-hover); }
+.tree-waiting-state { flex:none; padding:1px 5px; border-radius:5px; background:rgb(var(--ob-warning-rgb) / .1); color:var(--ob-warning); font-size:10px; line-height:18px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.recent-read-all { display:grid; flex:0 0 20px; width:20px; height:20px; padding:0; place-items:center; border:0; border-radius:5px; background:transparent; color:var(--ob-text-subtle); font-size:12px; cursor:pointer; }
+.recent-read-all:hover { background:var(--ob-hover); color:var(--ob-text); }
 .recent-read-all:focus-visible { outline:2px solid var(--ob-blue); outline-offset:-2px; }
 .recent-read-all:disabled { opacity:.4; cursor:default; }
 @media (max-width:760px), (hover:none) and (pointer:coarse) {
   .sidebar-activity { height:44px; }
-  .sidebar-tabs button,.sidebar-activity-summary { min-height:44px; }
-  .recent-read-all { width:44px; height:44px; flex-basis:44px; }
+  .sidebar-tabs button,.activity-cell { min-height:44px; }
+  .recent-read-all { width:28px; height:44px; flex-basis:28px; }
+  .sidebar-unread-cell .recent-read-all { right:1px; }
   .tree-row-wrap { min-height:44px; }
   .tree-row-wrap.is-chat-active-row { background:var(--ob-chat-selected); color:var(--ob-chat-text); }
   .tree-row-wrap.is-chat-active-row .tree-node-main { background:transparent; color:inherit; }
@@ -1895,7 +2025,6 @@ onBeforeUnmount(() => {
 <style>
 .tree-menu-shield { position:fixed; inset:0; z-index:3200; background:transparent; }
 .tree-context-menu { font-family:inherit; font-size:12px; font-weight:400; line-height:1.4; position:fixed; width:min(194px,calc(100vw - 16px)); max-height:calc(100vh - 16px); overflow:auto; padding:5px; border:1px solid rgb(var(--ob-border-rgb) / .11); border-radius:10px; background:rgb(var(--ob-surface-raised-rgb) / .97); color:var(--ob-text); box-shadow:var(--ob-shadow-popover); backdrop-filter:blur(18px) saturate(1.3); }
-.node-managed { display:inline-flex; flex:none; color:var(--ob-text-muted); font-size:12px; }
 .tree-context-menu button { font:inherit; display:grid; grid-template-columns:16px 1fr; align-items:center; gap:7px; width:100%; min-height:28px; padding:4px 8px; border:0; border-radius:7px; background:transparent; color:inherit; text-align:left; cursor:pointer; }
 @media (max-width:760px), (hover:none) and (pointer:coarse) {
   .tree-context-menu { max-height:calc(var(--mobile-viewport-height, 100dvh) - 16px); }

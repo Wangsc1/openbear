@@ -14,8 +14,6 @@ from tests.test_login_update_regressions import login_env as login_env
 @pytest.mark.parametrize("target", [
     "/chat?id=a%26b%2F%E4%BC%9A%E8%AF%9D",
     "/settings?section=system-settings&domain=notifications",
-    "/recommendations",
-    "/recommendations?source=push&label=%E6%8E%A8%E8%8D%90",
 ])
 async def test_notification_page_target_survives_unauthenticated_login_chain(login_env, target):
     env = login_env
@@ -50,7 +48,7 @@ async def test_notification_page_target_survives_unauthenticated_login_chain(log
     assert parse_qs(restored.url.raw_query_string) == parse_qs(urlsplit(target).query)
 
 
-@pytest.mark.parametrize("target", ["/chat?id=a%26b", "/recommendations?source=push"])
+@pytest.mark.parametrize("target", ["/chat?id=a%26b", "/settings?section=system-settings"])
 async def test_notification_return_target_survives_configured_https_login_hop(login_env, target):
     env = login_env
     env.server.config.web.custom_url = "https://console.example:8443"
@@ -68,9 +66,9 @@ async def test_notification_return_target_survives_configured_https_login_hop(lo
     "https://evil.test/chat", "//evil.test/chat", "/\\evil.test/chat", "/chat\n?x=1",
     "/chat\t", "/api/auth/session", "/login?next=/chat", "/memory", "/%2f%2fevil.test/chat",
     "%2Fchat", "https://console.example/chat", "chat?id=x", "/chat/../settings",
-    "https://evil.test/recommendations", "//evil.test/recommendations",
-    "/\\evil.test/recommendations", "/recommendations/", "/recommendations-extra",
-    "/api/recommendations/cards", "/%72ecommendations", "/recommendations\n?source=push",
+    "/chat/", "/chat-extra", "/%63hat", "/settings\n?section=x",
+    # The removed recommendations page is no longer a notification target.
+    "/recommendations", "/recommendations?source=push",
 ])
 async def test_https_login_rejects_non_whitelisted_return_targets(login_env, target):
     env = login_env
@@ -82,11 +80,11 @@ async def test_https_login_rejects_non_whitelisted_return_targets(login_env, tar
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="cross-language worker/login regression requires Node")
-async def test_real_recommendation_payload_worker_and_server_login_round_trip(login_env):
+async def test_real_completion_payload_worker_and_server_login_round_trip(login_env):
     from app.web_push import BrowserPush
 
     root = Path(__file__).resolve().parents[1]
-    payload = BrowserPush.payload("recommendation", "process-conversation", "recommendation-update")
+    payload = BrowserPush.payload("completed", "process-conversation", "completed-update")
     # Run the actual worker handlers with browser notification/client seams only.
     worker = subprocess.run(["node", "--input-type=module", "-e", """
         import fs from 'node:fs'; import vm from 'node:vm';
@@ -103,8 +101,8 @@ async def test_real_recommendation_payload_worker_and_server_login_round_trip(lo
         await pending; console.log(JSON.stringify(opened));
     """], cwd=root, input=json.dumps(payload), text=True, capture_output=True, check=True, timeout=15)
     clicked = json.loads(worker.stdout)
-    assert clicked == ["https://bear.test/recommendations"]
-    page = await login_env.client.get(urlsplit(clicked[0]).path, allow_redirects=False)
+    assert clicked == ["https://bear.test/chat?id=process-conversation"]
+    page = await login_env.client.get(clicked[0].removeprefix("https://bear.test"), allow_redirects=False)
     assert page.status == 302
     login_url = page.headers["Location"]
     # The browser's success handler consumes exactly the server-generated next.
@@ -112,7 +110,7 @@ async def test_real_recommendation_payload_worker_and_server_login_round_trip(lo
         import fs from 'node:fs'; import {loginSuccessTarget} from './web/src/loginRedirect.js';
         console.log(loginSuccessTarget(new URL(fs.readFileSync(0, 'utf8'), 'https://bear.test')));
     """], cwd=root, input=login_url, text=True, capture_output=True, check=True, timeout=15)
-    assert success.stdout.strip() == "/recommendations"
+    assert success.stdout.strip() == "/chat?id=process-conversation"
 
 
 async def test_non_notification_pages_keep_existing_login_destination(login_env):

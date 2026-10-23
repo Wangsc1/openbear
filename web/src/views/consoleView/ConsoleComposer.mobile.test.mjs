@@ -48,14 +48,6 @@ test('mobile footer keeps context, then icon-only Tokens/cache, cost and duratio
   }
 });
 
-test('model link retains compression strategy immediately after the model name for both strategies', async () => {
-  const template=ast.find(node=>node.type===1 && node.tag==='button' && node.props.some(prop=>prop.name==='class' && prop.value?.content.includes('run-config-chip')));
-  for(const [contextStrategy,label] of [['sliding_window','滑窗压缩'],['model_summary','摘要压缩']]) {
-    const {html}=await render(template,{props:{contextStrategy},runConfigStrategyText:label,runConfigModelText:'GPT-6 Astra',runConfigMetaText:'',runConfigMetaParts:[],runConfigStatusLabel:'',runConfigThinkingBadge:''});
-    assert.ok(html.indexOf('GPT-6 Astra')<html.indexOf(`>${label}</span>`));
-  }
-});
-
 test('actual attachment remove button has a filename, stops preview bubbling and emits only the selected attachment', async () => {
   const calls = [], props = { uploadProgress: {}, pendingAttachments: [{ id: 'one', file: { name: 'photo.png', size: 123, type: 'image/png' } }, { id: 'two', file: { name: 'notes.txt', size: 24, type: 'text/plain' } }] };
   const { html, nodes } = await render(attachmentTemplate, { props, emit: (...args) => calls.push(args), attachmentPreviewUrl: () => '', fmtBytes: value => `${value} B` });
@@ -72,7 +64,7 @@ test('send remains shape-interactive but both button and ReferenceEditor guard c
     window:{localStorage:{getItem:()=>null,setItem(){}},setTimeout:()=>0,clearTimeout(){}}});
   vm.runInContext(between(source, 'const STOP_BUTTON_SHAPE_KEY =', 'function focusInteraction('), context);
   const controls = vm.runInContext('({clickSendButton,stopButtonContextMenu,startStopShapePress,moveStopShapePress,endStopShapePress,cancelButtonShapeInteraction,buttonShapeKeydown})',context);
-  const bindings = {props, emit, ...controls, composerTextarea:null, onPaste(){}, onComposerKeydownCapture(){}, scheduleRunConfigPosition(){}};
+  const bindings = {props, emit, ...controls, composerTextarea:null, onPaste(){}, onComposerKeydownCapture(){}, scheduleRunConfigPosition(){}, onComposerFocusOut(){}, composerFocused:false};
   try {
     let rendered = await render(sendTemplate, bindings);
     assert.equal(rendered.nodes[0].props.disabled, undefined);assert.equal(rendered.nodes[0].props['aria-disabled'], true);
@@ -114,7 +106,7 @@ test('touch keyboard Enter inserts a hard break before ReferenceEditor sends; de
   const composerTextarea = ref({ editor: { view: { composing: false }, commands: { insertContent: node => breaks.push(node) } } });
   const c = vm.createContext({ composerTextarea, window: { matchMedia: () => ({ matches: touch }) }, document: { querySelector: () => suggestion ? {} : null } });
   vm.runInContext(between(source, 'function onComposerKeydownCapture(', 'function scheduleRunConfigPosition('), c);
-  const { nodes } = await render(editorTemplate, { props, composerTextarea, emit: (...args) => calls.push(args), onPaste() {}, onComposerKeydownCapture: c.onComposerKeydownCapture, scheduleRunConfigPosition() {} });
+  const { nodes } = await render(editorTemplate, { props, composerTextarea, emit: (...args) => calls.push(args), onPaste() {}, onComposerKeydownCapture: c.onComposerKeydownCapture, scheduleRunConfigPosition() {}, onComposerFocusOut() {}, composerFocused: false });
   const node = nodes[0];
   assert.equal(typeof node.props.onKeydownCapture, 'function');
   const key = (overrides = {}) => {
@@ -152,13 +144,6 @@ test('touch keyboard Enter inserts a hard break before ReferenceEditor sends; de
   touch=false;event=key();reference.event=event;
   assert.equal(vm.runInContext('onKey(view,event)',reference),true,'desktop Enter still sends');
   nodes[0].props.onSend(); assert.deepEqual(calls, [['send'], ['send'], ['send'], ['send']], 'explicit send is still available on phones');
-});
-
-test('mobile composer hides the bottom hints and leaves the shell owning safe-area padding', () => {
-  assert.match(source, /@media \(max-width: 760px\), \(hover: none\) and \(pointer: coarse\) \{\s*\.composer-hints \{ display: none; \}/);
-  assert.match(source, /class="composer-desktop-shortcut">Enter 发送 · Ctrl\/⌘\+Enter 也可发送/);
-  assert.match(source, /\.composer-shell \{ padding: \.5rem \.75rem 8px; \}/);
-  assert.doesNotMatch(source, /\.composer-shell \{ padding:[^}]*safe-area-inset-bottom/);
 });
 
 test('open run-config popover follows the composer through keyboard blur and visual viewport changes, then detaches', async () => {

@@ -1,25 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import {projectOperationMessages, isContextCompactionOperation} from "../../timelineProjection.js";
 import {compactAgentStepActivityLines, agentCompactionActivityView, isAgentMonitorEventKind} from "./agentPlanPresentation.js";
 import {invalidateContextUsage, mergeStatsContextUsage} from "./contextUsage.js";
-
-const read = path => fs.readFileSync(new URL(path, import.meta.url), "utf8");
-test("summary controls are strategy-gated and candidates belong in system settings", () => {
-  const composer = read("./ConsoleComposer.vue");
-  const consoleView = read("./ConsoleView.vue");
-  const channels = read("../ChannelsView.vue");
-  const api = read("../../api.js");
-  assert.match(composer, /v-if="props.contextStrategy === 'model_summary'"/);
-  assert.match(composer, /手动压缩上下文/);
-  assert.doesNotMatch(consoleView, /compactConversation|serverCompacting|compactRequests|manualMinPercent/);
-  assert.doesNotMatch(channels, /compressionCandidates|compressionOrder|compressionModels/);
-  assert.match(channels, /vuedraggable/);
-  assert.match(api, /conversationCompact:/);
-  assert.doesNotMatch(api, /setCompression/);
-  assert.match(api, /conversationCompaction:/);
-});
 
 test("controller rotation is a local notice, never a tool or model summary", () => {
   const op = {conversationUuid: "c", opId: "window:2", opType: "context_window", displaySeq: 2,

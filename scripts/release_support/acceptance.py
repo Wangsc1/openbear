@@ -25,8 +25,10 @@ from datetime import UTC, datetime
 
 if __package__:
     from .acceptance_helpers import systemd_runtime as sd
+    from .acceptance_helpers.startup_audit import verify_audit
 else:
     from acceptance_helpers import systemd_runtime as sd
+    from acceptance_helpers.startup_audit import verify_audit
 
 SCRIPTS = pathlib.Path(__file__).resolve().parent / "acceptance_helpers"
 ADMIN_ID = "123456789"
@@ -402,6 +404,36 @@ systemctl daemon-reload
             raise AssertionError("live probe archive identity mismatch")
         return result
 
+    def verify_package_extras(self, name: str, state: pathlib.Path, label: str, version: str) -> dict:
+        output = f"/obaccept/state/{label}-package-extras.json"
+        proc = self.docker_exec(name, [
+            "/opt/openbear/.venv/bin/python", "/obaccept/scripts/verify_package_extras.py",
+            "/opt/openbear", f"/obaccept/assets/{version}/openbear-{version}.zip", output,
+        ], f"{label}-package-extras", timeout=60, check=False)
+        report = state / f"{label}-package-extras.json"
+        result = json.loads(report.read_text(encoding="utf-8")) if report.is_file() else {"ok": False, "errors": ["missing report"]}
+        if proc.returncode or not result.get("ok"):
+            raise AssertionError(f"{label}: installed tree lacks the package's instance/gateway files: {result}")
+        return result
+
+    def verify_history_boot(self, name, state, label, service, boot_number):
+        """A mandatory B gate; retain structured evidence even when the helper fails."""
+        self.stage = label
+        pid, _ = service_identity(service)
+        proc = self.docker_exec(name, [
+            "/opt/openbear/.venv/bin/python", "/obaccept/scripts/startup_probe.py",
+            "--baseline", "/obaccept/state/upgrade-baseline.json",
+            "--audit", "/obaccept/state/startup-audit.jsonl",
+            "--output", f"/obaccept/state/{label}.json", "--pid", pid,
+            "--boot-number", str(boot_number), "--version", self.version, "--port", "18961",
+        ], label, timeout=90, check=False)
+        output = state / f"{label}.json"
+        result = json.loads(output.read_text()) if output.is_file() else {"ok": False, "errors": ["missing startup probe report"]}
+        self.results["heavyHistoryGate"]["boots"].append(result)
+        if proc.returncode or not result.get("ok"):
+            raise AssertionError(f"{label}: {result}")
+        return result
+
     def run_a(self) -> dict:
         self.stage = "A-clean-install"
         print("Starting A: real clean installer", flush=True)
@@ -409,13 +441,14 @@ systemctl daemon-reload
         self.prepare_container(name, state, "a")
         self.install_release(name, state, self.version, "a")
         service = self.collect_runtime(name, state, "a-post-install", self.version)
+        extras = self.verify_package_extras(name, state, "a", self.version)
         probe = self.live_probe(name, state, "a", self.version)
         counts = json.loads(self.docker_exec(name, ["curl", "-fsS", "http://127.0.0.1:19580/counts"], "a-fixture-counts").stdout)
         if counts.get(f"release_metadata_{self.version}", 0) < 1 or counts.get(f"asset_{self.version}_openbear-{self.version}.zip", 0) < 1:
             raise AssertionError(f"A installer did not fetch locked assets through real curl: {counts}")
         if counts.get("model_request", 0) < 2 or counts.get("telegram_getUpdates", 0) < 1:
             raise AssertionError(f"A real app did not use controlled model/Telegram fixture: {counts}")
-        result = {"status": "PASS", "zipSha256": self.asset_sha(self.version), "runtime": runtime, "service": service, "probe": probe, "fixtureCounts": counts}
+        result = {"status": "PASS", "zipSha256": self.asset_sha(self.version), "runtime": runtime, "service": service, "probe": probe, "packageExtras": extras, "fixtureCounts": counts}
         write_json(state / "a-result.json", result)
         return result
 
@@ -431,6 +464,18 @@ systemctl daemon-reload
         baseline = json.loads((state / "upgrade-baseline.json").read_text(encoding="utf-8"))
         if baseline["version"] != self.previous_version or baseline["files"]["openbear.json"]["mode"] != 0o600:
             raise AssertionError("invalid previous-version seed/config baseline")
+
+        history = baseline.get("heavyHistory", {})
+        require(history.get("frameCount", 0) >= 100_000 and len(history.get("latestFrames", [])) == 24,
+                "B requires >=100k historical frames and every operation's latest-frame/body sentinel; no compatibility skip")
+        self.results["heavyHistoryGate"] = {
+            "baseline": history, "boots": [], "auditFile": str(state / "startup-audit.jsonl"),
+        }
+        # Only future service processes are observed, not old installation/seeding or
+        # the updater. The real previous updater and installed application stay intact.
+        self.docker_exec(name, ["bash", "-c", "printf '%s\\n' '[Service]' "
+            "'Environment=OB_ACCEPTANCE_STARTUP_AUDIT=/obaccept/state/startup-audit.jsonl' "
+            "> /etc/systemd/system/openbear.service.d/history-audit.conf && systemctl daemon-reload"], "b-arm-startup-audit")
 
         request = {
             "schema": 1,
@@ -474,6 +519,8 @@ systemctl daemon-reload
         new_identity = service_identity(new_service)
         if (old_identity != new_identity) is not expected_restart:
             raise AssertionError(f"Unexpected restart behavior: expected restart={expected_restart}, before={old_identity}, after={new_identity}")
+        if expected_restart:
+            first_boot = self.verify_history_boot(name, state, "b-first-startup-history", new_service, 1)
         self.docker_exec(name, [
             "/opt/openbear/.venv/bin/python", "/obaccept/scripts/old_session_probe.py", "--port", "18961",
             "--session-file", "/obaccept/state/pre-upgrade-session.txt", "--output", "/obaccept/state/old-session-after-upgrade.json",
@@ -490,6 +537,41 @@ systemctl daemon-reload
             "--output", "/obaccept/state/removed-files.json",
         ], "b-verify-removed", timeout=120)
         removed = json.loads((state / "removed-files.json").read_text(encoding="utf-8"))
+        # Refresh-only packages must still boot their newly installed code once;
+        # this does not change the updater's separately checked restart decision.
+        first_service, first_probe = new_service, new_probe
+        if not expected_restart:
+            self.docker_exec(name, ["systemctl", "restart", "openbear.service"], "b-first-boot-after-refresh", timeout=90)
+            first_service = self.collect_runtime(name, state, "b-first-boot", self.version)
+            require(service_identity(first_service) != new_identity, "refresh boot did not replace the process")
+            first_boot = self.verify_history_boot(name, state, "b-first-startup-history", first_service, 1)
+            first_probe = self.live_probe(name, state, "b-first-boot", self.version)
+        # The previous updater may not replace these; the new code restores them
+        # from its retained package when the upgraded service first starts.
+        extras = self.verify_package_extras(name, state, "b", self.version)
+        self.stage = "B-second-startup"
+        self.docker_exec(name, ["systemctl", "restart", "openbear.service"], "b-second-restart", timeout=90)
+        second_service = self.collect_runtime(name, state, "b-second-boot", self.version)
+        require(service_identity(second_service) != service_identity(first_service), "second boot did not replace the process")
+        second_boot = self.verify_history_boot(name, state, "b-second-startup-history", second_service, 2)
+        second_probe = self.live_probe(name, state, "b-second-boot", self.version)
+        second_check = self.docker_exec(name, ["/opt/openbear/.venv/bin/python", "/obaccept/scripts/verify_upgrade.py",
+            "/obaccept/state/upgrade-baseline.json", "/obaccept/state/second-preservation.json",
+            "restart" if expected_restart else "refresh"], "b-second-verify-preservation", timeout=120, check=False)
+        second_preservation = json.loads((state / "second-preservation.json").read_text(encoding="utf-8"))
+        self.results["heavyHistoryGate"]["secondPreservation"] = second_preservation
+        require(second_check.returncode == 0 and second_preservation.get("ok"), f"second-start preservation failed: {second_preservation}")
+        # Close the observation window AFTER the real login/model/WebSocket and
+        # preservation checks, catching delayed cleanup and automatic restarts too.
+        rows = [json.loads(line) for line in (state / "startup-audit.jsonl").read_text().splitlines()]
+        final_audit = verify_audit(rows, service_identity(second_service)[0])
+        if sum(row.get("event") == "observerInstalled" for row in rows) != 2:
+            final_audit["errors"].append("unexpected service restart during live probes")
+        if any(row.get("event") in {"frameDeleteAttempt", "startupFailed"} for row in rows):
+            final_audit["errors"].append("DELETE/startup failure before live probes completed")
+        final_audit["ok"] = not final_audit["errors"]
+        self.results["heavyHistoryGate"]["finalAudit"] = final_audit
+        require(final_audit["ok"], f"final startup observation failed: {final_audit}")
         counts = json.loads(self.docker_exec(name, ["curl", "-fsS", "http://127.0.0.1:19580/counts"], "b-fixture-counts").stdout)
         if counts.get(f"release_metadata_{self.previous_version}", 0) < 1 or counts.get(f"asset_{self.previous_version}_openbear-{self.previous_version}.zip", 0) < 1:
             raise AssertionError(f"B old installer did not fetch formal previous-version assets through real curl: {counts}")
@@ -501,7 +583,10 @@ systemctl daemon-reload
             "newService": new_service, "oldSession": old_session,
             "updateBehavior": {"requiresRestart": expected_restart, "processChanged": old_identity != new_identity,
                                "frontendBuildChanged": old_probe["frontendBuild"]["buildId"] != new_probe["frontendBuild"]["buildId"]},
-            "newProbe": new_probe, "preservation": preservation, "removedFiles": removed,
+            "newProbe": new_probe, "preservation": preservation, "removedFiles": removed, "packageExtras": extras,
+            "heavyHistoryGate": self.results["heavyHistoryGate"],
+            "firstStartup": {"service": first_service, "probe": first_probe, "history": first_boot},
+            "secondStartup": {"service": second_service, "probe": second_probe, "history": second_boot},
             "fixtureCounts": counts,
         }
         write_json(state / "b-result.json", result)

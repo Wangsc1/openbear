@@ -17,7 +17,6 @@ TEST_STAGES = ("py311", "py312", "py313", "frontend")
 DEFAULT_IMAGES = {"pythonImages": {v: f"openbear-release-python:{version}" for v, version in
                                   (("311", "3.11"), ("312", "3.12"), ("313", "3.13"))},
                   "systemdImage": "openbear-release-systemd:local"}
-ALLOWED_LOCAL_SKIP = "test_openbear_v31_is_active_baseline_derived_and_renders_from_database"
 
 
 def execution_environment(environment, stage):
@@ -26,6 +25,11 @@ def execution_environment(environment, stage):
     if stage.startswith("py") or stage == "frontend-checks":
         identity["pythonImage"] = environment["pythonImages"][stage[2:] if stage.startswith("py") else "312"]
     return identity
+
+
+def acceptance_fingerprint(support):
+    paths = [support / "acceptance.py", *sorted((support / "acceptance_helpers").rglob("*.py"))]
+    return fingerprint({str(path.relative_to(support)): sha(path.read_bytes()) for path in paths})
 
 
 def verified_build(result, root=None, identity=None):
@@ -60,8 +64,11 @@ def matrix_contract(results):
         for case in cases:
             if case["status"] == "skipped":
                 name = case["id"]
-                approved = (("test_live_agent" in name or "test_live_parrot" in name) and "--run-live" in case.get("skipReason", "")) or (
-                    ALLOWED_LOCAL_SKIP in name and "requires local data/openbear.db snapshot" in case.get("skipReason", ""))
+                reason = case.get("skipReason", "")
+                # Real-upstream tests, and real-systemd tests that need PID 1 systemd
+                # (the matrix containers have none; A/B run the unit under systemd).
+                approved = ((name.startswith(("tests.test_live_parrot::", "tests.test_live_read_images::")) and "--run-live" in reason)
+                            or (name.startswith("tests.test_systemd_watchdog_live::") and "OPENBEAR_SYSTEMD_TEST=1" in reason))
                 if not approved:
                     raise ReleaseError(f"Unexpected conditional skip requires review: {name}: {case.get('skipReason')}")
             elif case["status"] != "passed":
@@ -417,10 +424,13 @@ class Runner:
             candidate.assert_local(self.repo, self.value, self.command)
             package = self.state.execute("package", {"candidate": identity["sourceFingerprint"], "build": built, "previous": previous}, lambda: self.build_stage("package"),
                                          valid=lambda result: asset_metadata(self.directory / "assets", result["assets"]))
-            operations = {"smoke": lambda: self.state.execute("smoke", package["assets"], lambda: self.build_stage("smoke"))}
+            operations = {"smoke": lambda: self.state.execute("smoke",
+                {"assets": package["assets"], "validator": sha((self.support / "build.py").read_bytes()),
+                 "image": environment["pythonImages"]["312"]}, lambda: self.build_stage("smoke"))}
+            harness = acceptance_fingerprint(self.support)
             for case in ("A", "B"):
                 operations["acceptance-" + case] = lambda case=case: self.state.execute("acceptance-" + case,
-                    {"assets": package["assets"], "previous": previous, "image": self.value["images"]["systemd"]},
+                    {"assets": package["assets"], "previous": previous, "image": self.value["images"]["systemd"], "harness": harness},
                     lambda: self.acceptance(case, approved))
             self.parallel(operations)
             candidate.assert_local(self.repo, self.value, self.command)

@@ -1,13 +1,10 @@
 <script setup>
 import brain from '../../assets/model-icons/brain.svg';
 import zap from '../../assets/model-icons/zap.svg';
-import context from '../../assets/model-icons/messages-square.svg';
 import compression from '../../assets/model-icons/file-archive.svg';
-import output from '../../assets/model-icons/file-output.svg';
-import protocol from '../../assets/model-icons/webhook.svg';
 
 defineProps({name: {type: String, required: true}});
-const icons = {brain, zap, context, compression, output, protocol};
+const icons = {brain, zap, compression};
 </script>
 
 <template>

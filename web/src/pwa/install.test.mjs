@@ -5,6 +5,8 @@ import { compileScript, compileTemplate, parse } from "@vue/compiler-sfc";
 import { computed, ref, shallowRef } from "vue";
 import { createInstallController, checkInstallResources, httpsOrigin, installPresentation, INSTALL_ICONS } from "./install.js";
 
+import { MANIFEST_PATH, DARK_MANIFEST_PATH, activeManifestPath } from "./manifest.js";
+
 const publicRoot = new URL("../../public/", import.meta.url);
 const manifest = JSON.parse(readFileSync(new URL("manifest.webmanifest", publicRoot), "utf8"));
 class FakeWindow extends EventTarget {
@@ -157,6 +159,35 @@ test("resource checks read real manifest/PNG assets with anonymous same-origin n
     assert.equal(options.cache, "no-store");
     assert.equal(options.redirect, "error");
     assert.equal(options.referrerPolicy, "no-referrer");
+  }
+});
+
+test("dark and light installation manifests retain the same app identity, scope and icons", async () => {
+  const origin = "https://bear.example";
+  const normalize = (data, path) => {
+    const normalized = structuredClone(data);
+    for (const key of ["id", "start_url", "scope"]) normalized[key] = new URL(data[key], `${origin}${path}`).href;
+    for (const icon of normalized.icons) icon.src = new URL(icon.src, `${origin}${path}`).href;
+    delete normalized.theme_color;
+    delete normalized.background_color;
+    return normalized;
+  };
+  for (const [path, color] of [[MANIFEST_PATH, "#f8f8f8"], [DARK_MANIFEST_PATH, "#161616"]]) {
+    const data = JSON.parse(readFileSync(new URL(path.slice(1), publicRoot), "utf8"));
+    assert.equal(data.theme_color, color);
+    assert.equal(data.background_color, color);
+    assert.deepEqual(normalize(data, path), normalize(manifest, MANIFEST_PATH));
+    const win = new FakeWindow();
+    win.document = {querySelector: () => ({getAttribute: () => path})};
+    await checkInstallResources(win);
+    assert.equal(new URL(win.fetchCalls[0].url).pathname, path);
+    assert.ok(win.fetchCalls.every(({url, options}) => new URL(url).origin === origin && options.credentials === "omit"));
+  }
+});
+
+test("manifest resource checks never follow an external or unknown link", () => {
+  for (const href of ["https://other.example/manifest.webmanifest", "//other.example/manifest.webmanifest", "/api/private", undefined]) {
+    assert.equal(activeManifestPath({querySelector: () => ({getAttribute: () => href})}), MANIFEST_PATH);
   }
 });
 

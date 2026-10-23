@@ -150,6 +150,68 @@ async def test_failed_or_cancelled_history_migration_rolls_back_and_retries(tmp_
     assert json.loads(rows[0][2])["terminalAtMs"] == 1000
 
 
+async def test_conversation_origins_backfill_exact_run_matches_on_every_startup(tmp_path):
+    import uuid
+
+    path = tmp_path / "origins.db"
+    database = DB(str(path))
+    await database.connect()
+    await database.close()
+    batch_conversation = str(uuid.uuid5(uuid.NAMESPACE_URL, "openbear:webhook:batch:batch-1"))
+
+    def legacy_rows(connection, suffix):
+        # Rows as an older binary wrote them: no origin columns supplied.
+        for index, name in enumerate(("cron", "own", "plain")):
+            connection.execute(
+                "INSERT INTO web_conversations(conversation_uuid,owner_chat_id,internal_chat_id,title,folder_uuid) VALUES (?,?,?,?,?)",
+                (f"{name}{suffix}", 7, -(index + 1) * 10 - len(suffix), name, ""),
+            )
+        connection.execute(
+            """INSERT INTO cron_runs(run_id,job_id,owner_chat_id,folder_id,job_name,trigger_kind,scheduled_at_ms,
+               occurrence_key,config_json,config_revision,conversation_uuid,root_turn_uuid,started_at_ms)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (f"cron-run{suffix}", "job", 7, "", "Job", "schedule", 1, f"occ{suffix}", "{}", 1, f"cron{suffix}", f"cron-root{suffix}", 1),
+        )
+
+    with sqlite3.connect(path) as connection:
+        legacy_rows(connection, "")
+        connection.execute(
+            "INSERT INTO web_conversations(conversation_uuid,owner_chat_id,internal_chat_id,title) VALUES (?,?,?,?)",
+            (batch_conversation, 7, -900, "Webhook"),
+        )
+        connection.execute("PRAGMA foreign_keys=OFF")
+        for assignment, conversation, batch in (("assign-new", batch_conversation, "batch-1"), ("assign-own", "own", "batch-2")):
+            connection.execute(
+                """INSERT INTO webhook_assignments(assignment_id,origin_kind,conversation_uuid,internal_chat_id,root_turn_uuid,
+                   initial_batch_id,origin_endpoint_id,origin_revision,task_start_cursor,authorization_snapshot_json,created_at_ms)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (assignment, "webhook", conversation, -1, assignment + "-root", batch, "endpoint", 1, 0, "{}", 1),
+            )
+
+    restarted = DB(str(path))
+    await restarted.connect()
+    await restarted.close()
+
+    def origins():
+        with sqlite3.connect(path) as connection:
+            return {row[0]: (row[1], row[2]) for row in connection.execute(
+                "SELECT conversation_uuid,origin_kind,origin_ref FROM web_conversations")}
+
+    assert origins() == {
+        "cron": ("cron", "cron-run"),
+        "own": ("", ""), "plain": ("", ""), batch_conversation: ("webhook", "assign-new"),
+    }
+    # Rows written by an older binary after a rollback are recognised on the next start.
+    with sqlite3.connect(path) as connection:
+        legacy_rows(connection, "-later")
+    again = DB(str(path))
+    await again.connect()
+    await again.close()
+    after = origins()
+    assert after["cron-later"] == ("cron", "cron-run-later")
+    assert after["own"] == after["own-later"] == ("", "")
+
+
 async def test_pruned_frames_are_not_recreated_by_later_startup(tmp_path):
     path = tmp_path / "retention.db"
     await legacy_database(path, count=1)

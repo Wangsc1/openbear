@@ -116,7 +116,8 @@ async def test_actual_agent_continue_new_task_evicts_old_inputs_not_current_brie
     prepare = ContextManager.prepare
 
     async def force_window(self, messages, **kwargs):
-        self.policy = WindowPolicy(128000, trigger_tokens=16000)
+        # Without the dialogue layer an old brief is only optional history.
+        self.policy = WindowPolicy(128000, trigger_tokens=16000, retain_tokens=2400, dialogue_tokens=0)
         kwargs["force"] = True
         return await prepare(self, messages, **kwargs)
 

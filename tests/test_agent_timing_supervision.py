@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from app.agent.result import RunResult
+from app.agents import live_state
 from app.agents.control import AgentControlService
 from app.agents.execution import AgentExecutor
 from app.agents.supervision import review_observation
@@ -115,9 +116,12 @@ async def test_review_backlog_is_not_new_activity_and_does_not_lose_events(env):
     dao, task_uuid, _agent = env
     await dao.update_task(task_uuid, status="running", current_status="模型调用中")
     await dao.append_event(task_uuid, "model_call_started", detail={"attemptId": "a"})
+    # Legacy stored progress rows still form a backlog; current progress is in memory.
     for size in range(120):
         await dao.append_event(task_uuid, "model_stream_progress", detail={
             "toolInput": {"attemptId": "a", "receivedBytes": size, "toolNames": ["Write"], "phase": "generating"}})
+    live_state.update(task_uuid, progress={"attemptId": "a", "updatedAtMs": 100000, "toolInput": {
+        "attemptId": "a", "receivedBytes": 119, "toolNames": ["Write"], "phase": "generating"}})
     critical = await dao.append_event(task_uuid, "plan_criterion_recorded", detail={"criterionId": "c1"})
     await dao.db.conn.execute("UPDATE rath_task_events SET ts=100 WHERE task_uuid=?", (task_uuid,))
     await dao.db.conn.commit()
@@ -143,6 +147,34 @@ async def test_review_backlog_is_not_new_activity_and_does_not_lose_events(env):
     assert observation["hasActivity"]
     assert observation["currentExecution"]["phase"] == "tool"
     assert observation["deliveryEvidence"]["known"] is False
+    live_state.clear(task_uuid)
+
+
+async def test_review_counts_new_in_memory_output_as_activity(env):
+    dao, task_uuid, _agent = env
+    await dao.update_task(task_uuid, status="running", current_status="模型调用中")
+    await dao.append_event(task_uuid, "model_call_started", detail={"attemptId": "a"})
+    await dao.db.conn.execute("UPDATE rath_task_events SET ts=100 WHERE task_uuid=?", (task_uuid,))
+    await dao.db.conn.commit()
+    task = await dao.get_task(task_uuid)
+    observation, previous = review_observation(task, await dao.supervision_events(task_uuid), {}, {}, now_ms=700000)
+    assert observation["currentExecution"]["lastReportedOutputAtMs"] is None
+    try:
+        live_state.update(task_uuid, progress={"attemptId": "a", "updatedAtMs": 650000, "textChars": 9})
+        observation, previous = review_observation(
+            task, await dao.supervision_events(task_uuid, after_seq=previous["lastEventSeq"]), {}, previous, now_ms=700000)
+        assert observation["hasActivity"] is True
+        assert observation["activitySource"] == "latest_reported_output"
+        assert observation["currentExecution"]["reportedOutputAgeMs"] == 50000
+        observation, _ = review_observation(
+            task, await dao.supervision_events(task_uuid, after_seq=previous["lastEventSeq"]), {}, previous, now_ms=700000)
+        assert observation["hasActivity"] is False
+        # Progress of another attempt never describes the current call.
+        live_state.update(task_uuid, progress={"attemptId": "b", "updatedAtMs": 690000})
+        observation, _ = review_observation(task, await dao.supervision_events(task_uuid), {}, {}, now_ms=700000)
+        assert observation["currentExecution"]["lastReportedOutputAtMs"] is None
+    finally:
+        live_state.clear(task_uuid)
 
 
 async def test_review_retry_wait_recorded_plan_and_terminal_boundary(env):

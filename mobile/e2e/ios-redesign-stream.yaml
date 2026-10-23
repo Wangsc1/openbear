@@ -1,0 +1,59 @@
+# 界面改版 · 流式与停止（iPhone）：发送 -> 运行中时间线 -> 上翻出现"新内容" -> 点回底部 -> 停止
+appId: dev.openbear.app
+---
+- launchApp:
+    stopApp: false
+- tapOn:
+    id: "back"
+    optional: true
+- extendedWaitUntil:
+    visible:
+      id: "conversation-list"
+    timeout: 60000
+- scrollUntilVisible:
+    element:
+      id: "conv-d8e18cc9"
+    direction: DOWN
+    timeout: 20000
+- tapOn:
+    id: "conv-d8e18cc9"
+- extendedWaitUntil:
+    visible:
+      id: "row-answer"
+    timeout: 30000
+- tapOn:
+    id: "composer-input"
+- inputText: "继续"
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "composer-stop"
+    timeout: 20000
+- swipe:
+    start: 50%, 30%
+    end: 50%, 95%
+    duration: 900
+- waitForAnimationToEnd
+- takeScreenshot: s01-running
+- swipe:
+    start: 50%, 30%
+    end: 50%, 80%
+    duration: 300
+- extendedWaitUntil:
+    visible:
+      id: "new-content"
+    timeout: 60000
+- takeScreenshot: s02-new-content
+- tapOn:
+    id: "new-content"
+- waitForAnimationToEnd
+- takeScreenshot: s03-follow-bottom
+- tapOn:
+    id: "composer-stop"
+- extendedWaitUntil:
+    visible:
+      id: "composer-send"
+    timeout: 20000
+- waitForAnimationToEnd
+- takeScreenshot: s04-stopped

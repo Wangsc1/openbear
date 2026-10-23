@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {ref} from 'vue';
+import * as conversationGroupsTree from './conversationGroupsTree.js';
 const source=fs.readFileSync(new URL('./ConversationTree.vue',import.meta.url),'utf8');
 function between(start,end){return source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));}
 function harness(load=async()=>{}){
  const expanded=new Set(),events=[],requests=[],branches=new Map();
- const context=vm.createContext({selectedFolderId:ref('previous'),archiveUnlocked:ref(false),closeOverview(){},
+ const context=vm.createContext({...conversationGroupsTree,selectedFolderId:ref('previous'),archiveUnlocked:ref(false),closeOverview(){},
   isExpanded:id=>expanded.has(id),setExpanded:(id,value)=>value?expanded.add(id):expanded.delete(id),
   stateFor:(id='',system='')=>{const key=id+system;if(!branches.has(key))branches.set(key,{parentId:id,systemNode:system,loading:false});return branches.get(key);},
   invalidateBranch:(id,system)=>{branches.get(id+system).loading=false;},

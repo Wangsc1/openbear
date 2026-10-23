@@ -30,7 +30,8 @@ def test_example_config_loads_and_matches_visible_defaults():
     cfg = load_config(Path(__file__).resolve().parents[1] / "openbear.json.example")
     assert cfg.ui.show_turn_stats is True
     assert cfg.agent.compact_ratio == 0.7
-    assert cfg.context_management.retain_ratio == 0.15
+    assert cfg.context_management.retain_tokens == 40_000
+    assert cfg.context_management.dialogue_tokens == 10_000
     assert cfg.validate_for_startup() == []
 
 

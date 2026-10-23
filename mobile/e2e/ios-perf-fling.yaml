@@ -1,0 +1,33 @@
+# 性能采集用：打开最长对话 -> 上甩 12 次（触发向上翻页）-> 下甩 12 次 -> 返回
+appId: dev.openbear.app
+---
+- launchApp:
+    stopApp: false
+- tapOn:
+    id: "back"
+    optional: true
+- tapOn:
+    id: "${IMPL}"
+- tapOn:
+    id: "conv-a6a877ad"
+- extendedWaitUntil:
+    visible:
+      id: "row-answer"
+    timeout: 30000
+- waitForAnimationToEnd
+- repeat:
+    times: 12
+    commands:
+      - swipe:
+          start: 50%, 25%
+          end: 50%, 85%
+          duration: 90
+- repeat:
+    times: 12
+    commands:
+      - swipe:
+          start: 50%, 85%
+          end: 50%, 25%
+          duration: 90
+- waitForAnimationToEnd
+- takeScreenshot: after-fling

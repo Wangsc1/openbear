@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -79,3 +80,22 @@ async def test_send_pending_restart_completion_notices(tmp_path):
     assert "openai/gpt" in text
     assert "正常" in text
     assert not restart_notification_path(svc.config).exists()
+
+
+async def test_cancelled_delivery_restores_current_and_remaining_notices(tmp_path, monkeypatch):
+    svc = FakeSvc(tmp_path)
+    for owner in (123, 456):
+        add_restart_completion_notice(svc.config, chat_id=owner, reason="test")
+    entered = asyncio.Event()
+
+    async def blocked(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("app.restart_notify.send_rich", blocked)
+    task = asyncio.create_task(send_pending_restart_completion_notices(FakeBot(), svc))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert [item["chatId"] for item in pop_restart_completion_notices(svc.config)] == [123, 456]

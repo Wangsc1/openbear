@@ -27,6 +27,7 @@ _INTERNAL_TASK_KEYS = frozenset({
     "finishedAtMs",
     "durationMs",
     "updatedAtMs",
+    "liveProgress",
 })
 _INTERNAL_EVENT_KINDS = frozenset({
     "tool_call_started",

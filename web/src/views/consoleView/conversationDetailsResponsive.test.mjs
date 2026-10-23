@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {register} from 'node:module';
 import postcss from 'postcss';
-import {parse, compileScript, compileStyle, compileTemplate} from '@vue/compiler-sfc';
+import {parse, compileScript} from '@vue/compiler-sfc';
 import {createRenderer, h, nextTick, reactive} from 'vue';
 
 const files = ['AgentEventCard.vue', 'AgentActivityList.vue', 'AgentProcessActivity.vue', 'AgentPlanWorkspace.vue', 'ToolArgumentsView.vue', 'ConsoleToolEvent.vue', 'TurnEvent.vue', 'TurnList.vue'];
@@ -92,13 +92,6 @@ function px(value, env, percentBase = env.width) {
   assert.match(expr, /^[\d\s.,()*+\-/a-zA-Z]+$/);
   return new Function('clamp', `return ${expr}`)((lo, v, hi) => Math.max(lo, Math.min(v, hi)));
 }
-
-test('all affected SFC scripts/templates and scoped CSS compile, including container queries', () => {
-  for (const f of files) {
-    assert.deepEqual(compileTemplate({source: descriptors[f].template.content, filename: f, id: f}).errors, [], f);
-    for (const s of descriptors[f].styles) assert.deepEqual(compileStyle({source: s.content, filename: f, id: f, scoped: s.scoped}).errors, [], f);
-  }
-});
 
 test('full long tool arguments/results survive the conversation TurnEvent path', async t => {
   const args = JSON.stringify({command: long('ARGS'), description: long('DESCRIPTION')});

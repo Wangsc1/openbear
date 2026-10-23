@@ -3,6 +3,7 @@ import {Check, CopyDocument, Link, Hide, Clock, Timer, Top, Bottom, Coin} from "
 import {Undo2} from "@lucide/vue";
 import {ElMessage} from "element-plus";
 import {ref} from "vue";
+import { contextResourceUrl } from '../../sessionBoundary.js';
 import {copyTextToClipboard} from "../../utils/clipboard.js";
 import {referenceDisplayText} from "../../references/codec.js";
 import {
@@ -13,7 +14,8 @@ import {
 import ConsoleMarkdown from "./ConsoleMarkdown.vue";
 import WebhookMessageCard from './WebhookMessageCard.vue';
 import CronMessageCard from './CronMessageCard.vue';
-import RecommendationMessageCard from './RecommendationMessageCard.vue';
+import InstanceMessageCard from './InstanceMessageCard.vue';
+import CollabMessageCard from './CollabMessageCard.vue';
 import ReplyMarkdownShare from "./ReplyMarkdownShare.vue";
 import {replyMarkdownText} from "./replyMarkdownShare.js";
 import TurnEvent from "./TurnEvent.vue";
@@ -31,6 +33,12 @@ const props = defineProps({
 	turns: {type: Array, default: () => []},
 	conversationUuid: {type: String, default: ""},
 	running: {type: Boolean, default: false},
+	// A turn is in progress only while its controller is alive. Agents left
+	// running after the controller ended (or failed) are background work: that
+	// turn is finished, and new input starts the next turn.
+	controllerRunning: {type: Boolean, default: false},
+	// Turn the running controller writes to (a continuation block or its root); -1 = the latest.
+	activeTurnIndex: {type: Number, default: -1},
 	deletingTurnUuid: {type: String, default: ""},
 	autoScrollLocked: {type: Boolean, default: false},
 	retryActionPending: {type: Object, default: () => ({})},
@@ -38,7 +46,7 @@ const props = defineProps({
 	isDetailOpen: {type: Function, required: true},
 	activeToolResultIndex: {type: Function, required: true},
 });
-const emit = defineEmits(["details-toggle", "reasoning-toggle", "select-tool-result", "delete-suffix", "cancel-retry", "retry-now"]);
+const emit = defineEmits(["details-toggle", "reasoning-toggle", "select-tool-result", "delete-suffix", "cancel-retry", "retry-now", "locate-turn"]);
 
 function displayEvents(turn) {
 	return Array.isArray(turn?.events) ? turn.events : [];
@@ -80,8 +88,22 @@ function useProcessRow(entry) {
 	return isInlineProcess(entry) && !isAgentEvent(entry.event);
 }
 
+function turnInProgress(turnIndex) {
+	const active = props.activeTurnIndex >= 0 ? props.activeTurnIndex : props.turns.length - 1;
+	return props.controllerRunning && turnIndex === active;
+}
+
+function continuationRootLabel(turn) {
+	const info = turn?.user?.continuation || {};
+	const date = new Date(Number(info.rootStartedAt || 0) * 1000);
+	if (!info.rootStartedAt || Number.isNaN(date.getTime())) return "接续之前的一轮";
+	const sameDay = date.toDateString() === new Date().toDateString();
+	const time = date.toLocaleString("zh-CN", {hour12: false, ...(sameDay ? {} : {month: "2-digit", day: "2-digit"}), hour: "2-digit", minute: "2-digit"});
+	return info.rootPreview ? `接续 ${time}「${info.rootPreview}」` : `接续 ${time} 的一轮`;
+}
+
 function turnWorking(turn, turnIndex) {
-	return Boolean((props.running && turnIndex === props.turns.length - 1) || turn?.stats?.live
+	return Boolean(turnInProgress(turnIndex) || turn?.stats?.live
 		|| displayEvents(turn).some(event => event?.persistentRunIndicator) || turnView(turn).liveAnswer);
 }
 
@@ -123,7 +145,7 @@ function attachmentName(item) {
 }
 
 function attachmentUrl(item) {
-	return item?.previewUrl || item?.contentUrl || item?.downloadUrl || "";
+	return contextResourceUrl(item?.previewUrl || item?.contentUrl || item?.downloadUrl || "");
 }
 
 function imagePreviewList(turn) {
@@ -284,7 +306,7 @@ function assistantVisibilityTarget(turn) {
 
 function assistantMetaVisible(turn, turnIndex) {
 	if (!hasAssistantContent(turn) && displayEvents(turn).some(visibility.isHidden)) return false;
-	if (props.running && turnIndex === props.turns.length - 1) return false;
+	if (turnInProgress(turnIndex)) return false;
 	if (turn?.stats?.live) return false;
 	if (turnView(turn).liveAnswer) return false;
 	// Completion statistics belong to the whole turn, even when compaction or
@@ -319,12 +341,20 @@ async function copyMessage(content, key) {
 <template>
 	<template v-for="(turn, turnIndex) in props.turns" :key="turn.id">
 	<section v-if="(turn.user && !turn.user.syntheticPlaceholder && !visibility.isHidden(turn.user)) || hasAssistantContent(turn) || assistantMetaVisible(turn, turnIndex)" class="turn-block" :data-turn-index="turnIndex">
-		<div v-if="turn.user && !turn.user.syntheticPlaceholder && !visibility.isHidden(turn.user)" class="timed-row timed-row-user visibility-hover-surface" :data-search-op-id="turn.user.opId || turn.user.id" :class="[visibilitySelectionClasses(turn.user, visibility), {'timed-row-event': ['webhook', 'cron', 'recommendation'].includes(turn.user.source)}]" @click.capture="selectVisibilityRow($event, turn.user, visibility)">
+		<div v-if="turn.user?.continuation" class="turn-continuation">
+			<span class="turn-continuation-label">后台任务完成后继续</span>
+			<button v-if="turn.user.continuation.rootUserOpId" type="button" class="turn-continuation-root"
+			        :title="`查看原提问：${turn.user.continuation.rootPreview || ''}`"
+			        @click="emit('locate-turn', turn.user.continuation.rootUserOpId)">{{ continuationRootLabel(turn) }}</button>
+			<span v-else class="turn-continuation-root">{{ continuationRootLabel(turn) }}</span>
+		</div>
+		<div v-if="turn.user && !turn.user.syntheticPlaceholder && !visibility.isHidden(turn.user)" class="timed-row timed-row-user visibility-hover-surface" :data-search-op-id="turn.user.opId || turn.user.id" :class="[visibilitySelectionClasses(turn.user, visibility), {'timed-row-event': ['webhook', 'cron', 'instance', 'collab'].includes(turn.user.source)}]" @click.capture="selectVisibilityRow($event, turn.user, visibility)">
 			<div class="user-row">
 				<div class="user-message-group">
 					<WebhookMessageCard v-if="turn.user.source === 'webhook'" :message="turn.user"/>
 					<CronMessageCard v-else-if="turn.user.source === 'cron'" :message="turn.user"/>
-					<RecommendationMessageCard v-else-if="turn.user.source === 'recommendation'" :message="turn.user"/>
+					<InstanceMessageCard v-else-if="turn.user.source === 'instance'" :message="turn.user"/>
+					<CollabMessageCard v-else-if="turn.user.source === 'collab'" :message="turn.user"/>
 					<article v-else class="message-user">
 						<ConsoleMarkdown v-if="turn.user.content" :text="turn.user.content" :reference-bundle-id="turn.user.referenceBundleId || ''" :references="turn.user.references || []"/>
 						<div v-if="userAttachments(turn).length" class="user-attachments" :class="{ 'with-text': turn.user.content }">
@@ -345,7 +375,7 @@ async function copyMessage(content, key) {
 						</template>
 					</div>
 				</article>
-				<div v-if="!['webhook', 'cron', 'recommendation'].includes(turn.user.source)" class="user-message-meta">
+				<div v-if="!['webhook', 'cron', 'instance', 'collab'].includes(turn.user.source)" class="user-message-meta">
 					<MessageVisibilityAction :target="turn.user" desktop-placement="footer" :turn="turn" mobile-selection-only/>
 					<el-tooltip v-if="turn.user.content" content="复制消息" placement="bottom" :show-after="350">
 						<button type="button" class="message-icon-action" aria-label="复制消息"
@@ -618,6 +648,41 @@ async function copyMessage(content, key) {
 	text-align: center;
 	word-break: break-word;
 }
+
+.turn-continuation {
+	display: flex;
+	align-items: baseline;
+	gap: .45rem;
+	min-width: 0;
+	margin: 0 0 .45rem;
+	color: var(--ob-text-muted);
+	font-size: 12px;
+	line-height: 1.5;
+}
+
+.turn-continuation-label { flex: none; }
+
+.turn-continuation-root {
+	min-width: 0;
+	overflow: hidden;
+	padding: 0;
+	border: 0;
+	background: none;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+button.turn-continuation-root {
+	cursor: pointer;
+	text-decoration: underline;
+	text-decoration-color: var(--ob-border);
+	text-underline-offset: 3px;
+}
+
+button.turn-continuation-root:hover { color: var(--ob-text); }
 
 .assistant-row {
 	display: block;

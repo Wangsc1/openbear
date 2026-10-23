@@ -187,8 +187,13 @@ async def test_recent_ignores_metadata_tools_streaming_and_uses_user_and_reply_b
     assert latest["recentItems"][0]["lastInteractionAtMs"] == BASE + 1000
 
 
-async def test_recent_calibration_pushes_user_and_reply_and_reconnect_matches_http(web_env, clock):
+async def test_recent_calibration_pushes_user_and_reply_and_reconnect_matches_http(web_env, clock, monkeypatch):
     env = web_env
+    # The hub's ~2s tree calibration runs on realtime.time.monotonic. Advance
+    # that clock after each commit instead of really waiting for the period.
+    real_monotonic = realtime.time.monotonic
+    hub_clock = SimpleNamespace(offset=0.0)
+    monkeypatch.setattr(realtime, "time", SimpleNamespace(monotonic=lambda: real_monotonic() + hub_clock.offset))
     cookie = await _login_cookie(env)
     row = await env.server._create_web_conversation(123, title="Realtime interaction")
     headers = {"Cookie": f"openbear_web_session={cookie}"}
@@ -205,6 +210,7 @@ async def test_recent_calibration_pushes_user_and_reply_and_reconnect_matches_ht
         cursor = (await cur.fetchone())[0]
         clock.ms = BASE + 2000
         await publish(env, row, clock, "user", turnUuid="realtime-user", messageUuid="realtime-user", text="private realtime input")
+        hub_clock.offset += 2.0
         cur = await env.db.conn.execute("SELECT COALESCE(MAX(seq),0) FROM web_catalog_changes")
         assert (await cur.fetchone())[0] > cursor
         # Reference sizes are event-driven, while tree status keeps its bounded
@@ -222,6 +228,7 @@ async def test_recent_calibration_pushes_user_and_reply_and_reconnect_matches_ht
         assert http_state["recentItems"] == patch["treeStatus"]["recentItems"]
         clock.ms = BASE + 3000
         await publish(env, row, clock, "final", text="visible completed reply")
+        hub_clock.offset += 2.0
         # Keep the existing ~2s tree calibration (plus scheduling/debounce),
         # rather than requesting a full tree aggregation for every commit.
         async with asyncio.timeout(5):
@@ -264,3 +271,29 @@ async def test_unchanged_catalog_before_calibration_skips_tree_but_refreshes_ove
     hub.version.assert_not_awaited()
     assert hub.refresh_overviews.await_count == 2
     assert hub.last_calibration == 100.0
+
+
+async def test_controller_started_deployment_turns_stay_out_of_recent(web_env, clock):
+    """Deployment/maintenance runs are system work, like Cron; a human reply there counts."""
+    from app.instances.schema import migrate
+    env = web_env
+    await migrate(env.db)
+    cookie = await _login_cookie(env)
+    # Run the one-time legacy backfill now, so this checks the live store path.
+    await status(env, cookie)
+    row = await env.server._create_web_conversation(123, title="部署 · Node", conversation_uuid="deploy-1",
+                                                     origin_kind="deployment", origin_ref="op-1")
+    root = "deploy-root"
+    async with env.db.write_transaction(label="fixture-operation") as conn:
+        await conn.execute("INSERT INTO instance_operations(id,instance_id,owner,kind,status,conversation_uuid,chat_id,root,created_ms,updated_ms) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                           ("op-1", "inst", 123, "deployment", "running", "deploy-1", row["internal_chat_id"], root, BASE, BASE))
+    clock.ms = BASE + 1000
+    await publish(env, row, clock, "accepted", turnUuid=root, runUuid=root, source="deployment")
+    await publish(env, row, clock, "user", turnUuid=root, messageUuid="op-1", text="请把这个实例实际部署好", source="deployment")
+    clock.ms += 10
+    await publish(env, row, clock, "final", text="部署完成")
+    await publish(env, row, clock, "done")
+    assert "deploy-1" not in recent_ids(await status(env, cookie))
+    # The user's own follow-up in the same conversation is a real interaction.
+    await completed_exchange(env, row, clock, BASE + 5000)
+    assert recent_ids(await status(env, cookie))[0] == "deploy-1"

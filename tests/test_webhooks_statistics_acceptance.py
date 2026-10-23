@@ -164,7 +164,12 @@ async def test_F22_C24_post_and_notification_retry_do_not_repeat_business(env):
     pre='import sys,json,urllib.request,time\nx=json.load(sys.stdin)\nurllib.request.urlopen(urllib.request.Request('+repr(str(simulator.make_url('/effect')))+',data=x["actionKey"].encode())).read()\ntime.sleep(10)'
     post='import pathlib,json\np=pathlib.Path('+repr(str(counter))+')\nn=int(p.read_text())+1 if p.exists() else 1\np.write_text(str(n))\nif n==1: raise SystemExit(1)\nprint("{}")'
     try:
-        c=await create(env,batching={'enabled':False},pre={'enabled':True,'code':pre,'timeoutSeconds':.2,'onError':'continueModel'},post={'enabled':True,'code':post,'retry':{'maxAttempts':1,'idempotencyDeclaration':'Simulator post action is idempotent by actionKey'}})
+        # The pre script must commit its simulator effect *before* the timeout
+        # kills it (unknown effect -> continueModel). Interpreter start + urllib
+        # import + HTTP takes ~0.1s idle but 0.2-0.6s under parallel CPU load, so
+        # a 0.2s timeout could kill it first (business==0). 2s keeps the same
+        # timeout path with a wide margin; the script then sleeps far longer.
+        c=await create(env,batching={'enabled':False},pre={'enabled':True,'code':pre,'timeoutSeconds':2,'onError':'continueModel'},post={'enabled':True,'code':post,'retry':{'maxAttempts':1,'idempotencyDeclaration':'Simulator post action is idempotent by actionKey'}})
         event=await accept(env,c)
         backend=FakeStreamBackend([[StreamEvent(kind='tool_call',tool_calls=[ToolCall('r','Webhook',json.dumps({'action':'report','params':{'receiptId':'r','results':[{'eventId':event['eventId'],'outcome':'completed'}]}}))]),StreamEvent(kind='finish',finish_reason='tool_calls')],[StreamEvent(kind='content',text='Model work complete'),StreamEvent(kind='finish',finish_reason='stop')]])
         env.server.llm_factory=FakeRunFactory(backend,context_window=128000)

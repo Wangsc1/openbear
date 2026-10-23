@@ -2,8 +2,16 @@ import {inject} from "vue";
 
 export const TOOL_DETAIL_CACHE_KEY = Symbol("openbear.console.toolDetailCache");
 
-function cacheKey(conversationUuid, operationId, revision) {
-  return `${String(conversationUuid || "")}\u0000${String(operationId || "")}\u0000${Number(revision || 0) || 0}`;
+function cacheKey(conversationUuid, operationId, revision, liveRev = 0) {
+  return `${String(conversationUuid || "")}\u0000${String(operationId || "")}\u0000${Number(revision || 0) || 0}\u0000${Number(liveRev || 0) || 0}`;
+}
+
+/** Whether a detail is at least as new as (revision, liveRev); live updates keep the revision. */
+export function detailIsAtLeast(detail, revision, liveRev = 0) {
+  const detailRevision = Number(detail?.detailRevision || detail?.revision || 0) || 0;
+  const wanted = Number(revision || 0) || 0;
+  if (detailRevision !== wanted) return detailRevision > wanted;
+  return (Number(detail?.liveRev || 0) || 0) >= (Number(liveRev || 0) || 0);
 }
 
 /**
@@ -37,9 +45,9 @@ export function createToolDetailCache() {
     }
   }
 
-  async function load({conversationUuid, operationId, revision, loader}) {
+  async function load({conversationUuid, operationId, revision, liveRev = 0, loader}) {
     ensureConversation(conversationUuid);
-    const key = cacheKey(conversationUuid, operationId, revision);
+    const key = cacheKey(conversationUuid, operationId, revision, liveRev);
     pruneOperationRevisions(conversationUuid, operationId, key);
     if (values.has(key)) return values.get(key);
     if (inFlight.has(key)) return inFlight.get(key);
@@ -52,7 +60,7 @@ export function createToolDetailCache() {
         && Number(detail?.revision || 0) >= (Number(revision || 0) || 0)
       ) {
         values.set(key, detail);
-        const actualKey = cacheKey(conversationUuid, operationId, detail?.revision);
+        const actualKey = cacheKey(conversationUuid, operationId, detail?.revision, detail?.liveRev);
         values.set(actualKey, detail);
       }
       return detail;

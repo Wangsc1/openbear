@@ -9,6 +9,7 @@ import {
   readStoredThemeMode,
   resolveTheme,
 } from "./theme.js";
+import { MANIFEST_PATH, DARK_MANIFEST_PATH } from "./pwa/manifest.js";
 
 function harness({ systemDark = false, stored = null, throwRead = false, throwWrite = false } = {}) {
   const classes = new Set();
@@ -43,15 +44,21 @@ function harness({ systemDark = false, stored = null, throwRead = false, throwWr
   const metas = Object.fromEntries(['theme-color', 'color-scheme'].map(name => [name, {
     content: '', setAttribute(key, value) { this[key] = value; },
   }]));
+  const manifest = {
+    href: MANIFEST_PATH, writes: 0,
+    getAttribute(key) { return this[key]; },
+    setAttribute(key, value) { this[key] = value; this.writes += 1; },
+  };
   const documentObject = {
     documentElement: root,
-    querySelector(selector) { return metas[selector.match(/name="([^"]+)"/)?.[1]]; },
+    querySelector(selector) { return selector === 'link[rel="manifest"]' ? manifest : metas[selector.match(/name="([^"]+)"/)?.[1]]; },
   };
   const controller = createThemeController({ windowObject, documentObject, storageObject: storage });
   return {
     controller,
     root,
     metas,
+    manifest,
     documentObject,
     windowObject,
     storage,
@@ -115,6 +122,25 @@ test("manual light and dark persist, ignore system changes, and auto resolves im
   assert.equal(env.metas['color-scheme'].content, "dark");
 });
 
+test("PWA manifest follows manual and automatic theme without redundant href changes", () => {
+  const env = harness({ systemDark: false });
+  assert.equal(env.manifest.href, MANIFEST_PATH);
+  assert.equal(env.manifest.writes, 0);
+  env.controller.setMode("dark");
+  assert.equal(env.manifest.href, DARK_MANIFEST_PATH);
+  assert.equal(env.manifest.writes, 1);
+  env.controller.setMode("dark");
+  env.setSystemDark(true);
+  assert.equal(env.manifest.writes, 1);
+  env.controller.setMode("light");
+  assert.equal(env.manifest.href, MANIFEST_PATH);
+  env.controller.setMode("auto");
+  assert.equal(env.manifest.href, DARK_MANIFEST_PATH);
+  env.setSystemDark(false);
+  assert.equal(env.manifest.href, MANIFEST_PATH);
+  env.controller.destroy();
+});
+
 test("stored manual mode restores in a new controller", () => {
   const first = harness({ systemDark: false });
   first.controller.setMode("dark");
@@ -147,13 +173,14 @@ test('actual first-paint script matches runtime chrome for stored/system theme a
     classes: ['light', 'dark'].filter(name => env.root.classList.contains(name)),
     style: {...env.root.style}, dataset: {...env.root.dataset},
     theme: env.metas['theme-color'].content, scheme: env.metas['color-scheme'].content,
+    manifest: env.manifest.href,
   });
   for (const systemDark of [false, true]) {
     for (const stored of [null, 'light', 'dark', 'auto', 'invalid', 'blocked-read', 'blocked-getter']) {
       const blocked = stored?.startsWith('blocked');
       const env = harness({systemDark, stored, throwRead: blocked});
       const expected = snapshot(env);
-      env.root.style = {}; env.root.dataset = {};
+      env.root.style = {}; env.root.dataset = {}; env.manifest.href = MANIFEST_PATH;
       for (const name of ['light', 'dark']) env.root.classList.toggle(name, false);
       for (const meta of Object.values(env.metas)) meta.content = '';
       const windowObject = {...env.windowObject};

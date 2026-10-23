@@ -78,14 +78,21 @@ def test_agent_stop_result_is_control_and_only_patches_existing_agent_task():
     assert control_spec["payload"]["task"]["status"] == "cancelled"
 
 
-def test_agent_launch_failure_without_task_uuid_is_terminal_immediately():
+@pytest.mark.parametrize("name", ["Agent", "AgentContinue"])
+@pytest.mark.parametrize("result", [
+    '{"ok":false,"error":"agent_preset_not_found","status":"failed"}',
+    "error: 工具 Agent 执行失败: AttributeError: 'NoneType' object has no attribute 'session_uuid'",
+    "error: missing required prompt.",
+    "\n ERROR: invalid tool arguments",
+])
+def test_agent_launch_failure_without_task_uuid_is_terminal_immediately(name, result):
     specs = tool_event_operation_specs(
         "tool_result",
         turn_uuid="turn-1",
         tool_call_id="failed-launch",
-        name="Agent",
+        name=name,
         arguments='{"workerType":"missing-preset","description":"审查代码"}',
-        result='{"ok":false,"error":"agent_preset_not_found","status":"failed"}',
+        result=result,
     )
 
     agent_spec = [spec for spec in specs if spec["op_type"] == "agent"][-1]
@@ -95,6 +102,7 @@ def test_agent_launch_failure_without_task_uuid_is_terminal_immediately():
     assert agent_spec["lifecycle"] == "terminal"
     assert agent_spec["payload"]["status"] == "failed"
     assert agent_spec["payload"]["taskUuid"] == ""
+    assert agent_spec["payload"]["resultText"] == result
 
 
 def test_root_retry_wait_maps_each_attempt_to_stable_model_retry_operation():

@@ -40,7 +40,7 @@ async def test_config_store_load_keeps_builtin_prompt_as_unmaterialized_default(
 
     cfg = await store.load_config()
 
-    assert cfg.context_management.retain_ratio == 0.15
+    assert cfg.context_management.retain_tokens == 40_000
     assert cfg.agent.compact_prompt == ""
     raw = json.loads(path.read_text(encoding="utf-8"))
     assert "agent" not in raw
@@ -63,6 +63,22 @@ async def test_config_store_migrates_legacy_plan_limit_keys_only(tmp_path: Path)
     assert raw["rath"]["planMaxSteps"] == 40
     assert "agentPlanMaxRevisionRounds" not in raw["rath"]
     assert "agent" not in raw
+    assert store.revision == 1
+
+
+@pytest.mark.asyncio
+async def test_config_store_drops_retired_resource_monitoring_section(tmp_path: Path):
+    path = tmp_path / "openbear.json"
+    original = _sample_config()
+    original["resourceMonitoring"] = {"filesEnabled": True}
+    path.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
+    store = ConfigStore(path)
+
+    await store.load_config()
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert "resourceMonitoring" not in raw
+    assert raw["memory"] == original["memory"]
     assert store.revision == 1
 
 

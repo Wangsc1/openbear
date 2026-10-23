@@ -97,7 +97,7 @@ test('header path reads current conversation, follows cached rename/move and dra
   const recentItems = ref([{kind:'conversation',conversationUuid:'chat',folderId:'a',path:'工程 / OpenBear'}]);
   const props = reactive({draftConversation:{conversationUuid:'local:new',folderId:'a'}});
   const ctx = vm.createContext({ref,computed,rootFolders,recentItems,activityItems:ref([]),branchState:reactive({}),allFolders:ref([]),props,
-    defineExpose: value=>{ctx.exposed=value;},openRootMenu(){},showProperties(){},revealDraft(){},forgetConversation(){}});
+    defineExpose: value=>{ctx.exposed=value;},openRootMenu(){},showProperties(){},revealDraft(){},revealFolder(){},forgetConversation(){}});
   vm.runInContext(between(tree,'function everyKnownNode()', 'function emitRows()') + between(tree,'function folderPath(', 'function invalidateBranch('), ctx);
   vm.runInContext(between(tree,'defineExpose({', 'const activityItems'),ctx);
   ctx.conversationTreeRef = ref(ctx.exposed); ctx.activeConversationUuid = ref('chat');
@@ -120,12 +120,11 @@ test('compact total includes full input plus output once, retaining input/cache 
   assert.match(vm.runInContext('totalTokensDetail.value',ctx),/155 Tokens.*\n135\/20\/30/);
 });
 
-test('header retains full path and desktop properties while giving the mobile title its own truncation row', async () => {
+test('header retains full path without a title menu while giving the mobile title its own truncation row', async () => {
   const html = await renderHeader({title:'需要完整保留的长会话标题',conversationPath:'工程 / OpenBear / 界面优化'});
   assert.match(html, /title="\/工程\/OpenBear\/界面优化" aria-label="所在目录 \/工程\/OpenBear\/界面优化"/);
   assert.match(html, /header-title-row flex min-w-0 items-center gap-2/);
   assert.match(html, /title="需要完整保留的长会话标题"/);
-  assert.match(header.template.content, /el-dropdown class="header-properties-dropdown"/);
-  assert.match(header.template.content, /@command="emit\('properties'\)"/);
+  assert.doesNotMatch(header.template.content, /header-properties|el-dropdown/);
   assert.match(header.template.content, /<slot name="mobile-actions"\/>/);
 });

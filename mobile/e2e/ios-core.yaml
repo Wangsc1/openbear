@@ -1,0 +1,79 @@
+# iOS 关键流程（iPhone 17 Pro / iOS 26.3 模拟器）：
+# 打开最长对话 -> 快速甩动并向上翻页 -> 一键到顶/回底 -> 展开工作块 -> 工具详情 formSheet -> 下拉关闭 Sheet -> 边缘右滑返回会话列表
+appId: dev.openbear.app
+---
+- launchApp:
+    stopApp: false
+- tapOn:
+    id: "back"
+    optional: true
+- extendedWaitUntil:
+    visible:
+      id: "conv-a6a877ad"
+    timeout: 60000
+- takeScreenshot: ios-00-list
+- tapOn:
+    id: "conv-a6a877ad"
+- extendedWaitUntil:
+    visible:
+      id: "row-answer"
+    timeout: 30000
+- takeScreenshot: ios-01-open-longest
+- repeat:
+    times: 6
+    commands:
+      - swipe:
+          start: 50%, 25%
+          end: 50%, 85%
+          duration: 120
+- waitForAnimationToEnd
+- takeScreenshot: ios-02-fast-fling-up-paged
+- tapOn:
+    id: "jump-top"
+- waitForAnimationToEnd
+- takeScreenshot: ios-03-jump-top
+- extendedWaitUntil:
+    visible:
+      id: "jump-bottom"
+    timeout: 10000
+- tapOn:
+    id: "jump-bottom"
+- waitForAnimationToEnd
+- takeScreenshot: ios-04-back-to-bottom
+- scrollUntilVisible:
+    element:
+      id: "row-work-summary"
+    direction: UP
+    timeout: 20000
+- tapOn:
+    id: "row-work-summary"
+    index: 0
+- waitForAnimationToEnd
+- takeScreenshot: ios-05-work-expanded
+- tapOn:
+    id: "row-tool"
+    index: 4
+- extendedWaitUntil:
+    visible:
+      id: "detail-title"
+    timeout: 15000
+- waitForAnimationToEnd
+- takeScreenshot: ios-06-tool-detail-sheet
+# 下拉关闭 formSheet
+- swipe:
+    start: 50%, 52%
+    end: 50%, 98%
+    duration: 400
+- waitForAnimationToEnd
+- assertNotVisible:
+    id: "detail-title"
+- takeScreenshot: ios-07-sheet-dismissed-by-drag
+# 屏幕左边缘右滑返回
+- swipe:
+    start: 1%, 50%
+    end: 80%, 50%
+    duration: 400
+- waitForAnimationToEnd
+- assertVisible:
+    id: "conv-a6a877ad"
+- takeScreenshot: ios-08-edge-swipe-back

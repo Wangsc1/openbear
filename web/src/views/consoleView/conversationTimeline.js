@@ -15,7 +15,9 @@ function isFailedAgentEvent(event = {}) {
 	return agentEventStatus(event) === "failed";
 }
 
-export function isConversationTimelineEvent(event, _primaryToolName = "", agentEvent = false) {
+// A failed Agent's live row gives way to its persisted card, which stays in the
+// turn and folds into its work detail like other finished Agents.
+export function isConversationTimelineEvent(event, _primaryToolName = "", _agentEvent = false) {
 	if (event?.kind === "answer") return Boolean(String(event?.message?.content || "").trim() || answerHasReasoning(event));
 	if (event?.kind === "live_status") return Boolean(event?.persistentRunIndicator || event?.interruption || event?.runtimeNotice);
 	if (event?.kind === "model_retry") return true;
@@ -23,7 +25,7 @@ export function isConversationTimelineEvent(event, _primaryToolName = "", agentE
 	if (isUserInteractionEvent(event)) return true;
 	if (event?.operation?.internal) return isContextCompactionOperation(event.operation);
 	if (event?.kind === 'live_tool' || event?.kind === 'tool_group') return true;
-	return event?.kind === "tool" && (!agentEvent || !isFailedAgentEvent(event));
+	return event?.kind === "tool";
 }
 
 function isTextAnswer(event) {

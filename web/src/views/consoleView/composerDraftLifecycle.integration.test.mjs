@@ -1,3 +1,4 @@
+import { userStorage } from '../../sessionBoundary.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -67,7 +68,7 @@ function appDeletion(env, {mounted = null, confirm = async () => true} = {}) {
   const row = {conversationUuid: 'local:new', local: true, folderId: '', title: '新会话'};
   const focused = [], notices = [], deletes = [];
   const attachmentDrafts = createAttachmentDraftStorage({driver: env.driver});
-  const context = vm.createContext({
+  const context = vm.createContext({userStorage,
     window: env.window, consoleViewRef: ref(mounted), attachmentDrafts,
     conversations: ref([row]), activeConversationUuid: ref('local:new'), selectedFolderId: ref(''),
     deletingConversations: new Set(), conversationTreeRef: ref({forgetConversation() {}}),

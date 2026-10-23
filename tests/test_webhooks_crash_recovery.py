@@ -2,7 +2,9 @@
 import asyncio
 import json
 import os
+import select
 import signal
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,29 +19,115 @@ from tests.test_web_admin import FakeRunFactory,FakeStreamBackend
 from tests.test_webhooks_backend import env
 
 
+ROOT=Path(__file__).resolve().parents[1]
+
+
+class ForkServer:
+    """Pre-imported parent (no loop/DB/threads) that forks one child per stage.
+
+    The parent reaps its children and reports ``PID``/``EXIT`` lines; children
+    print their own ``READY`` line on the same pipe.
+    """
+    def __init__(self,stderr_path):
+        self.stderr_path=stderr_path; self.stderr=open(stderr_path,'wb')
+        self.proc=subprocess.Popen([sys.executable,'-m','tests.webhook_crash_fixture','--fork-server'],cwd=str(ROOT),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.stderr)
+        self.fd=self.proc.stdout.fileno(); self.buffer=b''; self.lines=[]; self.spawned=set(); self.exits={}
+        # Nothing else is written before the first request, so one buffered
+        # readline cannot swallow later lines.
+        try:
+            if not select.select([self.fd],[],[],60)[0]: raise AssertionError('fork server did not start')
+            hello=self.proc.stdout.readline()
+            if not hello.startswith(b'HELLO '): raise AssertionError(stderr_path.read_text())
+            self.hello=json.loads(hello[6:])
+            os.set_blocking(self.fd,False)
+        except BaseException:
+            self.proc.kill(); self.proc.wait(); self.proc.stdout.close(); self.proc.stdin.close(); self.stderr.close()
+            raise
+
+    async def _line(self,match):
+        """Return (and consume) the first buffered line satisfying ``match``."""
+        loop=asyncio.get_running_loop()
+        while True:
+            for line in self.lines:
+                if match(line): self.lines.remove(line); return line
+            readable=loop.create_future()
+            loop.add_reader(self.fd,lambda:readable.done() or readable.set_result(None))
+            try: await readable
+            finally: loop.remove_reader(self.fd)
+            try: chunk=os.read(self.fd,65536)
+            except BlockingIOError: continue
+            if not chunk: raise AssertionError('fork server exited: '+self.stderr_path.read_text())
+            self.buffer+=chunk
+            *complete,self.buffer=self.buffer.split(b'\n')
+            for line in complete:
+                if line.startswith(b'EXIT '):
+                    _,pid,code=line.split(); self.exits[int(pid)]=int(code)
+                self.lines.append(line)
+
+    async def spawn(self,**request):
+        self.proc.stdin.write((json.dumps(request)+'\n').encode()); self.proc.stdin.flush()
+        pid=int((await self._line(lambda l:l.startswith(b'PID '))).split()[1])
+        self.spawned.add(pid); return pid
+
+    async def ready(self,pid):
+        line=await self._line(lambda l:(l.startswith(b'READY ') and json.loads(l[6:])['pid']==pid) or l.startswith(f'EXIT {pid} '.encode()))
+        return json.loads(line[6:]) if line.startswith(b'READY ') else None
+
+    async def exited(self,pid):
+        if pid not in self.exits: await self._line(lambda l:l.startswith(f'EXIT {pid} '.encode()))
+        return self.exits[pid]
+
+    def kill(self,pid):
+        try: os.killpg(pid,signal.SIGKILL)
+        except ProcessLookupError:
+            try: os.kill(pid,signal.SIGKILL)  # not yet a session leader
+            except ProcessLookupError: pass
+
+    def close(self):
+        try:
+            try: self.proc.stdin.close()  # EOF: parent SIGKILLs and reaps remaining children
+            except OSError: pass
+            try: self.proc.wait(10)
+            except subprocess.TimeoutExpired: self.proc.kill(); self.proc.wait()
+        finally:
+            for pid in self.spawned-set(self.exits):
+                try: os.killpg(pid,signal.SIGKILL)
+                except (ProcessLookupError,PermissionError): pass
+            self.proc.stdout.close(); self.stderr.close()
+
+
+@pytest.fixture(scope='module')
+def fork_server(tmp_path_factory):
+    server=ForkServer(tmp_path_factory.mktemp('crash-fork')/'fork-server-stderr.txt')
+    try:
+        # Fork-safety precondition: the pre-imported parent has no extra threads.
+        assert server.hello=={'threads':1}
+        yield server
+    finally: server.close()
+
+
 @pytest.mark.parametrize('stage',['ingress','pre_reserved','pre_effect','batch_open','batch_sealed','assignment','runtime_bound','model_effect','wait_registered','wait_claimed','wait_delivered','report','closing','post_queued','post_effect','notification_ack'])
-async def test_committed_crash_boundaries(env,stage):
+async def test_committed_crash_boundaries(env,fork_server,stage):
     actions=[]
     async def effect(request):
         actions.append(await request.text()); return web.Response(text='committed')
     app=web.Application(); app.router.add_post('/effect',effect)
     external=TestServer(app); await external.start_server()
     errors=env.tmp/'child-stderr.txt'
-    with errors.open('wb') as stderr:
-        proc=await asyncio.create_subprocess_exec(sys.executable,'-m','tests.webhook_crash_fixture',env.db.path,stage,str(external.make_url('/effect')),cwd=str(Path(__file__).resolve().parents[1]),stdout=asyncio.subprocess.PIPE,stderr=stderr,start_new_session=True)
-        try:
-            async with asyncio.timeout(15):
-                while True:
-                    line=await proc.stdout.readline()
-                    if not line: raise AssertionError(errors.read_text())
-                    if line.startswith(b'READY '): metadata=json.loads(line[6:]); break
-            # The child is held after the selected COMMIT, with no script left
-            # running at these barriers. Kill/reap its owned process group only.
-            os.killpg(proc.pid,signal.SIGKILL); await asyncio.wait_for(proc.wait(),5)
-            assert proc.returncode==-signal.SIGKILL
-        finally:
-            if proc.returncode is None:
-                os.killpg(proc.pid,signal.SIGKILL); await proc.wait()
+    pid=await fork_server.spawn(path=env.db.path,stage=stage,url=str(external.make_url('/effect')),stderr=str(errors),env=dict(os.environ),cwd=str(ROOT))
+    try:
+        async with asyncio.timeout(15):
+            metadata=await fork_server.ready(pid)
+        if metadata is None: raise AssertionError(errors.read_text())
+        # The child (own session) is held after the selected COMMIT, with no
+        # script left running at these barriers. Kill its owned process group
+        # only; the fork parent reaps it and reports the wait status.
+        os.killpg(pid,signal.SIGKILL)
+        async with asyncio.timeout(5): assert (await fork_server.exited(pid))==-signal.SIGKILL
+    finally:
+        if pid not in fork_server.exits:
+            fork_server.kill(pid)
+            async with asyncio.timeout(5): await fork_server.exited(pid)
     before=await many(env.db.conn,'SELECT * FROM webhook_batches')
     old_receipts=await many(env.db.conn,'SELECT receipt_id FROM webhook_receipts')
     old_wait=await one(env.db.conn,'SELECT * FROM webhook_waits')

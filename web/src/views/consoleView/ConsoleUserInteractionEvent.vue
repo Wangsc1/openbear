@@ -2,7 +2,7 @@
 import {computed, ref, watch} from "vue";
 import {ArrowRight, CircleCheck, EditPen, Finished, Tickets} from "@element-plus/icons-vue";
 import {Api, apiError} from "../../api.js";
-import {useToolDetailCache} from "./toolDetailCache.js";
+import {detailIsAtLeast, useToolDetailCache} from "./toolDetailCache.js";
 import {buildUserInteractionView, userInteractionEventInput} from "./userInteractionPresentation.js";
 import InteractionMarkdown from "./InteractionMarkdown.vue";
 
@@ -25,12 +25,13 @@ function object(value) {
 const operation = computed(() => object(props.event?.operation));
 const operationId = computed(() => String(operation.value.opId || "").trim());
 const operationRevision = computed(() => Number(operation.value.detailRevision || operation.value.revision || 0) || 0);
+const operationLiveRev = computed(() => Number(operation.value.liveRev || 0) || 0);
 const detailAvailable = computed(() => Boolean(operationId.value && operation.value.detailAvailable));
 const loadedDetailMatches = computed(() => {
 	const detail = object(loadedDetail.value);
 	return Boolean(operationId.value
 		&& String(detail.opId || "") === operationId.value
-		&& Number(detail.detailRevision || detail.revision || 0) >= operationRevision.value);
+		&& detailIsAtLeast(detail, operationRevision.value, operationLiveRev.value));
 });
 const displayOperation = computed(() => {
 	if (!loadedDetailMatches.value) return operation.value;
@@ -52,6 +53,7 @@ const actionIcon = computed(() => ({
 async function loadDetail() {
 	const id = operationId.value;
 	const revision = operationRevision.value;
+	const liveRev = operationLiveRev.value;
 	const conversationUuid = String(props.conversationUuid || "").trim();
 	if (!props.open || !detailAvailable.value || loadedDetailMatches.value || !conversationUuid
 		|| conversationUuid.startsWith("local:") || detailLoading.value) return;
@@ -65,7 +67,7 @@ async function loadDetail() {
 			return object(data?.operation);
 		};
 		const detail = toolDetailCache
-			? await toolDetailCache.load({conversationUuid, operationId: id, revision, loader})
+			? await toolDetailCache.load({conversationUuid, operationId: id, revision, liveRev, loader})
 			: await loader();
 		if (operationId.value !== id || String(detail.opId || "") !== id) return;
 		if (Number(detail.detailRevision || detail.revision || 0) < operationRevision.value) {
@@ -81,11 +83,11 @@ async function loadDetail() {
 	}
 }
 
-watch(() => [operationId.value, operationRevision.value], () => {
+watch(() => [operationId.value, operationRevision.value, operationLiveRev.value], () => {
 	if (!loadedDetailMatches.value) loadedDetail.value = null;
 	detailError.value = "";
 });
-watch(() => [props.open, operationId.value, operationRevision.value, detailAvailable.value], () => {
+watch(() => [props.open, operationId.value, operationRevision.value, operationLiveRev.value, detailAvailable.value], () => {
 	void loadDetail();
 }, {immediate: true});
 </script>

@@ -190,14 +190,20 @@ async def build_controller_history(
     )
     rows = [messages._row(row) for row in await cur.fetchall()]
     bundles = await reference_store.bundle_ids_for_rows(rows) if reference_store and rows else {}
+    archived = await store.archived_originals([f"message:{row.id}" for row in rows]) if rows else {}
     tail = []
     for row in rows:
-        message = project_history_message_for_controller(row.to_message())
-        if bundles.get(row.id):
-            message["openbear_reference_bundle"] = bundles[row.id]
+        source_id = f"message:{row.id}"
+        original = archived.get(source_id)
+        if original is not None:
+            message = original
+        else:
+            message = project_history_message_for_controller(row.to_message())
+            if bundles.get(row.id):
+                message["openbear_reference_bundle"] = bundles[row.id]
         mark_source(message, kind="human" if row.role == "user" else "execution",
-                    source_id=f"message:{row.id}", message_id=row.id,
-                    reference_only=message == row.to_message(), turn_uuid=row.turn_uuid,
+                    source_id=source_id, message_id=row.id,
+                    reference_only=original is None and message == row.to_message(), turn_uuid=row.turn_uuid,
                     run_root_turn_uuid=row.run_root_turn_uuid or row.turn_uuid)
         tail.append(message)
     return repair_tool_pairing(list(restored or []) + tail)

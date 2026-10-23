@@ -188,15 +188,6 @@ async def test_build_history_adopts_legacy_summary_without_reloading_compressed_
     assert (await sdao.latest(1))["summary"] == "之前聊过天气"
 
 
-async def test_wrap_user_has_time(db, tmp_path):
-    cb = ContextBuilder(_mem(lambda r: httpx.Response(200, json={"prompt": "x"})),
-                        MessageDAO(db), SummaryDAO(db), [], _tools(), str(tmp_path))
-    msg = cb.wrap_user("帮我查个东西")
-    assert msg["role"] == "user"
-    assert "帮我查个东西" in msg["content"]
-    assert "当前时间" in msg["content"]
-
-
 def test_wrap_user_uses_config_and_fixed_variables():
     from datetime import datetime
 
@@ -211,16 +202,3 @@ def test_wrap_user_uses_config_and_fixed_variables():
     assert cb.wrap_user("hello", variables=variables) == first
     settings.template = "[[ folderWorkspaceDir ]]"
     assert cb.wrap_user("hello")["content"] == "hello\n\n/work"
-
-
-def test_wrap_user_disabled_and_blank_template_preserve_multimodal_content():
-    from app.config import UserMessageTemplateConfig
-
-    content = [{"type": "image", "source": {"data": "original"}}]
-    for settings in (UserMessageTemplateConfig(enabled=False), UserMessageTemplateConfig(template="")):
-        cb = ContextBuilder(None, None, None, [], _tools(), "/work", user_message_template=settings)
-        assert cb.wrap_user("hello") == {"role": "user", "content": "hello"}
-        message = cb.wrap_user(content)
-        assert message == {"role": "user", "content": content}
-        message["content"][0]["source"]["data"] = "mutated"
-        assert content[0]["source"]["data"] == "original"

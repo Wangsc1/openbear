@@ -253,7 +253,10 @@ def test_alternation_bridges_two_text_users_without_rewriting_first_unit():
     assert out[:len(first_request)] == first_request
     assert [message["role"] for message in out] == ["user", "assistant", "user"]
     assert out[0] == msgs[0]
-    assert out[1]["content"] == "[protocol: role-alternation bridge]"
+    from app.agent.transcript_repair import ROLE_ALTERNATION_BRIDGE_TEXT
+    assert out[1]["content"] == ROLE_ALTERNATION_BRIDGE_TEXT
+    assert "not an assistant answer" in out[1]["content"]
+    assert "Do not repeat" in out[1]["content"]
     assert out[2] == msgs[1]
 
 
@@ -307,7 +310,8 @@ def test_alternation_tool_to_user_inserts_anthropic_safe_append_only_bridge():
     out = repair_role_alternation(msgs)
     assert out[:len(first)] == first
     assert [message["role"] for message in out] == ["assistant", "tool", "assistant", "user"]
-    assert out[2]["content"] == "[protocol: role-alternation bridge]"
+    from app.agent.transcript_repair import ROLE_ALTERNATION_BRIDGE_TEXT
+    assert out[2]["content"] == ROLE_ALTERNATION_BRIDGE_TEXT
 
 
 def test_alternation_empty_input():
@@ -315,8 +319,10 @@ def test_alternation_empty_input():
 
 
 def test_is_role_alternation_bridge_matches_only_exact_marker():
-    from app.agent.transcript_repair import is_role_alternation_bridge
+    from app.agent.transcript_repair import ROLE_ALTERNATION_BRIDGE_TEXT, is_role_alternation_bridge
 
+    assert is_role_alternation_bridge(ROLE_ALTERNATION_BRIDGE_TEXT)
+    assert not is_role_alternation_bridge(ROLE_ALTERNATION_BRIDGE_TEXT + " explained")
     assert is_role_alternation_bridge("[protocol: role-alternation bridge]")
     assert is_role_alternation_bridge("  [protocol: role-alternation bridge]\n")
     assert not is_role_alternation_bridge("说明 [protocol: role-alternation bridge]")

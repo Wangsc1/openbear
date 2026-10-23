@@ -551,10 +551,10 @@ class _WebStreamRenderer:
             return
         event = self._pending_delta
         now_ms = int(time.monotonic() * 1000)
-        # WebSocket sends only durable _webFrames; broadcast-only deltas do not
-        # reach the browser. Keep active reasoning at the existing 50 ms UI
-        # cadence, rather than silently reducing its preview to four updates/s.
-        # Ordinary Markdown output retains its existing persistence cadence.
+        # Only events passed to the operation sink reach the browser (as live
+        # updates, never stored). Keep active reasoning at the existing 50 ms
+        # UI cadence, rather than silently reducing its preview to four
+        # updates/s. Ordinary Markdown output retains its 250 ms cadence.
         persist_interval_ms = 50 if event.get("reasoning") and not event.get("text") else 250
         persist = (
             force_persist
@@ -563,9 +563,9 @@ class _WebStreamRenderer:
         )
         await self._emit_now(event, persist=persist)
         if persist:
-            # Non-durable updates are only in-memory live snapshots. Keep the
-            # latest pending so a tool/status boundary can force it into the
-            # operation log before the live draft is cleared.
+            # Skipped updates are only in this stream's draft. Keep the latest
+            # pending so a tool/status boundary can force it into the
+            # operation state before the live draft is cleared.
             if self._pending_delta is event:
                 self._pending_delta = None
             self._last_delta_persist_ms = now_ms
@@ -584,8 +584,8 @@ class _WebStreamRenderer:
             # same answer twice right before completion.
             self._pending_delta = None
         elif typ != "delta":
-            # Tool/status boundaries must persist the latest complete stream
-            # snapshot even when it falls inside the normal 250 ms DB cadence.
+            # Tool/status boundaries must publish the latest complete stream
+            # snapshot even when it falls inside the normal 250 ms cadence.
             await self._flush_delta(force_persist=True)
         await self._emit_now(event)
 

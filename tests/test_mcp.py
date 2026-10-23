@@ -181,16 +181,6 @@ def test_mcp_output_redacts_and_truncates(tmp_path, monkeypatch):
     assert "artifactPath" in huge
 
 
-def test_mcp_default_approval_is_inherited_by_server():
-    data = _cfg().model_dump(by_alias=True)
-    data["mcp"]["defaultApproval"] = "allow"
-    data["mcp"]["servers"]["serena"].pop("approval", None)
-    cfg = Config.model_validate(data)
-    server = cfg.mcp.servers["serena"]
-    meta = build_tool_meta(cfg.mcp, server, server_key="serena", raw_tool=MCPRawTool(name="find_symbol"), used_names=set())
-    assert meta.approval == "allow"
-
-
 def test_mcp_explicit_allow_is_authoritative_for_unknown_risk():
     data = _cfg().model_dump(by_alias=True)
     data["mcp"]["defaultApproval"] = "allow"

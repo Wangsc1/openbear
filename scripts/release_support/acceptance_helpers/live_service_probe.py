@@ -46,8 +46,15 @@ class EntryParser(HTMLParser):
                 self.manifests.append(attrs["href"])
 
 
+def served_index() -> bytes:
+    packaged = archive.read("web/dist/index.html")
+    assert packaged == (root / "web/dist/index.html").read_bytes()
+    # The server fills in the login mode; a plain install is the controller.
+    return packaged.replace(b'"[[controller]]"', b'"controller"', 1)
+
+
 async def static_bytes(session: aiohttp.ClientSession, html: bytes) -> list[dict]:
-    assert html == archive.read("web/dist/index.html") == (root / "web/dist/index.html").read_bytes()
+    assert html == served_index()
     parser = EntryParser()
     parser.feed(html.decode())
     assert parser.manifests, "entry manifest missing"
@@ -101,7 +108,7 @@ async def main() -> None:
         login_entry = await session.get(base + "/login")
         assert login_entry.status == 200
         html = await login_entry.read()
-        assert html == (root / "web/dist/index.html").read_bytes()
+        assert html == served_index()
         report["staticAssets"] = await static_bytes(session, html)
         report["health"] = health
         report["entrySha256"] = hashlib.sha256(html).hexdigest()

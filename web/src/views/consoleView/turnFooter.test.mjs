@@ -1,3 +1,4 @@
+import { contextResourceUrl } from '../../sessionBoundary.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
@@ -31,12 +32,13 @@ const script = descriptor.scriptSetup.content.replace(/^import[\s\S]*?;\n/gm, ""
 const render = compile(descriptor.template.content);
 const setupNames = [...script.matchAll(/^(?:async )?function (\w+)\(/gm)].map(match => match[1]);
 const slot = {inheritAttrs: false, setup: (_, {slots}) => () => slots.default?.()};
-function turnList(turns, running = false, hiddenIds = []) {
+function turnList(turns, running = false, hiddenIds = [], runState = {}) {
   const copies = [], emitted = [], webhookMessages = [], cronMessages = [];
-  const props = {turns, running, conversationUuid: "test-conversation", detailKey: () => "detail", isDetailOpen: () => false, activeToolResultIndex: () => 0};
+  const props = {turns, running, controllerRunning: running, activeTurnIndex: -1, ...runState,
+    conversationUuid: "test-conversation", detailKey: () => "detail", isDetailOpen: () => false, activeToolResultIndex: () => 0};
   const hidden = new Set(hiddenIds);
   const visibility = {hiddenIds: ref(hidden), selecting: ref(false), selected: ref(new Set()), busy: ref(false), canTarget: () => true, isHidden: value => hidden.has(value?.operation?.opId || value?.opId || value?.eventKey || value?.id), assistantTargets: turn => (turn.events || []).filter(event => !hidden.has(event.id))};
-  const context = vm.createContext({ref, ...display, isInlineProcess, conversationTimelineEntries, shouldRenderAssistantDivider, replyMarkdownText, visibilitySelectionClasses, selectVisibilityRow,
+  const context = vm.createContext({contextResourceUrl,ref, ...display, isInlineProcess, conversationTimelineEntries, shouldRenderAssistantDivider, replyMarkdownText, visibilitySelectionClasses, selectVisibilityRow,
     useMessageVisibility: () => visibility,
     projectedEventDisplayTimeMs: eventDisplayTimeMs, projectedEventStartedAtMs: eventStartedAtMs, projectedEventUpdatedAtMs: eventUpdatedAtMs,
     defineProps: () => props, defineEmits: () => (...args) => emitted.push(args), referenceDisplayText: value => value,
@@ -221,6 +223,32 @@ test("running, streaming, reasoning and live statistics do not expose a complete
   const next = {id: "next", events: [answer("next-answer")], stats: {...savedStats(), live: true}};
   const html = await turnList([prior, next], true).html();
   assert.equal((html.match(/class="assistant-message-meta"/g) || []).length, 1, "a later running turn must not hide prior completed stats");
+});
+
+test("a turn whose controller ended shows its footer while only its Agents keep running", async () => {
+  const failed = {id: "failed", user: {turnUuid: "root-failed"}, events: [answer("failed-answer", "本轮执行失败")], stats: savedStats()};
+  // The controller failed; its Agents still run in the background.
+  const background = await turnList([failed], true, [], {controllerRunning: false}).html();
+  assert.notEqual(footer(background), "", "background Agents must not keep a finished turn's footer hidden");
+  // A notification can resume an earlier root: that turn, not the latest one, is in progress.
+  const resumed = {...failed, id: "resumed"};
+  const later = {id: "later", user: {turnUuid: "root-later"}, events: [answer("later-answer")], stats: savedStats()};
+  const html = await turnList([resumed, later], true, [], {controllerRunning: true, activeTurnIndex: 0}).html();
+  assert.equal((html.match(/class="assistant-message-meta"/g) || []).length, 1);
+  assert.ok(html.indexOf('class="assistant-message-meta"') > html.indexOf('data-event-id="later-answer"'),
+    "only the resumed turn hides its footer");
+});
+
+test("a continuation block names the turn it resumes and links back to its question", async () => {
+  const continuation = {rootTurnUuid: "root-1", runIds: ["exec-2"], source: "task_notification",
+    rootUserOpId: "msg:root-1", rootStartedAt: 1792720919, rootPreview: "审计这套 Java"};
+  const turn = {id: "c", user: {id: "op-continuation", role: "user", content: "", syntheticPlaceholder: true, continuation},
+    events: [answer("cont-answer", "审计结论")], stats: savedStats()};
+  const html = await turnList([turn]).html();
+  assert.match(html, /class="turn-continuation"[\s\S]*后台任务完成后继续[\s\S]*<button[^>]*class="turn-continuation-root"[^>]*>接续 [^<]*「审计这套 Java」<\/button>/);
+  assert.equal((html.match(/class="assistant-message-meta"/g) || []).length, 1, "a finished continuation shows its own footer");
+  const orphan = await turnList([{...turn, user: {...turn.user, continuation: {...continuation, rootUserOpId: ""}}}]).html();
+  assert.match(orphan, /<span class="turn-continuation-root">接续 /, "without a loaded root question the label is plain text");
 });
 
 test("stats remain visible without answer text while copy stays absent and empty turns stay empty", async () => {

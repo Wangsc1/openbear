@@ -28,7 +28,7 @@ async def restore_controller_run_inputs(
     messages: MessageDAO, chat_id: int, history: list[Message], *,
     session_uuid: str, run_root_turn_uuid: str, reference_store: Any = None,
 ) -> list[Message]:
-    """Rehydrate original inputs/decisions and their immediate complete antecedents.
+    """Rehydrate the resumed root's original inputs and decisions.
 
     Archived semantic originals take precedence over public transcript text (which
     can omit media and runtime-added input context). Unarchived user rows need an
@@ -63,27 +63,7 @@ async def restore_controller_run_inputs(
     root_rows = await rows("COALESCE(NULLIF(m.run_root_turn_uuid,''),m.turn_uuid)=?", (run_root_turn_uuid,))
     if not any(kind(row) == "human" and row["turn_uuid"] == run_root_turn_uuid for row in root_rows):
         raise ActiveContextUnavailable("active_execution_input_missing; original_context_preserved")
-    candidates = {row["id"]: row for row in root_rows}
-    for row in root_rows:
-        if kind(row) not in {"human", "task", "control", "decision"}:
-            continue
-        before = row["id"]
-        while True:
-            preceding = await rows(
-                "m.id<? AND m.id>=(SELECT MAX(id) FROM messages WHERE chat_id=? AND id<? AND role IN ('user','assistant'))",
-                (before, chat_id, before),
-            )
-            if not preceding:
-                break
-            first = preceding[0]
-            if kind(first) == "notification":
-                before = first["id"]
-                continue
-            if first["role"] == "assistant" and first["content"]:
-                candidates.update((item["id"], item) for item in preceding)
-            break
-
-    ordered = sorted(candidates.values(), key=lambda row: row["id"])
+    ordered = sorted(root_rows, key=lambda row: row["id"])
     originals = []
     for row in ordered:
         item = messages._row(row)

@@ -66,6 +66,9 @@ class MCPTransport(ABC):
 
 
 class StdioJSONRPCTransport(MCPTransport):
+    # Grace period for the peer to exit after SIGINT before escalating to SIGTERM.
+    _SIGINT_WAIT_S = 1.5
+
     def __init__(self, server_key: str, config: MCPServerConfig) -> None:
         self.server_key = server_key
         self.config = config
@@ -90,6 +93,8 @@ class StdioJSONRPCTransport(MCPTransport):
             raise MCPConnectionError(f"MCP server {self.server_key} missing command")
         env = os.environ.copy()
         env.update({str(k): str(v) for k, v in (self.config.env or {}).items()})
+        from app.managed.settings import sanitized_env
+        env = sanitized_env(env)
         cwd = self.config.cwd.strip() or None
         try:
             self.proc = await asyncio.create_subprocess_exec(
@@ -336,7 +341,7 @@ class StdioJSONRPCTransport(MCPTransport):
         pgid = None
         with contextlib.suppress(Exception):
             pgid = os.getpgid(proc.pid)
-        for sig, wait_s in ((signal.SIGINT, 1.5), (signal.SIGTERM, 2.0), (signal.SIGKILL, 1.0)):
+        for sig, wait_s in ((signal.SIGINT, self._SIGINT_WAIT_S), (signal.SIGTERM, 2.0), (signal.SIGKILL, 1.0)):
             if proc.returncode is not None:
                 return
             try:

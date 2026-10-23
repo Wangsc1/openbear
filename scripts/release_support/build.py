@@ -45,9 +45,11 @@ else:
 STAGES = ("env", "py311", "py312", "py313", "frontend", "frontend-checks", "build", "package", "smoke")
 IMAGES = Path(__file__).resolve().parent / "images"
 NODE_BASE = "node:20.20.2-trixie"
+GO_BASE = "golang:1.24.4-bookworm"
 NODE_VERSION, NPM_VERSION = "v20.20.2", "11.11.0"
 LABEL = "openbear.release.run"
 TOP_FILES = ("pyproject.toml", "uv.lock", "openbear.service", "openbear.json.example", "README.md")
+OPTIONAL_FILES = ("Dockerfile", ".dockerignore", "docs/instances.md")
 ANOMALIES = (
     "Task exception was never retrieved", "Task was destroyed but it is pending",
     "PytestUnraisableExceptionWarning", "PytestUnhandledThreadExceptionWarning",
@@ -395,7 +397,12 @@ class Stage:
         return image
 
     def dependency_data(self):
-        return normalize_dependencies(self.source)
+        data = normalize_dependencies(self.source)
+        if (self.source / "gateway/go.mod").is_file():
+            data["gateway"] = {"base": GO_BASE, "modules": {
+                name: sha256(self.source / "gateway" / name)
+                for name in ("go.mod", "go.sum") if (self.source / "gateway" / name).is_file()}}
+        return data
 
     def probe(self, image, node_dir, version=None, role="probe"):
         target = self.out / f"toolchain-{role}.json"
@@ -468,6 +475,12 @@ class Stage:
                        "nodeImage": node_id, "nodeDir": str(node_dir), "nodeKey": node_key,
                        "dependencyFingerprint": fingerprint, "toolchain": tools,
                        "systemdImage": self.config["systemdImage"]}
+        if (self.source / "gateway/go.mod").is_file():
+            lookup = self.command(["docker", "image", "inspect", GO_BASE, "--format", "{{.Id}}"], capture=True, check=False, timeout=60)
+            if lookup.returncode:
+                self.command(["docker", "pull", GO_BASE], timeout=600)
+            environment["goImage"] = self.image_id(GO_BASE)
+            environment["goBase"] = GO_BASE
         path = owned(self.run, "environment.json")
         atomic_json(path, environment)
         return {**environment, "outputs": {"environment": str(path), "environmentSha256": sha256(path)}}
@@ -620,7 +633,9 @@ class Stage:
         require(build["files"] == tree_files(owned(self.run, "build/dist")), "built frontend changed")
         return {"runId": self.config["runId"], "version": self.config["version"],
                 "previousVersion": self.config["previousVersion"], "source": digest_json(self.source_files),
-                "build": digest_json(build), "previousAssets": self.previous_assets()}
+                "build": digest_json(build), "previousAssets": self.previous_assets(),
+                **({"gatewayImage": env.get("goImage"), "gatewayBase": env.get("goBase")}
+                   if (self.source / "gateway/go.mod").is_file() else {})}
 
     def check_assets(self, identity=None):
         manifest = read_json(owned(self.run, "package-manifest.json"))
@@ -631,6 +646,42 @@ class Stage:
         require(tree_files(assets) == {name: item["sha256"] for name, item in manifest["assets"].items()}, "published asset hash mismatch")
         require(all((assets / name).stat().st_size == item["bytes"] for name, item in manifest["assets"].items()), "asset size mismatch")
         return manifest
+
+    def gateway_package(self, package):
+        if not (self.source / "gateway/go.mod").is_file():
+            return
+        env, _ = self.environment()
+        require(env.get("goBase") == GO_BASE and env.get("goImage"), "gateway build environment is missing or stale")
+        image = self.image_id(env["goImage"])
+        target = package / "gateway/bin"
+        target.mkdir(parents=True)
+        script = """export PATH=/usr/local/go/bin:$PATH
+export GOTOOLCHAIN=local GOFLAGS=-mod=readonly GOPROXY=off GOSUMDB=off
+mkdir -p /work/gateway
+cp -a --no-preserve=ownership /inputs/gateway/. /work/gateway/
+cd /work/gateway
+chmod -R u+rwX .
+go version | grep -Eq '^go version go1\\.24\\.4 linux/(amd64|arm64)$'
+go version > /out/toolchain.txt
+go test -race ./...
+for arch in amd64 arm64; do
+  CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -buildvcs=false -ldflags='-s -w' -o /out/openbear-gateway-linux-$arch ./cmd/openbear-gateway
+done
+/out/openbear-gateway-linux-$(go env GOARCH) --version
+"""
+        self.run_container(image, script, [(self.source / "gateway", "/inputs/gateway", True),
+                                           (target, "/out", False)], role="gateway-build")
+        files = {}
+        for arch in ("amd64", "arm64"):
+            binary = target / f"openbear-gateway-linux-{arch}"
+            require(binary.is_file() and binary.read_bytes()[:4] == b"\x7fELF", "gateway binary is missing or invalid")
+            files[binary.name] = {"sha256": sha256(binary), "bytes": binary.stat().st_size}
+        toolchain = (target / "toolchain.txt").read_text().strip()
+        (target / "toolchain.txt").unlink()
+        atomic_json(target / "manifest.json", {"schema": 1, "toolchain": toolchain, "image": image, "binaries": files})
+        if (self.source / "gateway/README.md").is_file():
+            shutil.copy2(self.source / "gateway/README.md", package / "gateway/README.md")
+        self.details["gateway"] = {"image": image, "toolchain": toolchain, "binaries": files}
 
     def package(self):
         identity = self.package_identity()
@@ -655,7 +706,12 @@ class Stage:
             shutil.copytree(self.source / name, package / name, ignore=ignore)
         for name in TOP_FILES:
             shutil.copy2(self.source / name, package / name)
+        for name in OPTIONAL_FILES:
+            if (self.source / name).is_file():
+                (package / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(self.source / name, package / name)
         shutil.copytree(owned(self.run, "build/dist"), package / "web/dist")
+        self.gateway_package(package)
         audit_package(package)
         classify_code = '''import importlib.util,json,sys
 from pathlib import Path
@@ -712,6 +768,9 @@ print(json.dumps(c))
         report = read_json(self.out / "smoke.json")
         self.details.update(smoke=report, zipSha256=manifest["zipSha256"], toolchain=read_json(self.out / "toolchain.json"))
         require(report.get("ok") is True and report.get("version") == self.config["version"], "package smoke failed/version mismatch")
+        require(all(report.get("serviceLifecycle", {}).get(key) is True
+                    for key in ("fullStartup", "ready", "cleanShutdown")),
+                "package smoke did not verify full service startup/readiness/shutdown")
         require(not anomalies(self.log_path.read_text(errors="replace")), "package smoke logged an unhandled exception")
         require(sha256(archive) == manifest["zipSha256"], "ZIP changed during smoke")
         return {**self.details, "outputs": {"smoke": str(self.out / "smoke.json"), "smokeSha256": sha256(self.out / "smoke.json"), "zip": str(archive), "zipSha256": manifest["zipSha256"]}}
@@ -768,7 +827,8 @@ def audit_package(root):
                 and not name.startswith(".env") and not name.endswith((".pyc", ".pyo", ".db", ".sqlite", ".sqlite3", ".log", ".pem", ".key"))
                 and not any(name.endswith(suffix) for suffix in (".db-wal", ".db-shm", ".sqlite3-wal", ".sqlite3-shm")),
                 f"private data or test/release harness in package: {relative}")
-        require(parts[0] in {"app", "prompts", "scripts", "web"} or relative in (*TOP_FILES, "release-meta.json"), f"unexpected package file: {relative}")
+        gateway_files = {"gateway/README.md", "gateway/bin/manifest.json", "gateway/bin/openbear-gateway-linux-amd64", "gateway/bin/openbear-gateway-linux-arm64"}
+        require(parts[0] in {"app", "prompts", "scripts", "web"} or relative in (*TOP_FILES, *OPTIONAL_FILES, "release-meta.json") or relative in gateway_files, f"unexpected package file: {relative}")
         require(parts[0] != "web" or relative.startswith("web/dist/"), f"non-built frontend in package: {relative}")
     return files
 

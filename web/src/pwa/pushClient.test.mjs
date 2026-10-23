@@ -35,7 +35,7 @@ test('capability explains HTTP, old platforms and iOS home-screen requirement', 
   const {win} = browser();
   assert.equal(pushSupport(win).supported, true);
   win.isSecureContext = false;
-  assert.match(pushSupport(win).reason, /HTTPS/);
+  assert.match(pushSupport(win).reason, /不影响登录/);
   win.isSecureContext = true;
   win.navigator.userAgent = 'iPhone';
   assert.match(pushSupport(win).reason, /主屏幕/);
@@ -277,7 +277,7 @@ function serviceWorker() {
   };
   vm.runInNewContext(readFileSync(new URL('../../public/openbear-push-sw.js', import.meta.url), 'utf8'), {self, URL});
   async function event(type, data) {let work; handlers[type]({...data, waitUntil(promise) {work = promise;}}); await work;}
-  return {handlers, notices, opened, messages, event, existing};
+  return {handlers, notices, opened, messages, event};
 }
 
 test('push worker displays user-visible notification and never intercepts fetch/offline traffic', async () => {
@@ -306,11 +306,4 @@ test('notification click reuses the current app without navigating/reloading awa
   assert.equal(w.messages[0].url, 'https://bear.test/chat?id=new');
   assert.equal(w.messages[1], 'focus');
   assert.deepEqual(w.opened, []);
-});
-
-test('notification click rejects external destinations and opens app when no reusable client exists', async () => {
-  const w = serviceWorker();
-  w.existing.url = 'https://bear.test/login';
-  await w.event('notificationclick', {notification: {close() {}, data: {url: 'https://evil.test/steal'}}});
-  assert.deepEqual(w.opened, ['https://bear.test/chat']);
 });

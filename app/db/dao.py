@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -9,6 +10,9 @@ from typing import Any
 from app.agent.native_continuation import transcript_message_fingerprint
 from app.db.engine import DB, now_ts
 from app.llm.events import ToolCall, Usage
+from app.logging import get_logger
+
+_log = get_logger("db.dao")
 
 
 @dataclass(slots=True)
@@ -283,6 +287,9 @@ class WebConversationDefaultsDAO:
             return dict(await cur.fetchone())
 
 
+_TRANSCRIPT_FINGERPRINT_CHATS = 64
+
+
 class MessageDAO:
     def __init__(self, db: DB, *, connection: Any | None = None) -> None:
         self._db = db
@@ -350,6 +357,16 @@ class MessageDAO:
         await self._conn.commit()
         return new_uuid
 
+    async def _controller_context_stamp(self, chat_id: int, *, connection: Any | None = None) -> tuple[Any, ...]:
+        conn = connection if connection is not None else self._conn
+        cur = await conn.execute("SELECT session_uuid FROM sessions WHERE chat_id=?", (chat_id,))
+        session = await cur.fetchone()
+        key = f"controller:{chat_id}:{str(session['session_uuid'] or '') if session else ''}"
+        cur = await conn.execute("SELECT revision,window_version FROM context_windows WHERE owner_key=?", (key,))
+        window = await cur.fetchone()
+        cur = await conn.execute("SELECT COALESCE(MAX(id),0) FROM messages WHERE chat_id=?", (chat_id,))
+        return key, tuple(window) if window is not None else None, int((await cur.fetchone())[0])
+
     async def _controller_context_anchor(self, chat_id: int, *, connection: Any | None = None) -> dict[str, Any]:
         """Bind opaque replay to an independent window and its current originals.
 
@@ -384,9 +401,33 @@ class MessageDAO:
             "windowVersion": int(window["window_version"]) if window else 0,
             "windowRevision": int(window["revision"]) if window else 0,
             "sourceHighWater": high_water,
-            "messages": [{"id": int(row["id"]), "fingerprint": transcript_message_fingerprint(self._row(row).to_message())}
-                         for row in rows],
+            "messages": [{"id": int(row["id"]), "fingerprint": fingerprint} for row, fingerprint in zip(rows, (
+                self._transcript_fingerprints(chat_id, rows) if window is not None
+                else [transcript_message_fingerprint(self._row(row).to_message()) for row in rows]))],
         }
+
+    def _transcript_fingerprints(self, chat_id: int, rows: list[Any]) -> list[str]:
+        """Reuse a row's fingerprint only while every stored column is unchanged."""
+        chats = getattr(self._db, "_transcript_fingerprint_cache", None)
+        if chats is None:
+            chats = OrderedDict()
+            self._db._transcript_fingerprint_cache = chats
+        previous = chats.pop(chat_id, {})
+        current: dict[int, tuple[tuple[Any, ...], str]] = {}
+        fingerprints = []
+        for row in rows:
+            values = tuple(row)
+            # 1 == 1.0 in Python but not in the hashed JSON.
+            values += tuple(map(type, values))
+            cached = previous.get(int(row["id"]))
+            if cached is None or cached[0] != values:
+                cached = (values, transcript_message_fingerprint(self._row(row).to_message()))
+            current[int(row["id"])] = cached
+            fingerprints.append(cached[1])
+        chats[chat_id] = current
+        while len(chats) > _TRANSCRIPT_FINGERPRINT_CHATS:
+            chats.popitem(last=False)
+        return fingerprints
 
     async def load_controller_model_context(
         self,
@@ -438,6 +479,20 @@ class MessageDAO:
         )
         if valid:
             return dict(state)
+        saved_anchor = state.get("anchor") if isinstance(state, dict) else None
+        saved_anchor = saved_anchor if isinstance(saved_anchor, dict) else {}
+        mismatched = [name for name, ok in (
+            ("identity", saved == expected),
+            ("format", isinstance(state, dict) and int(state.get("version") or 0) == 1
+             and isinstance(state.get("messages"), list)),
+            *((f"anchor.{key}", saved_anchor.get(key) == anchor.get(key)) for key in anchor),
+        ) if not ok]
+        # Losing the checkpoint resends the history without provider-owned state
+        # (thinking, native items), which also discards the provider cache.
+        _log.warning("主控原生上下文检查点失效，改用中性历史", chat_id=chat_id,
+                     不一致=",".join(mismatched),
+                     **({"已存身份": "|".join(saved), "本次身份": "|".join(expected)}
+                        if "identity" in mismatched else {}))
         await self.clear_controller_model_context(chat_id)
         return None
 
@@ -463,11 +518,17 @@ class MessageDAO:
         if not all(identity.values()):
             await self.clear_controller_model_context(chat_id)
             return 0
+        payload = dict(state or {})
+        payload["version"] = 1
+        # The anchor and the large encoding are built before taking the writer.
+        # Under the lock only the cheap stamp is re-read; any change rebuilds.
+        stamp = await self._controller_context_stamp(chat_id)
+        payload["anchor"] = await self._controller_context_anchor(chat_id)
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
         async with self._conn.transaction(label="controller-model-context-save") as conn:
-            payload = dict(state or {})
-            payload["version"] = 1
-            payload["anchor"] = await self._controller_context_anchor(chat_id, connection=conn)
-            encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+            if await self._controller_context_stamp(chat_id, connection=conn) != stamp:
+                payload["anchor"] = await self._controller_context_anchor(chat_id, connection=conn)
+                encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
             ts = now_ts()
             await conn.execute(
                 """

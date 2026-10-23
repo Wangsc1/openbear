@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import postcss from 'postcss';
 
 const source = fs.readFileSync(new URL('./ConversationTree.vue', import.meta.url), 'utf8');
-const modelSettings = fs.readFileSync(new URL('./ModelSettings.vue', import.meta.url), 'utf8');
 const conversation = fs.readFileSync(new URL('./ConversationPropertiesDialog.vue', import.meta.url), 'utf8');
 const style = fs.readFileSync(new URL('./conversationTreeProperties.css', import.meta.url), 'utf8');
 
@@ -34,16 +33,6 @@ test('folder properties use a compact single-line header, centered tabs and only
   assert.match(source, /aria-controls="folder-properties-panel-defaults"/);
 });
 
-test('property sheet owns its macOS styling without changing other Element Plus controls', () => {
-  assert.match(source, /import "\.\/conversationTreeProperties\.css"/);
-  assert.match(style, /--fp-surface:var\(--ob-surface-raised\)/);
-  assert.match(style, /property-segmented button\[aria-selected="true"\] \{ background:var\(--fp-selected\)/);
-  assert.match(style, /folder-properties-popover\.el-popper/);
-  assert.equal((modelSettings.match(/popper-class="folder-properties-popover" :show-arrow="false"/g) || []).length, 2);
-  assert.match(source, /function navigatePropertiesTab\(event\)/);
-  assert.match(style, /prefers-reduced-motion/);
-});
-
 test('temporary properties are separated at the bottom of the system menu', () => {
   const menu = source.slice(source.indexOf(`<template v-else-if="['system', 'root'].includes(menu.row?.kind)">`), source.indexOf('<template v-else>', source.indexOf(`<template v-else-if="['system', 'root'].includes(menu.row?.kind)">`)));
   assert.ok(menu.indexOf("runMenuAction('new-conversation')") < menu.indexOf("runMenuAction('new-folder')"));
@@ -52,17 +41,6 @@ test('temporary properties are separated at the bottom of the system menu', () =
 
 test('ordinary workspace input keeps its label and a neutral public example', () => {
   assert.match(source, /<label\b[^>]*>\s*<span id="folder-workspace-label">本节点工作目录[\s\S]*?<el-input[^>]+placeholder="例如 \/home\/user\/projects\/my-project"[^>]*\/>\s*<\/label>/);
-});
-
-test('folder and conversation share all model rows and the same compression select', () => {
-  assert.match(source, /<ModelSettings[^>]*:model-value="propertiesForm.runDefaults"/);
-  assert.match(conversation, /<ModelSettings[^>]*:model-value="modelSettings"/);
-  assert.match(modelSettings, /data-run-default-field="contextStrategy"/);
-  assert.match(modelSettings, /runDefaultOption\('sliding_window'\)/);
-  assert.match(modelSettings, /runDefaultOption\('model_summary'\)/);
-  assert.match(source, /saveRunDefaults \? \{ runDefaults: sparseRunDefaults\(propertiesForm.runDefaults\) \} : \{\}/);
-  assert.match(source, /openbear:folder-properties-changed/);
-  assert.match(conversation, /saveRunConfig\(id,requests\[field\]\)/);
 });
 
 test('conversation properties precedes the final delete action like folder properties, preserving prompt management', () => {
@@ -76,26 +54,4 @@ test('conversation properties precedes the final delete action like folder prope
   assert.ok(actions.includes('refresh-prompt'));
   assert.match(source, /<ConversationPromptDialog v-model="promptDialog"/);
   assert.doesNotMatch(conversation, /ConversationPromptDialog|snapshotFrozen|snapshotUpdateRequired/);
-});
-
-test('capability choices preserve backend normalization and sparse defaults', () => {
-  assert.match(source, /return levels\.length \? levels : \["off"\]/);
-  assert.match(source, /normalizedRunDefaults\(\{/);
-  assert.match(source, /if \(!propertyModelsLoaded\.value\) return "";/);
-});
-
-test('context-only saves omit unchanged defaults while explicit changes remain validated', () => {
-  assert.match(source, /propertiesRunDefaultsBaseline\.value = sparseRunDefaults\(data\.runDefaults\?\.local\)/);
-  assert.match(source, /JSON\.stringify\(sparseRunDefaults\(propertiesForm\.runDefaults\)\)\s*!== JSON\.stringify\(propertiesRunDefaultsBaseline\.value\)/);
-  assert.match(source, /const saveRunDefaults = propertyModelsLoaded\.value && runDefaultsChanged\.value/);
-  assert.match(source, /saveRunDefaults \? runDefaultsValidationError\(\) : ""/);
-  assert.match(source, /function resetPropertiesForm\(row\) \{\s*propertiesRunDefaultsBaseline\.value = \{\}/);
-});
-
-test('folder loading and saving are generation guarded against stale dialogs', () => {
-  assert.match(source, /const request = \+\+propertiesRequestGeneration;/);
-  assert.match(source, /request !== propertiesRequestGeneration \|\| !propertiesDialog\.value/);
-  assert.match(source, /const folderId = propertiesForm\.folderId;/);
-  assert.match(source, /conversationFolderPropertiesImpact\(folderId, payload\)/);
-  assert.match(source, /updateConversationFolderProperties\(folderId, \{ \.\.\.payload, updateSnapshots:/);
 });

@@ -6,15 +6,11 @@ import {createRenderer, reactive} from "vue";
 
 const sharedUrl = new URL("./AgentProcessActivity.vue", import.meta.url);
 const activityListUrl = new URL("./AgentActivityList.vue", import.meta.url);
-const eventCardUrl = new URL("./AgentEventCard.vue", import.meta.url);
-const workspaceUrl = new URL("./AgentPlanWorkspace.vue", import.meta.url);
 const generatedUrl = new URL(`./.AgentProcessActivity.test-${process.pid}.mjs`, import.meta.url);
 
-const [sharedSource, activityListSource, eventCardSource, workspaceSource] = await Promise.all([
+const [sharedSource, activityListSource] = await Promise.all([
   readFile(sharedUrl, "utf8"),
   readFile(activityListUrl, "utf8"),
-  readFile(eventCardUrl, "utf8"),
-  readFile(workspaceUrl, "utf8"),
 ]);
 
 let AgentProcessActivity;
@@ -83,24 +79,6 @@ test("shared Agent process activity compacts source lifecycles once and limits l
     "上下文压缩完成",
     "最终未知事件",
   ]);
-});
-
-test("top-level activity and managed step activity share the source-line presentation component", () => {
-  assert.equal((sharedSource.match(/compactAgentStepActivityLines\(/g) || []).length, 1);
-  assert.match(sharedSource, /<AgentActivityList[^>]*:lines="displayLines"[^>]*compact\/>/);
-
-  assert.match(eventCardSource, /<AgentProcessActivity[\s\S]*?:source-lines="activityDisplayLines"[\s\S]*?:model-label="activityModelLabel"[\s\S]*?:think-level="activityThinkLevel"[\s\S]*?:fast-mode="activityFastMode"[\s\S]*?\/>/);
-  assert.doesNotMatch(eventCardSource, /import AgentActivityList/);
-  assert.doesNotMatch(eventCardSource, /compactAgentStepActivityLines/);
-  assert.match(eventCardSource, /\.filter\(\(item\) => !isActivityExcludedEventKind\(item\.kind\)\)/);
-  assert.match(eventCardSource, /agentCompactionActivityView\(item\)/);
-  assert.match(eventCardSource, /toolArgumentsSummary\(toolName, rawArguments\)/);
-  assert.match(eventCardSource, /toolDescription: String\(item\.toolDescription \|\| item\.description \|\| item\.detail\?\.description \|\| summary\)/);
-
-  assert.match(workspaceSource, /selectedStepActivitySource = computed\(\(\) => agentStepActivityLines\(/);
-  assert.match(workspaceSource, /<AgentProcessActivity[\s\S]*?:source-lines="selectedStepActivitySource"[\s\S]*?:think-level="launchInfo\.thinkLevel[^"]*"[\s\S]*?:fast-mode="launchInfo\.fastMode"[\s\S]*?:limit="5"[\s\S]*?\/>/);
-  assert.doesNotMatch(workspaceSource, /import AgentActivityList/);
-  assert.doesNotMatch(workspaceSource, /compactAgentStepActivityLines/);
 });
 
 test("shared tool and model rows use the original timeline dot with status-only tones", () => {

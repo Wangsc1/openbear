@@ -1,0 +1,93 @@
+# 界面改版验收（iPhone / iPad 模拟器，深浅色各跑一次，outname 区分）：
+# 会话列表 -> 打开最长对话 -> 上翻找到工作块并展开 -> 打开工具详情 Sheet -> 关闭 -> 输入区与模型面板 -> 返回 -> 设置 Tab
+appId: dev.openbear.app
+---
+- launchApp:
+    stopApp: false
+- tapOn:
+    id: "back"
+    optional: true
+- extendedWaitUntil:
+    visible:
+      id: "conv-a6a877ad"
+    timeout: 60000
+- waitForAnimationToEnd
+- takeScreenshot: r01-list
+- scroll
+- waitForAnimationToEnd
+- takeScreenshot: r02-list-collapsed
+- scrollUntilVisible:
+    element:
+      id: "conv-a6a877ad"
+    direction: UP
+- tapOn:
+    id: "conv-a6a877ad"
+- extendedWaitUntil:
+    visible:
+      id: "row-answer"
+    timeout: 30000
+- waitForAnimationToEnd
+- takeScreenshot: r03-conversation
+- scrollUntilVisible:
+    element:
+      id: "row-work-summary"
+    direction: UP
+    timeout: 30000
+    centerElement: true
+- tapOn:
+    id: "row-work-summary"
+- waitForAnimationToEnd
+- swipe:
+    start: 50%, 60%
+    end: 50%, 35%
+    duration: 400
+- waitForAnimationToEnd
+- takeScreenshot: r04-work-expanded
+# 第一条工具行可能被玻璃导航栏盖住，点屏幕中部的一条
+- tapOn:
+    id: "row-tool"
+    index: 5
+- extendedWaitUntil:
+    visible:
+      text: "参数"
+    timeout: 10000
+- waitForAnimationToEnd
+- takeScreenshot: r05-tool-sheet
+- tapOn:
+    text: "参数"
+- waitForAnimationToEnd
+- takeScreenshot: r06-tool-sheet-args
+- swipe:
+    start: 50%, 52%
+    end: 50%, 98%
+    duration: 300
+- waitForAnimationToEnd
+- assertNotVisible:
+    text: "原始"
+- tapOn:
+    id: "composer-input"
+- inputText: "第一行"
+- waitForAnimationToEnd
+- takeScreenshot: r07-composer-keyboard
+# 交互式收起：从列表一直拖进键盘区域（不用 hideKeyboard，它在 iOS 上可能点到列表行）
+- swipe:
+    start: 50%, 30%
+    end: 50%, 95%
+    duration: 900
+- waitForAnimationToEnd
+- takeScreenshot: r07b-keyboard-dismissed
+- tapOn:
+    id: "composer-model"
+- waitForAnimationToEnd
+- takeScreenshot: r08-model-panel
+- tapOn:
+    id: "model-done"
+- tapOn:
+    id: "back"
+- waitForAnimationToEnd
+- tapOn:
+    text: "设置"
+- waitForAnimationToEnd
+- takeScreenshot: r09-settings
+- tapOn:
+    text: "会话"

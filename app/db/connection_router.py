@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import re
 import sqlite3
+import threading
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -28,6 +31,8 @@ _FIRST_TOKEN_RE = re.compile(r"^\s*([A-Za-z]+)")
 _CTE_WRITE_RE = re.compile(r"\b(?:INSERT|UPDATE|DELETE|REPLACE)\b", re.IGNORECASE)
 _READ_TOKENS = {"SELECT", "EXPLAIN"}
 _TRANSACTION_TOKENS = {"BEGIN", "SAVEPOINT", "RELEASE", "COMMIT", "END", "ROLLBACK"}
+# Every other writer waits behind a held transaction; report holds this long.
+_SLOW_HOLD_S = 5.0
 
 
 def _strip_leading_comments(sql: str) -> str:
@@ -70,8 +75,175 @@ def _is_locked_error(exc: BaseException) -> bool:
     return "database is locked" in text or "database table is locked" in text
 
 
+def _implicit_label(kind: str, sql: str) -> str:
+    return f"{kind}:{' '.join(sql.split())[:80]}"
+
+
+_INTERNAL_PATHS = (os.path.dirname(asyncio.__file__), os.path.dirname(aiosqlite.__file__), __file__)
+
+
+def _suspended_at(task: asyncio.Task[Any] | None) -> str:
+    """Innermost caller frame of the await chain, past asyncio/aiosqlite/router internals.
+
+    Task.get_stack only reaches the task's entry coroutine.
+    """
+    frames = []
+    awaitable: Any = task.get_coro() if task is not None else None
+    while awaitable is not None:
+        frame = (getattr(awaitable, "cr_frame", None) or getattr(awaitable, "gi_frame", None)
+                 or getattr(awaitable, "ag_frame", None))
+        if frame is None:
+            break
+        frames.append(frame)
+        awaitable = (getattr(awaitable, "cr_await", None) or getattr(awaitable, "gi_yieldfrom", None)
+                     or getattr(awaitable, "ag_await", None))
+    caller = next((f for f in reversed(frames) if not f.f_code.co_filename.startswith(_INTERNAL_PATHS)),
+                  frames[-1] if frames else None)
+    return f"{caller.f_code.co_filename}:{caller.f_lineno}" if caller is not None else "unknown"
+
+
 class SQLiteWriterTimeout(TimeoutError):
     """The application writer is busy; no SQLite operation was queued."""
+
+
+async def drain_cleanup(operation: Awaitable[_T]) -> _T:
+    """Finish resource cleanup even if shutdown is cancelled more than once."""
+    cleanup = asyncio.ensure_future(operation)
+    cancelled = False
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = cleanup.result()
+    if cancelled:
+        raise asyncio.CancelledError()
+    return result
+
+
+# A cancelled request's own statement is aborted from the progress handler,
+# checked every this many VM instructions (well under a millisecond).
+_ABORT_CHECK_INSTRUCTIONS = 10_000
+# sqlite3_interrupt() stays set until no statement on the connection is active,
+# so with another task's cursor open it fails unrelated queries. Use it only for
+# a request the progress handler cannot reach (e.g. waiting on a lock).
+_INTERRUPT_FALLBACK_S = 1.0
+
+
+class InterruptibleConnection(aiosqlite.Connection):
+    """Cancel only the caller's queued/running SQLite work, including cursor fetches.
+
+    aiosqlite otherwise leaves cancelled statements running on its worker. The
+    small worker-side identity guard keeps a cancellation on the shared reader
+    from aborting a different request.
+    """
+
+    def __init__(self, path: str) -> None:
+        super().__init__(lambda: self._open(path), iter_chunk_size=64)
+        self._request_guard = threading.Lock()
+        self._active_request: threading.Event | None = None
+        self._requests: set[threading.Event] = set()
+        self._closing = False
+        self._close_task: asyncio.Task[None] | None = None
+
+    def _open(self, path: str) -> sqlite3.Connection:
+        conn = sqlite3.connect(path)
+        conn.set_progress_handler(self._abort_requested, _ABORT_CHECK_INSTRUCTIONS)
+        return conn
+
+    def _abort_requested(self) -> int:
+        request = self._active_request
+        return 1 if request is not None and request.is_set() else 0
+
+    def _interrupt_request(self, request: threading.Event) -> None:
+        with self._request_guard:
+            if self._active_request is request:
+                # sqlite3.interrupt is explicitly safe from a different thread.
+                with contextlib.suppress(sqlite3.Error, ValueError):
+                    self._conn.interrupt()
+
+    async def _execute(self, fn, *args, **kwargs):
+        # aiosqlite.close queues native close through this same hook.
+        if self._closing:
+            if fn == self._conn.close:
+                return await super()._execute(fn, *args, **kwargs)
+            raise ValueError("Connection closed")
+        request = threading.Event()
+        started = threading.Event()
+        self._requests.add(request)
+
+        def run():
+            with self._request_guard:
+                if request.is_set():
+                    raise sqlite3.OperationalError("interrupted")
+                self._active_request = request
+                started.set()
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                with self._request_guard:
+                    self._active_request = None
+
+        pending = asyncio.create_task(super()._execute(run))
+        try:
+            return await asyncio.shield(pending)
+        except asyncio.CancelledError:
+            with self._request_guard:
+                request.set()
+                queued = not started.is_set()
+            if queued:
+                # This request will be skipped by the worker. Do not wait behind
+                # (or interrupt) an unrelated long-running reader request.
+                pending.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+                raise
+            # The progress handler aborts this request's statement; fall back to
+            # interrupting only while THIS request is still active.
+            fallback_at = time.monotonic() + _INTERRUPT_FALLBACK_S
+            while not pending.done():
+                if time.monotonic() >= fallback_at:
+                    self._interrupt_request(request)
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait({pending}, timeout=0.01)
+            with contextlib.suppress(BaseException):
+                result = pending.result()
+                if isinstance(result, sqlite3.Cursor):
+                    await drain_cleanup(super()._execute(result.close))
+            raise
+        finally:
+            self._requests.discard(request)
+
+    async def interrupt(self) -> None:
+        """Explicit emergency stop of currently queued/running work only."""
+        for request in tuple(self._requests):
+            request.set()
+            self._interrupt_request(request)
+
+    async def _close_connection(self) -> None:
+        self._closing = True
+        pending = asyncio.create_task(super().close())
+        while not pending.done():
+            await self.interrupt()
+            await asyncio.wait({pending}, timeout=0.01)
+        await pending
+
+    async def close(self) -> None:
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close_connection())
+        await drain_cleanup(self._close_task)
+
+
+async def open_sqlite_connection(path: str) -> InterruptibleConnection:
+    """Retain a connecting worker until it can be closed, even on cancellation."""
+    connection = InterruptibleConnection(path)
+    pending = asyncio.ensure_future(connection)
+    try:
+        return await asyncio.shield(pending)
+    except BaseException:
+        with contextlib.suppress(BaseException):
+            await drain_cleanup(pending)
+        with contextlib.suppress(BaseException):
+            await connection.close()
+        raise
 
 
 class SQLiteConnectionRouter:
@@ -94,10 +266,13 @@ class SQLiteConnectionRouter:
         self._writer = writer
         self._writer_lock = asyncio.Lock()
         self._owner: asyncio.Task[Any] | None = None
+        self._owner_label = ""
+        self._owner_since = 0.0
         self._owner_callback: Callable[[asyncio.Task[Any]], None] | None = None
         self._lock_retries = max(0, int(lock_retries))
         self._writer_wait_timeout_s = max(0.001, float(writer_wait_timeout_s))
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
         self._transaction_depth = 0
         # Notifications only wake consumers; callbacks must not perform database
         # work or delay the owning transaction. No uncommitted data is broadcast.
@@ -122,8 +297,11 @@ class SQLiteConnectionRouter:
             raise RuntimeError("SQLite writer operation requires an asyncio task")
         return task
 
-    async def _acquire_writer(self, *, wait_timeout_s: float | None = None) -> tuple[asyncio.Task[Any], bool]:
+    async def _acquire_writer(self, *, wait_timeout_s: float | None = None,
+                              label: str = "write") -> tuple[asyncio.Task[Any], bool]:
         task = self._current_task()
+        if self._closed:
+            raise RuntimeError("数据库已关闭")
         if self._owner is task:
             return task, False
         timeout = self._writer_wait_timeout_s if wait_timeout_s is None else max(0.001, float(wait_timeout_s))
@@ -135,18 +313,24 @@ class SQLiteConnectionRouter:
         except TimeoutError as exc:
             owner = self._owner
             owner_name = owner.get_name() if owner is not None else "unknown"
+            owner_label = self._owner_label if owner is not None else "unknown"
+            held = time.monotonic() - self._owner_since if owner is not None else 0.0
             if wait_timeout_s is None:
-                frames = owner.get_stack(limit=1) if owner is not None else []
-                location = f"{frames[-1].f_code.co_filename}:{frames[-1].f_lineno}" if frames else "unknown"
-                log.error("SQLite 写锁等待超时", 等待任务=task.get_name(), 持锁任务=owner_name,
-                          持锁位置=location, 等待秒=timeout)
+                log.error("SQLite 写锁等待超时", 等待任务=task.get_name(), 等待事务=label,
+                          持锁任务=owner_name, 持锁事务=owner_label, 已持锁秒=round(held, 1),
+                          持锁位置=_suspended_at(owner), 等待秒=timeout)
             # A waiting caller must never commit/rollback/release another
             # task's transaction. Short optional writes can safely skip it.
-            raise SQLiteWriterTimeout(f"SQLite writer wait timed out after {timeout:g}s (owner={owner_name})") from exc
+            raise SQLiteWriterTimeout(
+                f"SQLite writer wait timed out after {timeout:g}s "
+                f"(owner={owner_name}, transaction={owner_label}, held={held:.1f}s)"
+            ) from exc
         if self._closed:
             self._writer_lock.release()
             raise RuntimeError("数据库已关闭")
         self._owner = task
+        self._owner_label = label
+        self._owner_since = time.monotonic()
         loop = asyncio.get_running_loop()
 
         def _owner_done(done_task: asyncio.Task[Any]) -> None:
@@ -168,6 +352,9 @@ class SQLiteConnectionRouter:
         if self._owner_callback is not None:
             task.remove_done_callback(self._owner_callback)
             self._owner_callback = None
+        held = time.monotonic() - self._owner_since
+        if held >= _SLOW_HOLD_S:
+            log.warning("SQLite 写事务持锁过久", 事务=self._owner_label, 任务=task.get_name(), 持锁秒=round(held, 1))
         self._owner = None
         if self._writer_lock.locked():
             self._writer_lock.release()
@@ -189,17 +376,7 @@ class SQLiteConnectionRouter:
         Cancelling an aiosqlite await does not remove its queued SQL. A rollback
         must be queued unconditionally behind it, not gated on in_transaction.
         """
-        cleanup = asyncio.ensure_future(operation)
-        cancelled = False
-        while not cleanup.done():
-            try:
-                await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
-                cancelled = True
-        result = cleanup.result()
-        if cancelled:
-            raise asyncio.CancelledError()
-        return result
+        return await drain_cleanup(operation)
 
     async def _retry_locked(self, operation: Callable[[], Awaitable[_T]], *, label: str) -> _T:
         for attempt in range(self._lock_retries + 1):
@@ -226,17 +403,21 @@ class SQLiteConnectionRouter:
         try:
             return await asyncio.shield(pending)
         except asyncio.CancelledError:
+            pending.cancel()
+
             async def close_unclaimed_cursor() -> None:
                 cursor = await pending
                 await cursor.close()
 
             # Repeated cancellation must not abandon cursor cleanup either.
             # A query failure during cancellation must not replace cancellation.
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(BaseException):
                 await self._drain_cleanup(close_unclaimed_cursor())
             raise
 
     async def execute(self, sql: str, parameters: Any = None) -> aiosqlite.Cursor:
+        if self._closed:
+            raise RuntimeError("数据库已关闭")
         params = () if parameters is None else parameters
         task = asyncio.current_task()
         if task is not None and self._owner is task:
@@ -254,7 +435,7 @@ class SQLiteConnectionRouter:
         if _is_read_statement(sql):
             return await self._execute_read(sql, params)
 
-        owner, acquired = await self._acquire_writer()
+        owner, acquired = await self._acquire_writer(label=_implicit_label("implicit", sql))
         try:
             cursor = await self._retry_locked(
                 lambda: self._writer.execute(sql, params),
@@ -273,7 +454,26 @@ class SQLiteConnectionRouter:
                 self._release_writer(owner)
             raise
 
+    async def execute_fetchall(self, sql: str, parameters: Any = None) -> list[Any]:
+        """Run a statement and collect its rows; a read does both in one worker call.
+
+        Between a separate ``execute`` and fetch, other tasks' reads on the shared
+        reader see the snapshot the unfinished SELECT holds. Long-running
+        maintenance scans read this way so they never pin it across awaits.
+        """
+        params = () if parameters is None else parameters
+        task = asyncio.current_task()
+        if not self._closed and _is_read_statement(sql) and not (task is not None and self._owner is task):
+            return list(await self._reader.execute_fetchall(sql, params))
+        cursor = await self.execute(sql, params)
+        try:
+            return list(await cursor.fetchall())
+        finally:
+            await cursor.close()
+
     async def executemany(self, sql: str, parameters: Any) -> aiosqlite.Cursor:
+        if self._closed:
+            raise RuntimeError("数据库已关闭")
         task = asyncio.current_task()
         if task is not None and self._owner is task:
             try:
@@ -289,7 +489,7 @@ class SQLiteConnectionRouter:
                 raise
         if _is_read_statement(sql):
             return await self._reader.executemany(sql, parameters)
-        owner, _ = await self._acquire_writer()
+        owner, _ = await self._acquire_writer(label=_implicit_label("implicit-many", sql))
         try:
             cursor = await self._retry_locked(
                 lambda: self._writer.executemany(sql, parameters),
@@ -306,7 +506,7 @@ class SQLiteConnectionRouter:
             raise
 
     async def executescript(self, sql_script: str) -> aiosqlite.Cursor:
-        owner, _ = await self._acquire_writer()
+        owner, _ = await self._acquire_writer(label="executescript")
         try:
             cursor = await self._retry_locked(
                 lambda: self._writer.executescript(sql_script),
@@ -327,7 +527,7 @@ class SQLiteConnectionRouter:
         # Only its outer context manager can commit/notify; other tasks still wait.
         if self._owner is asyncio.current_task() and self._transaction_depth:
             return
-        owner, _ = await self._acquire_writer()
+        owner, _ = await self._acquire_writer(label="commit")
         try:
             await self._retry_locked(self._writer.commit, label="commit")
             self._notify_commit()
@@ -339,14 +539,14 @@ class SQLiteConnectionRouter:
             self._release_writer(owner)
 
     async def rollback(self) -> None:
-        owner, _ = await self._acquire_writer()
+        owner, _ = await self._acquire_writer(label="rollback")
         try:
             await self._drain_cleanup(self._writer.rollback())
         finally:
             self._release_writer(owner)
 
     async def backup(self, target: sqlite3.Connection, **kwargs: Any) -> None:
-        owner, _ = await self._acquire_writer()
+        owner, _ = await self._acquire_writer(label="backup")
         try:
             if self._writer.in_transaction:
                 await self._writer.commit()
@@ -357,13 +557,21 @@ class SQLiteConnectionRouter:
 
     @asynccontextmanager
     async def transaction(self, *, label: str = "transaction", foreign_keys: bool = False,
-                          wait_timeout_s: float | None = None) -> AsyncIterator[aiosqlite.Connection]:
-        owner, acquired = await self._acquire_writer(wait_timeout_s=wait_timeout_s)
+                          wait_timeout_s: float | None = None,
+                          sqlite_busy_timeout_ms: int | None = None) -> AsyncIterator[aiosqlite.Connection]:
+        if sqlite_busy_timeout_ms is not None and sqlite_busy_timeout_ms < 0:
+            raise ValueError("sqlite_busy_timeout_ms must be non-negative")
+        owner, acquired = await self._acquire_writer(wait_timeout_s=wait_timeout_s, label=label)
         nested = bool(self._writer.in_transaction)
         savepoint = f"openbear_{uuid.uuid4().hex}"
         previous_fk: int | None = None
+        previous_busy_timeout: int | None = None
         begun = False
         try:
+            if sqlite_busy_timeout_ms is not None:
+                async with self._writer.execute("PRAGMA busy_timeout") as cursor:
+                    previous_busy_timeout = int((await cursor.fetchone())[0])
+                await self._writer.execute(f"PRAGMA busy_timeout={int(sqlite_busy_timeout_ms)}")
             if foreign_keys:
                 cursor = await self._writer.execute("PRAGMA foreign_keys")
                 previous_fk = int((await cursor.fetchone())[0])
@@ -379,6 +587,9 @@ class SQLiteConnectionRouter:
                         raise RuntimeError("Webhook foreign key enforcement unavailable")
             if nested:
                 await self._writer.execute(f"SAVEPOINT {savepoint}")
+            elif sqlite_busy_timeout_ms is not None:
+                # Maintenance opts into one short native lock wait, not retries.
+                await self._writer.execute("BEGIN IMMEDIATE")
             else:
                 await self._retry_locked(
                     lambda: self._writer.execute("BEGIN IMMEDIATE"),
@@ -393,7 +604,10 @@ class SQLiteConnectionRouter:
             if nested:
                 await self._writer.execute(f"RELEASE {savepoint}")
             else:
-                await self._retry_locked(self._writer.commit, label=f"{label}:commit")
+                if sqlite_busy_timeout_ms is not None:
+                    await self._writer.commit()
+                else:
+                    await self._retry_locked(self._writer.commit, label=f"{label}:commit")
                 self._notify_commit()
         except BaseException:
             with contextlib.suppress(BaseException):
@@ -405,22 +619,44 @@ class SQLiteConnectionRouter:
             raise
         finally:
             try:
-                if foreign_keys and not nested and previous_fk is not None:
-                    await self._drain_cleanup(self._writer.execute(f"PRAGMA foreign_keys={previous_fk}"))
+                try:
+                    if foreign_keys and not nested and previous_fk is not None:
+                        await self._drain_cleanup(self._writer.execute(f"PRAGMA foreign_keys={previous_fk}"))
+                finally:
+                    if previous_busy_timeout is not None:
+                        await self._drain_cleanup(self._writer.execute(f"PRAGMA busy_timeout={previous_busy_timeout}"))
             finally:
                 if acquired:
                     self._release_writer(owner)
 
-    async def close(self) -> None:
-        if self._closed:
-            return
-        owner, _ = await self._acquire_writer()
+    async def interrupt(self) -> None:
+        """Emergency shutdown only: interrupt both connections, not on lock timeout."""
+        for connection in (self._reader, self._writer):
+            with contextlib.suppress(sqlite3.Error, ValueError):
+                await connection.interrupt()
+
+    async def _close_connections(self, caller: asyncio.Task[Any] | None) -> None:
+        owner = self._owner
+        if owner is not None and owner is not caller:
+            # Ask the owner to unwind its own transaction. Never roll back another
+            # live task's transaction or steal its writer lock.
+            owner.cancel()
+        await self.interrupt()
+        reader_close = asyncio.create_task(self._reader.close())
         try:
-            self._closed = True
-            with contextlib.suppress(BaseException):
-                if self._writer.in_transaction:
+            if owner is caller and owner is not None:
+                try:
                     await self._writer.rollback()
-            await self._reader.close()
-            await self._writer.close()
+                finally:
+                    self._release_writer(owner)
+            async with self._writer_lock:
+                await self._writer.close()
         finally:
-            self._release_writer(owner)
+            await reader_close
+
+    async def close(self) -> None:
+        """Terminal shutdown; callers should stop producers before closing the DB."""
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = asyncio.create_task(self._close_connections(asyncio.current_task()))
+        await self._drain_cleanup(self._close_task)

@@ -10,9 +10,7 @@ from app.browser.settings import build_specs as _browser_specs
 from app.context.summary_prompt import DEFAULT_SUMMARY_PROMPT
 from app.context.user_message_template import DEFAULT_USER_MESSAGE_TEMPLATE, USER_MESSAGE_TEMPLATE_VARIABLES
 from app.conversation_titles import DEFAULT_NAMING_PROMPT
-from app.agent.progress_watch import DEFAULT_AGENT_PROMPT as DEFAULT_PROGRESS_AGENT_PROMPT
-from app.agent.progress_watch import DEFAULT_CONTROLLER_PROMPT as DEFAULT_PROGRESS_CONTROLLER_PROMPT
-from app.agent.progress_watch import VARIABLES as PROGRESS_REMINDER_VARIABLES
+from app.prompt_suggestions import DEFAULT_SUGGESTION_PROMPT
 from app.agents.prompts import PROMPT_SPECS
 
 SettingKind = Literal["bool", "int", "float", "str", "multi"]
@@ -93,7 +91,7 @@ class SettingSpec:
             item = str(value or "").strip()
             if not item:
                 continue
-            if item not in allowed and self.path not in {"models.compressionModels", "models.namingModels"}:
+            if item not in allowed and self.path not in {"models.compressionModels", "models.namingModels", "models.suggestionModels"}:
                 raise ValueError(f"不支持的选项：{item}")
             if item not in out:
                 out.append(item)
@@ -143,28 +141,6 @@ SPECS: dict[str, SettingSpec] = {
         min_value=1,
         max_value=50,
     ),
-    "agent.progressReminder.enabled": _s(
-        "agent.progressReminder.enabled", "无推进提醒",
-        "开启后，OpenBear 监控模型的执行过程：长时间只在思考和读取、没有修改文件或执行有效操作时，在下一次请求前提醒模型重新审视状态。只提醒，不打断、不改思考档位。",
-        "bool", "progress_reminder", "下一轮生效",
-    ),
-    "agent.progressReminder.minutes": _s(
-        "agent.progressReminder.minutes", "无推进时长",
-        "从本轮开始、上次推进或用户插话起，超过这个时长仍没有推进就提醒一次，之后重新计时。等待模型重试和工具执行的时间不计入。",
-        "float", "progress_reminder", "下一轮生效", min_value=1, max_value=1440, unit="分钟",
-    ),
-    "agent.progressReminder.controllerPrompt": _s(
-        "agent.progressReminder.controllerPrompt", "主会话提醒提示词",
-        "提醒主会话模型的内容；留空使用内置模板。外层的 <long-thinking-notice> 标签由 OpenBear 自动添加。",
-        "str", "progress_reminder", "下一轮生效", editor="template",
-        variables=PROGRESS_REMINDER_VARIABLES, default_value=DEFAULT_PROGRESS_CONTROLLER_PROMPT,
-    ),
-    "agent.progressReminder.agentPrompt": _s(
-        "agent.progressReminder.agentPrompt", "Agent 提醒提示词",
-        "提醒子 Agent 的内容；留空使用内置模板。外层的 <long-thinking-notice> 标签由 OpenBear 自动添加。",
-        "str", "progress_reminder", "下一轮生效", editor="template",
-        variables=PROGRESS_REMINDER_VARIABLES, default_value=DEFAULT_PROGRESS_AGENT_PROMPT,
-    ),
     "models.namingModels": _s(
         "models.namingModels", "命名模型",
         "按顺序循环用于生成会话名称；留空时自动选择预计费用最低的可用计费模型，无计费模型时回退当前会话主模型。",
@@ -194,6 +170,36 @@ SPECS: dict[str, SettingSpec] = {
         "agent.namingPrompt", "会话命名提示词",
         "会话命名模型使用的系统提示词；留空使用内置模板，会话正文始终作为单独的用户消息提供。",
         "str", "agent", "立即生效", editor="prompt", default_value=DEFAULT_NAMING_PROMPT,
+    ),
+    "agent.promptSuggestionsEnabled": _s(
+        "agent.promptSuggestionsEnabled", "启用下一句推荐",
+        "Web 会话每轮正常结束后，在输入框上方推荐几条你接下来可能要发的话，点选后填入输入框。关闭后不再生成，也不显示已有推荐。",
+        "bool", "prompt_suggestions", "立即生效",
+    ),
+    "agent.suggestionFollowConversationModel": _s(
+        "agent.suggestionFollowConversationModel", "跟随会话主模型",
+        "开启后先用当前会话的主模型生成推荐（读的仍是最近几轮对话摘录），失败时再按“推荐模型”的顺序或自动选择兜底。主模型更懂你的意图，但通常会多花 1 秒左右和更多费用。",
+        "bool", "prompt_suggestions", "立即生效",
+    ),
+    "models.suggestionModels": _s(
+        "models.suggestionModels", "推荐模型",
+        "按顺序尝试生成推荐，前一个失败才换下一个；留空时自动选择预计费用最低的可用计费模型，无计费模型时回退当前会话主模型。",
+        "multi", "prompt_suggestions", "立即生效",
+    ),
+    "agent.suggestionCount": _s(
+        "agent.suggestionCount", "推荐条数",
+        "每轮最多推荐几条；下一步不明确时模型可以少给或不给。",
+        "int", "prompt_suggestions", "立即生效", min_value=1, max_value=5,
+    ),
+    "agent.suggestionTimeoutS": _s(
+        "agent.suggestionTimeoutS", "推荐单次超时",
+        "每次推荐模型请求的等待上限；超时就换下一个候选模型，全部失败则本轮不显示推荐。",
+        "float", "prompt_suggestions", "立即生效", min_value=1, max_value=600, unit="秒",
+    ),
+    "agent.suggestionPrompt": _s(
+        "agent.suggestionPrompt", "下一句推荐提示词",
+        "推荐模型使用的系统提示词，要求输出 JSON 字符串数组；留空使用内置模板。最近几轮对话和条数上限始终作为单独的用户消息提供。",
+        "str", "prompt_suggestions", "立即生效", editor="prompt", default_value=DEFAULT_SUGGESTION_PROMPT,
     ),
     "agent.maxRetries": _s(
         "agent.maxRetries",
@@ -316,9 +322,20 @@ SPECS: dict[str, SettingSpec] = {
         "contextManagement.defaultStrategy", "默认压缩策略", "用于没有目录覆盖的新会话；不会改变已有会话。主控与所属 Agent 共用会话策略。",
         "str", "compaction", "下一轮生效", choices=(("sliding_window", "滑动窗口"), ("model_summary", "模型摘要")),
     ),
-    "contextManagement.retainRatio": _s(
-        "contextManagement.retainRatio", "滑动窗口保留比例", "相对于触发阈值的软目标，所有必留内容仍受触发阈值约束。仅滑动窗口使用。",
-        "float", "compaction", "下一轮生效", min_value=0.01, max_value=0.95,
+    "contextManagement.retainTokens": _s(
+        "contextManagement.retainTokens", "滑动窗口保留执行记录",
+        "压缩后从最新往前保留完整执行记录（工具调用和结果）的估算 token 数，所有模型共用；只算消息，不含系统提示词和工具定义。当前轮的指令、确认和最近两批工具结果始终保留，超出时允许超过此值。仅滑动窗口使用。",
+        "int", "compaction", "下一轮生效", min_value=20_000, max_value=200_000, unit="token",
+    ),
+    "contextManagement.dialogueTokens": _s(
+        "contextManagement.dialogueTokens", "滑动窗口保留对话文字",
+        "执行记录之外，更早轮次只保留用户消息、助手文字和确认问答的估算 token 数，工具调用、结果和引用正文不保留。0 关闭。仅滑动窗口使用。",
+        "int", "compaction", "下一轮生效", min_value=0, max_value=100_000, unit="token",
+    ),
+    "contextManagement.toolResultArtifactTokens": _s(
+        "contextManagement.toolResultArtifactTokens", "工具结果落盘阈值",
+        "仅实际压缩时，把超过阈值的普通工具结果完整保存为文件，上下文保留路径和头尾预览，可用 Read 分段读取全文；包括最新未读结果。滑动窗口和模型摘要共用。默认 16000 token，0 关闭；用户要求、确认决策和 Agent 编排结论不落盘，未授权 Read 时保持原文。",
+        "int", "compaction", "下一轮生效", min_value=0, unit="token",
     ),
     "models.compressionModels": _s(
         "models.compressionModels", "摘要模型", "按顺序尝试，最后回退当前执行模型；留空仅使用执行模型。仅模型摘要使用。",
@@ -341,6 +358,16 @@ SPECS: dict[str, SettingSpec] = {
         "下一轮生效",
         min_value=1,
         max_value=5,
+    ),
+    "rath.contextTriggerTokens": _s(
+        "rath.contextTriggerTokens",
+        "Agent 压缩触发上限",
+        "Agent 上下文达到此估算 token 数即压缩；模型自身的压缩阈值更低时用模型阈值。主会话不受影响。0 表示只用模型阈值。",
+        "int",
+        "rath",
+        "下一轮生效",
+        min_value=0,
+        unit="token",
     ),
     "rath.agentModelCallLimit": _s(
         "rath.agentModelCallLimit",
@@ -623,6 +650,16 @@ SPECS: dict[str, SettingSpec] = {
         max_value=500_000,
         unit="字符",
     ),
+    "mcp.toolCountThreshold": _s(
+        "mcp.toolCountThreshold", "MCP 工具数量确认阈值",
+        "单个服务已启用工具数超过此值时需确认；0 表示不检查数量。",
+        "int", "mcp", "MCP 重载后生效", min_value=0, max_value=100000, default_value=30, unit="个",
+    ),
+    "mcp.definitionSizeThresholdKB": _s(
+        "mcp.definitionSizeThresholdKB", "MCP 定义体积确认阈值",
+        "已启用工具发给模型的紧凑 JSON 定义超过此体积时需确认；0 表示不检查体积。",
+        "int", "mcp", "MCP 重载后生效", min_value=0, max_value=1048576, default_value=64, unit="KB",
+    ),
     "mcp.installDir": _s(
         "mcp.installDir",
         "MCP 安装目录",
@@ -837,13 +874,15 @@ GROUPS: dict[str, tuple[str, list[str]]] = {
         "agent.namingPrompt",
         ],
     ),
-    "progress_reminder": (
-        "无推进提醒",
+    "prompt_suggestions": (
+        "下一句推荐",
         [
-        "agent.progressReminder.enabled",
-        "agent.progressReminder.minutes",
-        "agent.progressReminder.controllerPrompt",
-        "agent.progressReminder.agentPrompt",
+        "agent.promptSuggestionsEnabled",
+        "agent.suggestionFollowConversationModel",
+        "models.suggestionModels",
+        "agent.suggestionCount",
+        "agent.suggestionTimeoutS",
+        "agent.suggestionPrompt",
         ],
     ),
     "user_message_template": (
@@ -871,13 +910,14 @@ GROUPS: dict[str, tuple[str, list[str]]] = {
     ),
     "compaction": (
         "上下文压缩",
-        ['contextManagement.defaultStrategy', 'agent.compactRatio', 'contextManagement.retainRatio', 'models.compressionModels', 'agent.keepRecentMessages', 'agent.compactMaxTokens', 'agent.compactMaxRetries', 'agent.compactTimeoutS', 'agent.manualCompactMinPercent', 'agent.compactPrompt'],
+        ['contextManagement.defaultStrategy', 'agent.compactRatio', 'contextManagement.retainTokens', 'contextManagement.dialogueTokens', 'contextManagement.toolResultArtifactTokens', 'models.compressionModels', 'agent.keepRecentMessages', 'agent.compactMaxTokens', 'agent.compactMaxRetries', 'agent.compactTimeoutS', 'agent.manualCompactMinPercent', 'agent.compactPrompt'],
     ),
     "rath": (
         "子 Agent",
         [
         "rath.enabled",
         "rath.maxConcurrentTasks",
+        "rath.contextTriggerTokens",
         "rath.agentModelCallLimit",
         "rath.agentToolCallLimit",
         "rath.planControlCallLimit",
@@ -926,6 +966,8 @@ GROUPS: dict[str, tuple[str, list[str]]] = {
         "MCP",
         [
         "mcp.installDir",
+        "mcp.toolCountThreshold",
+        "mcp.definitionSizeThresholdKB",
         ],
     ),
     "memory": (
@@ -983,7 +1025,7 @@ WEB_DOMAINS: dict[str, tuple[str, str, list[str]]] = {
         "运行、恢复、上下文与子任务协作",
         [
             "agent",
-            "progress_reminder",
+            "prompt_suggestions",
             "user_message_template",
             "retry",
             "timeouts",

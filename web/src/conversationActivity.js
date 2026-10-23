@@ -10,7 +10,7 @@ export function applyActivityReadVersions(status = {}, versions = new Map()) {
   return {...status,
     items: (status.items || []).map(adjust),
     ...(Array.isArray(status.activityItems) ? {
-      activityItems: status.activityItems.map(adjust).filter(item => item.running || item.activityUnread),
+      activityItems: status.activityItems.map(adjust).filter(item => item.running || item.activityUnread || isActivityWaiting(item)),
     } : {}),
     ...(Array.isArray(status.recentItems) ? {
       recentItems: status.recentItems.map(adjust),
@@ -18,8 +18,49 @@ export function applyActivityReadVersions(status = {}, versions = new Map()) {
   };
 }
 
+export function isActivityWaiting(item = {}) {
+  return Boolean(item.activityPending?.length || item.activityState === "waiting");
+}
+export function pendingConversationRows(status = {}) {
+  const unique = new Map();
+  for (const item of [...(status.recentItems || []), ...(status.activityItems || []), ...(status.items || [])]) {
+    if (item?.conversationUuid) unique.set(item.conversationUuid, item);
+  }
+  return [...unique.values()].filter(item => !item.archived && !item.local && isActivityWaiting(item))
+    .sort((a, b) => Number(a.activityAtMs || 0) - Number(b.activityAtMs || 0) || a.conversationUuid.localeCompare(b.conversationUuid));
+}
+export function pendingFolderCounts(items = [], folders = []) {
+  const parents = new Map(folders.map(folder => [folder.folderId, folder.parentId]));
+  const counts = new Map();
+  for (const item of new Map(items.map(row => [row.conversationUuid, row])).values()) {
+    if (!isActivityWaiting(item) || item.archived || item.local) continue;
+    let id = item.folderId || '__temporary';
+    const seen = new Set();
+    while (id && !seen.has(id)) {
+      seen.add(id);
+      counts.set(id, (counts.get(id) || 0) + 1);
+      id = parents.get(id);
+    }
+  }
+  return counts;
+}
+// Collapsed directories summarize descendants by the server's folder-ID path.
+// A waiting conversation counts only as waiting; running wins over unread.
+export function folderActivityCounts(items = []) {
+  const counts = {};
+  for (const item of new Map(items.map(row => [row.conversationUuid, row])).values()) {
+    if (item.archived || item.local || isActivityWaiting(item)) continue;
+    const key = item.running ? "running" : item.activityUnread ? "unread" : "";
+    if (!key) continue;
+    for (const id of item.folderId ? (item.folderPath || []) : ["__temporary"]) {
+      (counts[id] ||= {running: 0, unread: 0})[key] += 1;
+    }
+  }
+  return counts;
+}
 export function activityState(item = {}) {
-  if (item.running) return item.activityState === "waiting" ? "waiting" : "running";
+  if (isActivityWaiting(item)) return "waiting";
+  if (item.running) return "running";
   if (item.readWhileSelected) return "read";
   return item.activityState || item.activityResult?.status || "completed";
 }

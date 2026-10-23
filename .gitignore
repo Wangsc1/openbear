@@ -9,6 +9,8 @@ openbear.json.tmp
 
 # ─── 运行时数据 ──────────────────────────────────────────────
 data/
+!/mobile/src/data/
+!/mobile/src/data/**
 logs/
 *.log
 *.db
@@ -31,12 +33,16 @@ htmlcov/
 workspace/
 .release-runs/
 .release-environment.json
+/gateway/bin/
+/gateway/gateway.json
+/gateway/state/
 /evals/
 .serena/
 .cloakbrowser/
 .DS_Store
 
 # ─── Web 前端构建产物 ────────────────────────────────────────
+/build/
 web/node_modules/
 web/dist/
 /web/.dist-before-*/

@@ -318,7 +318,8 @@ def _rewrite_model_prefix(value: str, old_prefix: str, new_prefix: str) -> str:
 
 def _rewrite_compression_references(models_root: dict[str, Any], old: str, new: str, *, prefix: bool = False) -> None:
     """Keep ordered summary and naming candidates in the same rename transaction."""
-    for key in ("compressionModels", "compression_models", "namingModels", "naming_models"):
+    for key in ("compressionModels", "compression_models", "namingModels", "naming_models",
+                "suggestionModels", "suggestion_models"):
         if key not in models_root:
             continue
         candidates = ModelsConfig._normalize_compression_models(models_root[key])

@@ -1,0 +1,58 @@
+# iOS 流式回放 + 输入发送 + 键盘交互式收起
+appId: dev.openbear.app
+---
+- launchApp:
+    stopApp: false
+- tapOn:
+    id: "back"
+    optional: true
+- extendedWaitUntil:
+    visible:
+      id: "conv-d8e18cc9"
+    timeout: 60000
+- tapOn:
+    id: "conv-d8e18cc9"
+- extendedWaitUntil:
+    visible:
+      id: "row-answer"
+    timeout: 30000
+- tapOn:
+    id: "composer-input"
+- inputText: "line one"
+- pressKey: Enter
+- inputText: "line two"
+- takeScreenshot: ios-stream-01-composer-keyboard
+# 列表上的下拉手势收起键盘（keyboardDismissMode=interactive）
+- swipe:
+    start: 50%, 40%
+    end: 50%, 75%
+    duration: 500
+- waitForAnimationToEnd
+- takeScreenshot: ios-stream-02-keyboard-dismissed-by-drag
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      text: "line one.*"
+    timeout: 15000
+- waitForAnimationToEnd:
+    timeout: 8000
+- takeScreenshot: ios-stream-03-streaming
+- swipe:
+    start: 50%, 30%
+    end: 50%, 75%
+    duration: 300
+- swipe:
+    start: 50%, 30%
+    end: 50%, 75%
+    duration: 300
+- takeScreenshot: ios-stream-04-scrolled-up
+- extendedWaitUntil:
+    visible:
+      id: "new-content"
+    timeout: 60000
+- takeScreenshot: ios-stream-05-new-content-pill
+- tapOn:
+    id: "new-content"
+- waitForAnimationToEnd
+- takeScreenshot: ios-stream-06-follow-bottom

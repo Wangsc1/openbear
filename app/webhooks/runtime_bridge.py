@@ -144,13 +144,14 @@ class RuntimeBridge:
                 if not valid:
                     await conn.execute("UPDATE webhook_batches SET state='empty' WHERE batch_id=?",(b['batch_id'],)); return
                 if row and await one(conn,"SELECT assignment_id FROM webhook_assignments WHERE conversation_uuid=? AND state!='finalized'",(row['conversation_uuid'],)): return
+                aid=uid()
                 if row is None:
                     folder=await one(conn,'SELECT * FROM web_conversation_folders WHERE folder_uuid=? AND owner_chat_id=?',(e['binding_uuid'],e['owner_chat_id']))
                     if not folder: return
                     effective=await s.target_run_defaults(e['owner_chat_id'],e['binding_uuid'],c)
                     conv_id=str(uuid.uuid5(uuid.NAMESPACE_URL,'openbear:webhook:batch:'+b['batch_id']))
-                    row=await h._create_web_conversation(e['owner_chat_id'],conversation_uuid=conv_id,title=conversation_title(json.loads(revision_row['config_json']).get('name'),valid[0]['received_at_ms'],b['batch_id']),folder_uuid=e['binding_uuid'],run_config=h._web_defaults_storage(effective),create_lock_held=True)
-                aid=uid(); root=uid(); cursor=(await one(conn,'SELECT COALESCE(MAX(receive_seq),0) n FROM webhook_events'))['n']
+                    row=await h._create_web_conversation(e['owner_chat_id'],conversation_uuid=conv_id,title=conversation_title(json.loads(revision_row['config_json']).get('name'),valid[0]['received_at_ms'],b['batch_id']),folder_uuid=e['binding_uuid'],run_config=h._web_defaults_storage(effective),create_lock_held=True,origin_kind='webhook',origin_ref=aid)
+                root=uid(); cursor=(await one(conn,'SELECT COALESCE(MAX(receive_seq),0) n FROM webhook_events'))['n']
                 await insert(conn,'webhook_assignments',assignment_id=aid,origin_kind='webhook',conversation_uuid=row['conversation_uuid'],internal_chat_id=row['internal_chat_id'],root_turn_uuid=root,
                              initial_batch_id=b['batch_id'],origin_endpoint_id=b['endpoint_id'],origin_revision=b['revision'],task_start_cursor=cursor,authorization_snapshot_json=dumps({'instructions':c.processing.instructions,'owner':e['owner_chat_id'],'endpointId':b['endpoint_id']}),created_at_ms=s.clock())
                 await span(s,conn,'model_queue',aid+':queue',start=b['sealed_at_ms'],end=s.clock(),endpoint=b['endpoint_id'],assignment=aid,batch=b['batch_id'],level='batch')

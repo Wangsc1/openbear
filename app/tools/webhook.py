@@ -6,7 +6,7 @@ from pathlib import Path
 
 from app.tools.base import current_tool_context
 from app.runtime.tool_result import ToolOutcome
-from app.webhooks.contracts import WebhookError, dumps
+from app.webhooks.contracts import EndpointConfig, Scope, WebhookError, dumps
 from app.webhooks.repository import many, one
 from app.webhooks import queries, receipts, waits
 
@@ -14,6 +14,65 @@ ACTIONS=('describe','list','get','create','update','delete','set_enabled','pause
 READONLY={'describe','events','get','report'}
 AUTOMATIC={'describe','get','events','wait','report','telemetry'}
 GUIDANCE=(Path(__file__).resolve().parents[2]/'prompts'/'guides'/'webhook.md').read_text(encoding='utf-8')
+CREATE_REQUIRED=('scope','requestId')
+UPDATE_REQUIRED=('endpointId','requestId','expectedRevision')
+MANAGEMENT_FIELDS={'scope','requestId','endpointId','name','description','enabled','expectedRevision','expectedControlRevision','reason','operation','graceSeconds'}
+
+
+def management_contracts(action):
+    common={
+        'requestId':'Required stable operation ID, string length 1..128. Reuse only for an identical retry.',
+        'name':'Optional endpoint name; omitted means an empty name, including on update.',
+        'description':'Optional endpoint description; omitted means an empty description, including on update.',
+        'config':'EndpointConfig object described by configSchema. Full replacement, not a patch; omitted fields use defaults.',
+        'reason':'Optional operation reason.'}
+    contracts={
+        'create':{'required':list(CREATE_REQUIRED),'fields':{**common,
+            'scope':'Required scopeSchema object. Use list with params.targets=true to find an owned folder/conversation ID.',
+            'enabled':'Optional boolean, default false. Enabling requires nonempty config.processing.instructions.'},
+            'example':{'action':'create','params':{
+                'requestId':'create-example-1','scope':{'type':'folder','id':'<folder ID from list>'},
+                'name':'Example trigger','description':'Process authorized external events','enabled':True,
+                'config':{'target':{'mode':'newConversation'},'processing':{'instructions':'Process only the authorized event and report its outcome.'}}}}},
+        'update':{'required':list(UPDATE_REQUIRED),'fields':{**common,
+            'endpointId':'Required endpoint.id from get.',
+            'expectedRevision':'Required endpoint.revision from get.',
+            'expectedControlRevision':'Required endpoint.controlRevision from get whenever enabled is supplied, even if unchanged.',
+            'enabled':'Optional boolean; omission preserves the current enabled state. Enabling requires config.processing.instructions.'},
+            'rules':['Get the endpoint first. Copy its complete config, name and description, then change only the requested fields.',
+                     'The binding scope is immutable; do not send scope on update.',
+                     'Omitting config resets it to defaults; omitting name or description clears them. This is not a partial update.'],
+            'example':{'action':'update','params':{
+                'endpointId':'<endpoint.id from get>','requestId':'update-example-1','expectedRevision':1,
+                'name':'Example trigger','description':'Process authorized external events',
+                'config':{'target':{'mode':'newConversation'},'processing':{'instructions':'Process only the authorized event and report its outcome.'}}}},
+            'rotation':{'operation':'rotate_key','required':['endpointId','requestId','operation'],
+                'expectedControlRevision':'Use endpoint.controlRevision from get; omission binds the current version at confirmation.',
+                'graceSeconds':'Optional integer 0..3600, default 0. Invokes the real user confirmation gate; no config or expectedRevision required.'}}}
+    return {'contracts':{k:v for k,v in contracts.items() if not action or k==action},
+        'scopeSchema':Scope.model_json_schema(by_alias=True),
+        'configSchema':EndpointConfig.model_json_schema(by_alias=True),
+        'parameterLayout':'Only action and params belong at the tool root. Put requestId, scope, name, enabled and config beside each other inside params, never inside config.',
+        'targetRules':['A folder scope defaults to target.mode=newConversation. fixedConversation must select a conversation in that folder or its descendants.',
+                       'A conversation scope must target that same conversation. Omit config.target for automatic fixedConversation selection, or set mode=fixedConversation and conversationId=scope.id.']}
+
+
+def validate_management_params(action,params):
+    if action not in ('create','update'): return
+    config=params.get('config')
+    if isinstance(config,dict):
+        misplaced=sorted(MANAGEMENT_FIELDS & config.keys())
+        if misplaced:
+            key=misplaced[0]
+            raise WebhookError('invalid_parameter_location',f'params.config.{key} belongs at params.{key}, beside config; fields are not moved automatically.',
+                details={'field':f'params.config.{key}','expectedPath':f'params.{key}'})
+    required=CREATE_REQUIRED if action=='create' else UPDATE_REQUIRED
+    if action=='update' and params.get('operation')=='rotate_key': required=('endpointId','requestId')
+    elif action=='update' and 'enabled' in params: required=(*required,'expectedControlRevision')
+    for key in required:
+        if params.get(key) is None:
+            raise WebhookError('missing_parameter',f'params.{key} is required for {action}. Call describe with params.action={action} for the contract and example.',
+                details={'field':f'params.{key}'})
 
 
 async def dispatch(service,action,params,ctx):
@@ -28,7 +87,8 @@ async def dispatch(service,action,params,ctx):
     a=await one(service.db.conn,'SELECT * FROM webhook_assignments WHERE conversation_uuid=? AND root_turn_uuid=?',(ctx.conversation_uuid,ctx.run_root_turn_uuid))
     if a: ctx.webhook_assignment_id=a['assignment_id']
     if action=='describe':
-        return {'actions':list(ACTIONS),'requested':params.get('action'),'guidance':GUIDANCE,'protocol':{
+        contract=management_contracts(params.get('action')) if params.get('action') in (None,'create','update') else {}
+        return {'actions':list(ACTIONS),'requested':params.get('action'),'guidance':GUIDANCE,**contract,'protocol':{
             'wait':{'op':'register | await | cancel','register':{'requestId':'stable ID','endpointId':'owned endpoint','match':{'all':[{'path':'body.orderId','op':'eq','value':'123'}]},'afterSeq':'optional task-start cursor override','timeoutSeconds':'positive seconds or null','collection':'optional batching settings'},'await':{'waitId':'registered ID'}},
             'report':{'receiptId':'stable ID','results':[{'eventId':'owned and delivered event','outcome':'completed | skipped | failed | unknown','summary':'supported claim','evidenceRefs':['tool-action:existing-action-id'],'result':'optional structured result'}]},
             'management':'get before update; expectedRevision/expectedControlRevision + stable requestId; sensitive operations invoke the real user confirmation gate; keys never returned to model',
@@ -69,6 +129,7 @@ async def dispatch(service,action,params,ctx):
             eid=m['endpoint_id']
         else: eid=a['origin_endpoint_id']
         return await observe(service,eid,params,source='model',event_id=event_id,assignment_id=a['assignment_id'],action_id=ctx.execution_id)
+    validate_management_params(action,params)
     eid=params.get('endpointId'); body={k:v for k,v in params.items() if k!='endpointId'}
     if action=='delete' or action=='update' and params.get('operation')=='rotate_key':
         sensitive='rotate_key' if action=='update' else action
@@ -99,7 +160,14 @@ async def dispatch(service,action,params,ctx):
 
 def register_webhook_tool(registry,service):
     async def handler(args):
-        try: return dumps(await dispatch(service,args.get('action'),args.get('params',{}),current_tool_context()))
+        try:
+            if args.get('action') in ('create','update'):
+                misplaced=sorted(set(args)-{'action','params'})
+                if misplaced:
+                    key=misplaced[0]
+                    raise WebhookError('invalid_parameter_location',f'{key} belongs inside params, not at the tool root.',
+                        details={'field':key,'expectedPath':f'params.{key}'})
+            return dumps(await dispatch(service,args.get('action'),args.get('params',{}),current_tool_context()))
         except WebhookError as exc: return ToolOutcome(dumps(exc.payload),'failed','not_started')
     registry.add('Webhook','Manage authorized external triggers; register/await external events, report owned outcomes, query observations. Call describe before create/update; it returns the action contracts and design guidance. Identity is supplied by runtime; keys never enter model context. Amended receipts keep endpoint/config/control versions fixed; deletion may reduce stopRunning or stop scope and affected resources may finish, never expand. Rotation parameters stay exact.',
-                      {'type':'object','properties':{'action':{'type':'string','enum':list(ACTIONS)},'params':{'type':'object'}},'required':['action'],'additionalProperties':False},handler,visibility={'main','agent'},effect_scope='external_event')
+                      {'type':'object','properties':{'action':{'type':'string','enum':list(ACTIONS)},'params':{'type':'object','description':'Action-specific parameters; call describe with params.action=create or update for contracts and examples. For create, scope and requestId go directly inside params, beside config, not inside config.'}},'required':['action'],'additionalProperties':False},handler,visibility={'main','agent'},effect_scope='external_event')

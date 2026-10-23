@@ -33,7 +33,7 @@ HEALTH_WAIT_S = 90
 HEALTH_INTERVAL_S = 1.0
 USER_AGENT = "OpenBear-Updater/1.0"
 
-REPLACE_DIRS = ("app", "web/dist", "prompts", "scripts")
+REPLACE_DIRS = ("app", "web/dist", "prompts", "scripts", "gateway/bin")
 REPLACE_FILES = (
     "pyproject.toml",
     "uv.lock",
@@ -42,6 +42,10 @@ REPLACE_FILES = (
     "README.md",
     "README",
     "release-meta.json",
+    "gateway/README.md",
+    "Dockerfile",
+    ".dockerignore",
+    "docs/instances.md",
 )
 PROTECTED_PREFIXES = (
     "data/",
@@ -196,7 +200,7 @@ def classify_path(rel: str) -> str:
         return "restart"
     if parts[0] == "web":
         return "refresh"
-    if parts[0] in {"prompts", "tests", "scripts"} or rel.startswith(".github/"):
+    if parts[0] in {"prompts", "tests", "scripts", "gateway"} or rel.startswith(".github/"):
         return "noop"
     if rel in {
         "README.md",
@@ -206,6 +210,8 @@ def classify_path(rel: str) -> str:
         "release-meta.json",
         ".gitignore",
         ".gitattributes",
+        "Dockerfile",
+        ".dockerignore",
     }:
         return "noop"
     if name.endswith((".md", ".example", ".txt")):

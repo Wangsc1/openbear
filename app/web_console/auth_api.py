@@ -26,7 +26,7 @@ def _notification_return_target(value: str) -> str:
     if "\\" in value or any(ord(char) <= 32 or ord(char) == 127 for char in value):
         return ""
     parts = urlsplit(value)
-    if parts.scheme or parts.netloc or parts.path not in {"/chat", "/settings", "/recommendations"}:
+    if parts.scheme or parts.netloc or parts.path not in {"/chat", "/settings"}:
         return ""
     return parts.path + (f"?{parts.query}" if parts.query else "")
 
@@ -40,11 +40,64 @@ class WebAdminAuthMixin:
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler):
         path = request.path
+        ready = getattr(self, "startup_ready", None)
+        if ready is not None and not ready.is_set():
+            return web.json_response({"ok": False, "error": "service_not_ready"}, status=503,
+                                     headers={"Cache-Control": "no-store", "Retry-After": "1"})
+        managed = bool(getattr(getattr(self.config, "managed", None), "enabled", False))
         from app.webhooks.http import PUBLIC_ROUTES
         if request.match_info.route.name in PUBLIC_ROUTES:
-            # Only these exact registered handlers perform scoped endpoint/capability auth.
             return await handler(request)
-        if path == "/login" or path.startswith("/api/auth/login/"):
+        if path == "/api/auth/mode" and request.method in {"GET", "HEAD"}:
+            return await handler(request)
+        if managed:
+            from app.managed.http import (
+                business_route_allowed,
+                error,
+                gateway_frontend_route_allowed,
+                has_gateway_credentials,
+                valid_gateway_key,
+                valid_management_key,
+            )
+            from app.managed.settings import LOCAL_OWNER_ID
+            runtime = getattr(self, "managed_runtime", None)
+            if (path == "/instances" or path.startswith("/api/instances")
+                    or path.startswith("/api/instance-events") or path.startswith("/api/auth/login/")
+                    or path.startswith("/api/system/update") or path == "/api/system/restart"
+                    or path == "/api/settings/web-task-notifications/test"):
+                return error("forbidden_in_managed_mode", 403)
+            if has_gateway_credentials(request) or path.startswith("/api/gateway/"):
+                probe = path == "/api/gateway/v1/probe" and request.method == "GET"
+                if not runtime or not valid_gateway_key(request, runtime, require_session=not probe):
+                    return error("gateway_unauthorized", 401)
+                if not (probe or business_route_allowed(request.method, path)
+                        or gateway_frontend_route_allowed(request, self)):
+                    return error("gateway_route_forbidden", 403)
+                request[_WEB_SESSION_KEY] = WebSession(chat_id=LOCAL_OWNER_ID, expires_at=now_ts() + 60)
+                return await handler(request)
+            if path.startswith("/api/managed/") or request.headers.get("Authorization"):
+                if not runtime or not valid_management_key(request, runtime):
+                    return error("unauthorized", 401)
+                if not (path.startswith("/api/managed/v1/") or business_route_allowed(request.method, path)):
+                    return error("management_route_forbidden", 403)
+                # Existing business ownership uses this local principal; no cookie is minted.
+                request[_WEB_SESSION_KEY] = WebSession(chat_id=LOCAL_OWNER_ID, expires_at=now_ts() + 60)
+                return await handler(request)
+            if runtime and runtime.settings.auth_mode == "gateway":
+                if path.startswith("/api/auth/") or path == "/login":
+                    return error("local_auth_disabled", 403)
+                # In gateway mode documents and compiled resources come from
+                # this node too, but only after the gateway credentials above.
+                # Controller/local public login assets keep their old behavior.
+                if path != "/health":
+                    return error("gateway_unauthorized", 401)
+            if path == "/api/auth/password/login":
+                if not self._origin_allowed(request):
+                    return error("csrf_origin_rejected", 403)
+                return await handler(request)
+        elif path.startswith("/api/managed/") or path.startswith("/api/auth/password/"):
+            return web.json_response({"ok": False, "error": "not_found"}, status=404)
+        if not managed and (path == "/login" or path.startswith("/api/auth/login/")):
             login_url = self._https_login_url(request)
             if login_url:
                 if path == "/login" and request.method in {"GET", "HEAD"}:
@@ -79,6 +132,81 @@ class WebAdminAuthMixin:
             raise web.HTTPForbidden(text="csrf origin rejected")
         return await handler(request)
 
+    async def handle_api_auth_mode(self, request: web.Request) -> web.Response:
+        managed = bool(getattr(getattr(self.config, "managed", None), "enabled", False))
+        headers = {"Cache-Control": "no-store"}
+        if managed:
+            headers["X-OpenBear-Instance"] = self.config.managed.instance_id
+        return web.json_response({"ok": True, "mode": "managed" if managed else "controller"},
+                                 headers=headers)
+
+    async def handle_api_password_login(self, request: web.Request) -> web.Response:
+        from app.managed.http import error
+        from app.managed.settings import LOCAL_OWNER_ID
+        runtime = getattr(self, "managed_runtime", None)
+        if not runtime or not self.config.managed.enabled:
+            return error("not_found", 404)
+        if runtime.settings.auth_mode != "local":
+            return error("local_auth_disabled", 403)
+        body = await self._json_body(request)
+        username, password = body.get("username"), body.get("password")
+        if not isinstance(username, str) or not isinstance(password, str):
+            await runtime.emit("login_failure", {"reason": "invalid_request"})
+            return error("invalid_credentials", 400)
+        # Single-owner rate limit cannot be bypassed with forwarded-IP spoofing or
+        # distributed guesses; serialize verification to also bound scrypt memory.
+        async with runtime.login_lock:
+            limited = await self._login_rate_limit_status("managed-owner")
+            if limited["blocked"]:
+                await runtime.emit("login_failure", {"reason": "rate_limited"})
+                response = error("rate_limited", 429)
+                response.headers["Retry-After"] = str(limited["retryAfter"])
+                return response
+            verified = await asyncio.to_thread(runtime.account.verify, username, password)
+            if not verified:
+                await self._record_login_failure("managed-owner")
+                await runtime.emit("login_failure", {"reason": "invalid_credentials"})
+                return error("invalid_credentials", 403)
+            await self._clear_login_failures("managed-owner")
+            token = secrets.token_urlsafe(32)
+            ts = now_ts()
+            async with self.db.write_transaction(label="managed-password-login") as conn:
+                await conn.execute("INSERT INTO web_sessions(session_token_hash,chat_id,created_at,expires_at,last_seen_at,ip,user_agent) VALUES(?,?,?,?,?,?,?)",
+                                   (_sha256(token), LOCAL_OWNER_ID, ts, ts + self.config.web.session_days * 86400,
+                                    ts, request.remote or "", request.headers.get("User-Agent", "")[:500]))
+        await runtime.emit("login_success", {})
+        response = web.json_response({"ok": True}, headers={"Cache-Control": "no-store"})
+        response.set_cookie(_COOKIE, token, httponly=True, samesite="Lax", secure=self._cookie_secure(request),
+                            max_age=self.config.web.session_days * 86400, path="/")
+        return response
+
+    async def handle_api_password_change(self, request: web.Request) -> web.Response:
+        from app.managed.http import error
+        from app.managed.settings import LOCAL_OWNER_ID
+        runtime = getattr(self, "managed_runtime", None)
+        if not runtime or runtime.settings.auth_mode != "local" or request[_WEB_SESSION_KEY].chat_id != LOCAL_OWNER_ID:
+            return error("forbidden", 403)
+        body = await self._json_body(request)
+        current, password = body.get("currentPassword"), body.get("password")
+        username = body.get("username", runtime.account.value["username"])
+        if not all(isinstance(v, str) for v in (current, password, username)):
+            return error("invalid_credentials")
+        async with runtime.login_lock:
+            limited = await self._login_rate_limit_status("managed-owner")
+            if limited["blocked"]:
+                return error("rate_limited", 429)
+            if not await asyncio.to_thread(runtime.account.verify, runtime.account.value["username"], current):
+                await self._record_login_failure("managed-owner")
+                return error("invalid_credentials", 403)
+            try:
+                await asyncio.to_thread(runtime.account.change, username, password)
+            except ValueError:
+                return error("invalid_account")
+            await self.revoke_all_sessions(chat_id=LOCAL_OWNER_ID)
+        response = web.json_response({"ok": True})
+        response.del_cookie(_COOKIE)
+        return response
+
     async def handle_health(self, request: web.Request) -> web.Response:
         from app import installed_version
 
@@ -90,11 +218,19 @@ class WebAdminAuthMixin:
     def _web_index_path(self) -> Path:
         return self._web_dist_dir() / "index.html"
 
+    def _auth_mode(self) -> str:
+        if not getattr(getattr(self.config, "managed", None), "enabled", False):
+            return "controller"
+        runtime = getattr(self, "managed_runtime", None)
+        return "gateway" if runtime and runtime.settings.auth_mode == "gateway" else "managed"
+
     async def handle_index(self, request: web.Request) -> web.Response:
         index = self._web_index_path()
         if not index.is_file():
             raise web.HTTPInternalServerError(text="web/dist/index.html not found; run web build first")
-        return web.FileResponse(index, headers={"Cache-Control": "no-store"})
+        # The page carries its login mode, so loading it needs no extra request.
+        text = index.read_text(encoding="utf-8").replace('"[[controller]]"', json.dumps(self._auth_mode()), 1)
+        return web.Response(text=text, content_type="text/html", headers={"Cache-Control": "no-store"})
 
     async def handle_asset(self, request: web.Request) -> web.Response:
         assets = (self._web_dist_dir() / "assets").resolve()
@@ -295,7 +431,8 @@ class WebAdminAuthMixin:
     async def handle_api_auth_session(self, request: web.Request) -> web.Response:
         session: WebSession = request[_WEB_SESSION_KEY]
         return web.json_response(
-            {"ok": True, "chatId": session.chat_id, "expiresAt": session.expires_at},
+            {"ok": True, "chatId": session.chat_id, "expiresAt": session.expires_at,
+             "mode": "managed" if getattr(getattr(self.config, "managed", None), "enabled", False) else "controller"},
             headers={"Cache-Control": "no-store"},
         )
 
@@ -500,6 +637,8 @@ class WebAdminAuthMixin:
         await self.db.conn.commit()
 
     async def create_login_request(self, *, ip: str, user_agent: str, nonce_hash: str = "") -> str:
+        if getattr(getattr(self.config, "managed", None), "enabled", False):
+            raise web.HTTPForbidden(text="Telegram login unavailable in managed mode")
         chat_id = int(self.config.telegram.whitelist_ids[0]) if self.config.telegram.whitelist_ids else 0
         req_uuid = secrets.token_urlsafe(18)
         ts = now_ts()
@@ -579,6 +718,8 @@ class WebAdminAuthMixin:
         return new_status
 
     async def create_session_from_request(self, req_uuid: str, request: web.Request) -> str:
+        if getattr(getattr(self.config, "managed", None), "enabled", False):
+            raise web.HTTPForbidden(text="Telegram login unavailable in managed mode")
         cur = await self.db.conn.execute(
             "SELECT chat_id, status, nonce_hash, expires_at FROM web_login_requests WHERE request_uuid=?", (req_uuid,)
         )
@@ -627,6 +768,29 @@ class WebAdminAuthMixin:
         return token
 
     async def session_from_request(self, request: web.Request) -> WebSession | None:
+        # WebSocket handlers revalidate the original request between frames and
+        # while streaming; management clients have no browser cookie to refresh.
+        # Legacy standalone mixin hosts provide only a DB and use cookie auth.
+        managed = bool(getattr(getattr(getattr(self, "config", None), "managed", None), "enabled", False))
+        if managed:
+            from app.managed.http import (
+                business_route_allowed,
+                has_gateway_credentials,
+                valid_gateway_key,
+                valid_management_key,
+            )
+            from app.managed.settings import LOCAL_OWNER_ID
+            runtime = getattr(self, "managed_runtime", None)
+            if has_gateway_credentials(request):
+                if runtime and valid_gateway_key(request, runtime) and business_route_allowed(request.method, request.path):
+                    return WebSession(chat_id=LOCAL_OWNER_ID, expires_at=now_ts() + 60)
+                return None
+            if request.headers.get("Authorization"):
+                if runtime and valid_management_key(request, runtime) and business_route_allowed(request.method, request.path):
+                    return WebSession(chat_id=LOCAL_OWNER_ID, expires_at=now_ts() + 60)
+                return None
+            if not runtime or runtime.settings.auth_mode == "gateway":
+                return None
         token = request.cookies.get(_COOKIE, "")
         if not token:
             return None
@@ -647,6 +811,10 @@ class WebAdminAuthMixin:
         row = await read_session()
         if not row or int(row["revoked_at"] or 0) > 0 or int(row["expires_at"] or 0) <= now_ts():
             return None
+        if managed:
+            from app.managed.settings import LOCAL_OWNER_ID
+            if int(row["chat_id"]) != LOCAL_OWNER_ID:
+                return None
         last_seen = int(row["last_seen_at"] or 0)
         if now_ts() - last_seen >= 300:
             try:

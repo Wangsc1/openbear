@@ -21,11 +21,22 @@ from tests.test_webhooks_backend import env as env
 from tests.test_web_admin import _login_cookie
 
 
+# Production keeps the five-second version-probe deadline (asserted below);
+# timeout scenarios shrink only that deadline, never the cleanup budget. It is
+# still long enough for the wrapper to spawn and record its child first.
+_TEST_VERSION_PROBE_TIMEOUT_S = 1.0
+
+
+def _short_version_probe(monkeypatch):
+    assert scripts._VERSION_PROBE_TIMEOUT_S == 5
+    monkeypatch.setattr(scripts, '_VERSION_PROBE_TIMEOUT_S', _TEST_VERSION_PROBE_TIMEOUT_S)
+
+
 def _alive(pid):
     try:
         # Orphaned children may briefly remain as zombies until PID 1 reaps them.
         return Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1][0] != "Z"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):  # ESRCH: reaped between open and read
         return False
 
 
@@ -65,7 +76,9 @@ Path({str(pidfile)!r}).write_text(str(child.pid))
 print('{{"decision":"continue"}}', flush=True)
 '''
     task = asyncio.create_task(scripts.execute(
-        Script(enabled=True, code=code, timeout_seconds=.3 if mode == "timeout" else 60),
+        # The leader must spawn its child, write the pidfile and exit before the
+        # timeout; 0.3s was too short for interpreter start under parallel load.
+        Script(enabled=True, code=code, timeout_seconds=1.0 if mode == "timeout" else 60),
         Environments(default_cwd=str(tmp_path)), {"phase": "pre"},
     ))
     close_task = None
@@ -361,6 +374,8 @@ Path({str(pidfile)!r}).write_text(str(child.pid))
     monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
     monkeypatch.setattr(os, 'killpg', killpg)
     monkeypatch.setattr(scripts, '_cleanup_process', cleanup)
+    if mode.startswith('timeout'):
+        _short_version_probe(monkeypatch)
     system = Environments(python_path=str(wrapper), node_path=str(tmp_path / 'missing-node'))
     task = asyncio.create_task(scripts.environment(system))
     child_pid = None
@@ -376,7 +391,8 @@ Path({str(pidfile)!r}).write_text(str(child.pid))
                 await asyncio.sleep(0)
                 assert not task.done()
                 release_cleanup.set()
-        # Production budgets: five-second version deadline + two-second cleanup.
+        # Bound: version deadline (production 5s, shortened above for the
+        # timeout modes) + the real two-second cleanup budget.
         done, _ = await asyncio.wait({task}, timeout=8)
         assert task in done, 'environment probe waited for descendant EOF beyond cleanup budget'
         if mode.startswith('timeout'):
@@ -425,6 +441,7 @@ time.sleep(60)
         return proc
 
     monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
+    _short_version_probe(monkeypatch)
     task = asyncio.create_task(env.client.get('/api/webhooks/environment', cookies={'openbear_web_session': cookie}))
     try:
         done, _ = await asyncio.wait({task}, timeout=8)

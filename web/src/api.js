@@ -1,12 +1,26 @@
 import axios from "axios";
+import { isGateway, pageSession, requestBinding, checkSessionResponse, assertSession } from './sessionBoundary.js';
 import {uploadFilesViaHttp} from "./uploads.js";
 import {loginUrlForLocation} from "./loginRedirect.js";
 
 const api = axios.create({ baseURL: "/api", timeout: 30000 });
 
+api.interceptors.request.use(config => {
+  if (!isGateway()) return config;
+  if (['/auth/mode', '/auth/password/login'].includes(config.url)) return config;
+  const binding = requestBinding(config.signal);
+  config.signal = binding.signal; config.__sessionRelease = binding.release;
+  config.headers.set('X-OpenBear-Context', pageSession.contextToken);
+  return config;
+});
 api.interceptors.response.use(
-  (response) => response,
+  (response) => { response.config?.__sessionRelease?.(); if (isGateway() && !['/auth/mode', '/auth/password/login'].includes(response.config?.url)) assertSession(); return response; },
   (error) => {
+    error.config?.__sessionRelease?.();
+    if (isGateway()) {
+      if (!['/auth/mode', '/auth/password/login'].includes(error.config?.url)) checkSessionResponse(error?.response?.status, error?.response?.data);
+      return Promise.reject(error);
+    }
     if (error?.response?.status === 401 && window.location.pathname !== "/login") {
       window.location.replace(loginUrlForLocation(window.location));
       return Promise.reject(error);
@@ -20,13 +34,46 @@ function unwrap(response) {
 }
 
 export const Api = {
+  authMode: () => api.get('/auth/mode').then(unwrap),
+  passwordLogin: (username, password) => api.post('/auth/password/login', {username, password}).then(unwrap),
+  changePassword: (data) => api.post('/auth/password/change', data).then(unwrap),
   authSession: () => api.get("/auth/session").then(unwrap),
+  logout: () => api.post('/auth/logout', {}).then(unwrap),
   authSessions: () => api.get("/auth/sessions").then(unwrap),
   revokeAuthSession: (sessionId) => api.delete(`/auth/sessions/${encodeURIComponent(sessionId)}`).then(unwrap),
   loginStart: (secret) => api.post("/auth/login/start", { secret }).then(unwrap),
   loginStatus: (requestUuid) => api.get(`/auth/login/status/${requestUuid}`).then(unwrap),
   consumeLogin: (requestUuid) => api.post(`/auth/login/consume/${requestUuid}`).then(unwrap),
 
+
+  instanceGateway: () => api.get('/instance-gateway', {timeout: 20000}).then(unwrap),
+  enableInstanceGateway: (data) => api.post('/instance-gateway/enable', data, {timeout: 240000}).then(unwrap),
+  disableInstanceGateway: () => api.post('/instance-gateway/disable', {}, {timeout: 120000}).then(unwrap),
+  setInstanceGatewayUrl: (publicUrl) => api.put('/instance-gateway/public-url', {publicUrl}, {timeout: 240000}).then(unwrap),
+  setInstanceGatewayProxies: (trustedProxies) => api.put('/instance-gateway/client-ip', {trustedProxies}, {timeout: 30000}).then(unwrap),
+  checkInstanceGatewayPort: (serverId, port) => api.get('/instance-gateway/port', {params: {serverId, port}, timeout: 60000}).then(unwrap),
+  suggestInstanceGateway: (serverId, port) => api.get('/instance-gateway/suggest', {params: {serverId, port}, timeout: 30000}).then(unwrap),
+  instanceServers: () => api.get('/instance-servers', {timeout: 30000}).then(unwrap),
+  createInstanceServer: (data) => api.post('/instance-servers', data, {timeout: 90000}).then(unwrap),
+  updateInstanceServer: (id, data) => api.patch(`/instance-servers/${encodeURIComponent(id)}`, data, {timeout: 90000}).then(unwrap),
+  deleteInstanceServer: (id) => api.delete(`/instance-servers/${encodeURIComponent(id)}`).then(unwrap),
+  checkInstanceServer: (id) => api.post(`/instance-servers/${encodeURIComponent(id)}/check`, {}, {timeout: 90000}).then(unwrap),
+  testInstanceServer: (data) => api.post('/instance-servers/test', data, {timeout: 90000}).then(unwrap),
+  instanceSshKeys: () => api.get('/instance-servers/ssh-keys', {timeout: 30000}).then(unwrap),
+  instanceModelOptions: () => api.get('/instance-model-options').then(unwrap),
+  instanceDeploymentFolder: () => api.get('/instance-deployment-folder').then(unwrap),
+  syncInstanceGateway: (id) => api.post(`/instances/${encodeURIComponent(id)}/gateway-sync`, {}, {timeout: 30000}).then(unwrap),
+  instances: () => api.get('/instances').then(unwrap),
+  createInstance: (data) => api.post('/instances', data, {timeout: 120000}).then(unwrap),
+  instance: (id) => api.get(`/instances/${encodeURIComponent(id)}`).then(unwrap),
+  updateInstance: (id, data) => api.patch(`/instances/${encodeURIComponent(id)}`, data, {timeout: 60000}).then(unwrap),
+  deployInstance: (id, data) => api.post(`/instances/${encodeURIComponent(id)}/deploy`, data).then(unwrap),
+  maintainInstance: (id, data) => api.post(`/instances/${encodeURIComponent(id)}/maintenance`, data).then(unwrap),
+  verifyInstance: (id) => api.post(`/instances/${encodeURIComponent(id)}/verify`, {}, {timeout: 120000}).then(unwrap),
+  instanceOperations: (id) => api.get(`/instances/${encodeURIComponent(id)}/operations`).then(unwrap),
+  instanceEvents: (id) => api.get(`/instances/${encodeURIComponent(id)}/events`).then(unwrap),
+  instanceRequest: (id, data) => api.post(`/instances/${encodeURIComponent(id)}/request`, data, {timeout: 130000}).then(unwrap),
+  archiveInstance: (id) => api.post(`/instances/${encodeURIComponent(id)}/archive`, {}).then(unwrap),
 
   conversations: (params = {}) => api.get("/conversations", { params }).then(unwrap),
   conversationDefaults: (params = {}) => api.get("/conversations/defaults", { params }).then(unwrap),
@@ -78,6 +125,7 @@ export const Api = {
   conversationSystemPromptPreview: (uuid) => api.post(`/conversations/${encodeURIComponent(uuid)}/system-prompt/preview`).then(unwrap),
   updateConversationSystemPrompt: (uuid, data) => api.put(`/conversations/${encodeURIComponent(uuid)}/system-prompt`, data).then(unwrap),
   conversationStop: (uuid) => api.post(`/conversations/${encodeURIComponent(uuid)}/stop`).then(unwrap),
+  dismissPromptSuggestions: (uuid) => api.delete(`/conversations/${encodeURIComponent(uuid)}/prompt-suggestions`).then(unwrap),
   conversationCancelRetry: (uuid, waitId, taskUuid = "") => api.post(`/conversations/${encodeURIComponent(uuid)}/retry/cancel`, { waitId, ...(taskUuid ? {taskUuid} : {}) }).then(unwrap),
   conversationRetryNow: (uuid, waitId, taskUuid = "") => api.post(`/conversations/${encodeURIComponent(uuid)}/retry/now`, { waitId, ...(taskUuid ? {taskUuid} : {}) }).then(unwrap),
   answerConversationConfirmation: (uuid, confirmationId, answer = {}) => api.post(`/conversations/${encodeURIComponent(uuid)}/confirmations/${encodeURIComponent(confirmationId)}/answer`, answer).then(unwrap),
@@ -144,25 +192,6 @@ export const Api = {
   cronEnvironment: () => api.get('/cron/environment').then(unwrap),
   cronStatistics: (params = {}) => api.get('/cron/statistics', { params }).then(unwrap),
 
-  recOverview: () => api.get('/recommendations/overview').then(unwrap),
-  recBadge: () => api.get('/recommendations/badge').then(unwrap),
-  recCards: (params = {}) => api.get('/recommendations/cards', { params }).then(unwrap),
-  recSeen: (data) => api.post('/recommendations/cards/seen', Array.isArray(data) ? { ids: data } : data).then(unwrap),
-  recFeedback: (id, data) => api.post(`/recommendations/cards/${encodeURIComponent(id)}/feedback`, data).then(unwrap),
-  recContinue: (id, data) => api.post(`/recommendations/cards/${encodeURIComponent(id)}/continue`, data).then(unwrap),
-  recOpenSource: (id, url) => api.post(`/recommendations/cards/${encodeURIComponent(id)}/open-source`, { url }).then(unwrap),
-  recRemoveCard: (id) => api.delete(`/recommendations/cards/${encodeURIComponent(id)}`).then(unwrap),
-  recProfile: (params = {}) => api.get('/recommendations/profile', { params }).then(unwrap),
-  recSaveProfile: (id, data) => (id ? api.patch(`/recommendations/profile/${encodeURIComponent(id)}`, data) : api.post('/recommendations/profile', data)).then(unwrap),
-  recRemoveProfile: (id) => api.delete(`/recommendations/profile/${encodeURIComponent(id)}`).then(unwrap),
-  recFollows: (params = {}) => api.get('/recommendations/follows', { params }).then(unwrap),
-  recAddFollow: (data) => api.post('/recommendations/follows', data).then(unwrap),
-  recRemoveFollow: (id) => api.delete(`/recommendations/follows/${encodeURIComponent(id)}`).then(unwrap),
-  recSettings: () => api.get('/recommendations/settings').then(unwrap),
-  recSaveSettings: (data) => api.put('/recommendations/settings', data).then(unwrap),
-  recRuns: (params = {}) => api.get('/recommendations/runs', { params }).then(unwrap),
-  recStopRun: (id) => api.post(`/recommendations/runs/${encodeURIComponent(id)}/stop`, {}).then(unwrap),
-
   webhooks: (params = {}, options = {}) => api.get('/webhooks', { params, signal: options.signal }).then(unwrap),
   webhook: (id, options = {}) => api.get(`/webhooks/${encodeURIComponent(id)}`, { signal: options.signal }).then(unwrap),
   createWebhook: (data) => api.post('/webhooks', data).then(unwrap),
@@ -188,6 +217,12 @@ export const Api = {
   previewPromptTemplate: (data) => api.post('/prompt-template/preview', data).then(unwrap),
   conversationPropertiesImpact: (uuid, data) => api.post(`/conversations/${encodeURIComponent(uuid)}/properties/impact`, data).then(unwrap),
   conversationProperties: (uuid) => api.get(`/conversations/${encodeURIComponent(uuid)}/properties`).then(unwrap),
+  conversationCollab: (uuid) => api.get(`/conversations/${encodeURIComponent(uuid)}/collab`).then(unwrap),
+  collabRequest: (id) => api.get(`/collab/requests/${encodeURIComponent(id)}`).then(unwrap),
+  cancelCollabRequest: (id) => api.post(`/collab/requests/${encodeURIComponent(id)}/cancel`, {}).then(unwrap),
+  collabGroup: (id) => api.get(`/collab/groups/${encodeURIComponent(id)}`).then(unwrap),
+  updateCollabGroup: (id, data) => api.put(`/collab/groups/${encodeURIComponent(id)}`, data).then(unwrap),
+  restoreCollabMember: (uuid) => api.post(`/collab/members/${encodeURIComponent(uuid)}/restore`, {}).then(unwrap),
   updateConversationProperties: (uuid, data) => api.put(`/conversations/${encodeURIComponent(uuid)}/properties`, data).then(unwrap),
 
   systemRestart: (data = {}) => api.post("/system/restart", data).then(unwrap),
@@ -196,13 +231,16 @@ export const Api = {
   ackSystemUpdate: (data = {}) => api.post("/system/update/ack", data).then(unwrap),
 
   mcpStatus: () => api.get("/mcp/status").then(unwrap),
-  setMcpEnabled: (enabled) => api.patch("/mcp/enabled", { enabled }).then(unwrap),
-  setMcpServerEnabled: (serverKey, enabled) => api.patch(`/mcp/servers/${encodeURIComponent(serverKey)}/enabled`, { enabled }).then(unwrap),
+  setMcpEnabled: (enabled, exposureConfirmations) => api.patch("/mcp/enabled", { enabled, exposureConfirmations }, { timeout: 120000 }).then(unwrap),
+  setMcpServerEnabled: (serverKey, enabled, exposureConfirmations) => api.patch(`/mcp/servers/${encodeURIComponent(serverKey)}/enabled`, { enabled, exposureConfirmations }, { timeout: 120000 }).then(unwrap),
+  setMcpServerTools: (serverKey, disabledTools, exposureConfirmations) => api.patch(`/mcp/servers/${encodeURIComponent(serverKey)}/tools`, { disabledTools, exposureConfirmations }, { timeout: 120000 }).then(unwrap),
+  discoverMcpServerTools: (serverKey) => api.get(`/mcp/servers/${encodeURIComponent(serverKey)}/tools`, { timeout: 120000 }).then(unwrap),
+  confirmMcpExposure: (serverKey, exposureConfirmations) => api.post(`/mcp/servers/${encodeURIComponent(serverKey)}/confirm-exposure`, { exposureConfirmations }, { timeout: 120000 }).then(unwrap),
   setMcpServerApproval: (serverKey, approval) => api.patch(`/mcp/servers/${encodeURIComponent(serverKey)}/approval`, { approval }).then(unwrap),
   uninstallMcpServer: (serverKey) => api.post(`/mcp/servers/${encodeURIComponent(serverKey)}/uninstall`, { confirm: true, name: serverKey }, { timeout: 120000 }).then(unwrap),
   setMcpServerAgentAccess: (serverKey, agentAccess, expectedAgentAccess) => api.patch(`/mcp/servers/${encodeURIComponent(serverKey)}/agent-access`, { agentAccess, expectedAgentAccess }).then(unwrap),
   refreshMcpServerTools: (serverKey) => api.post(`/mcp/servers/${encodeURIComponent(serverKey)}/refresh-tools`, {}, { timeout: 120000 }).then(unwrap),
-  reloadMcp: () => api.post("/mcp/reload").then(unwrap),
+  reloadMcp: (exposureConfirmations) => api.post("/mcp/reload", { exposureConfirmations }, { timeout: 120000 }).then(unwrap),
 
   skills: () => api.get("/skills").then(unwrap),
   skillDetail: (name) => api.get(`/skills/${encodeURIComponent(name)}`).then(unwrap),

@@ -1,0 +1,33 @@
+/* Same values as ConsoleComposer's pending-interaction controls, for child panels. */
+.web-confirm-btn {
+	min-height: 2rem;
+	border: 1px solid transparent;
+	border-radius: 999px;
+	padding: 0.42rem 0.8rem;
+	font-size: 0.76rem;
+	font-weight: 700;
+	line-height: 1.25;
+	cursor: pointer;
+}
+.web-confirm-btn.reject {
+	border-color: var(--ob-border);
+	background: var(--ob-surface-soft);
+	color: var(--ob-text);
+}
+.web-confirm-btn.confirm {
+	background: var(--ob-interaction-accent);
+	color: var(--ob-text-inverse);
+}
+.web-confirm-btn:disabled {
+	opacity: 0.58;
+	cursor: not-allowed;
+}
+.interaction-submit-error {
+	border: 1px solid rgb(var(--ob-danger-rgb) / 0.23);
+	border-radius: 0.7rem;
+	background: var(--ob-danger-soft);
+	padding: 0.55rem 0.65rem;
+	font-size: 0.74rem;
+	line-height: 1.45;
+	color: var(--ob-danger);
+}

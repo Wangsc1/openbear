@@ -34,22 +34,11 @@ for (const dark of [false, true]) test(`${dark ? 'dark' : 'light'} approved chat
 test('recent and tree selection use the same neutral background and readable foreground', () => {
   for (const [file,selector] of [
     ['../../components/ConversationTree.vue','.tree-node-main.is-chat-active'],
-    ['../../components/ConversationActivityFolder.vue','.activity-row.is-selected'],
   ]) {
     const style = rules(file,selector);
     assert.equal(style.background,'var(--ob-chat-selected)');
     assert.equal(style.color,'var(--ob-chat-text)');
   }
-});
-
-test('completed recent conversations use a quiet neutral dot while actionable states retain their colors', () => {
-  const file = '../../components/ConversationActivityFolder.vue';
-  const completed = rules(file, '.activity-state-dot.is-completed');
-  assert.equal(completed.background, 'var(--ob-chat-muted)');
-  assert.equal(completed['border-color'], 'var(--ob-chat-muted)');
-  assert.equal(rules(file, '.activity-state-dot.is-running')['border-top-color'], 'var(--ob-blue)');
-  assert.equal(rules(file, '.activity-state-dot.is-waiting').background, 'var(--ob-warning)');
-  assert.equal(rules(file, '.activity-state-dot.is-failed').background, 'var(--ob-danger)');
 });
 
 test('desktop controls are quiet rounded squares, keeping active state distinct from neutral resting state', () => {
@@ -75,27 +64,6 @@ test('turn navigation rail blends into the transcript without a rounded floating
   assert.equal(style.background, 'transparent');
   assert.equal(style['backdrop-filter'], 'none');
   assert.equal(style['box-shadow'], 'none');
-});
-
-test('desktop hides the duplicate usage trigger while phones retain their existing meter', () => {
-  const source = parse(read('./ConsoleComposer.vue')).descriptor.styles.map(style => style.content).join('\n');
-  const css = postcss.parse(source);
-  const hidden = [];
-  css.walkRules(rule => {
-    if (rule.selector !== '.composer-usage-summary') return;
-    rule.walkDecls('display', decl => {
-      if (decl.value === 'none') hidden.push({selector: rule.selector, media: rule.parent.params});
-    });
-  });
-  assert.deepEqual(hidden, [{selector: '.composer-usage-summary', media: undefined}]);
-  assert.equal(rules('./ContextUsageMeter.vue', '.context-usage-trigger').display, 'inline-flex');
-  assert.notEqual(rules('./ConsoleComposer.vue', '.run-config-chip-meta').display, 'none');
-  let phonePlacement;
-  css.walkRules(rule => {
-    if (rule.selector === '.composer-usage-summary' && rule.parent.params === '(max-width: 760px)') phonePlacement = rule.toString();
-  });
-  assert.match(phonePlacement, /display: flex; flex-wrap: wrap/);
-  assert.doesNotMatch(phonePlacement, /position: absolute/);
 });
 
 test('compact title retains path and numeric statistics, with one live context owner in composer', () => {

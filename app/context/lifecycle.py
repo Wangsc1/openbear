@@ -120,7 +120,7 @@ async def duplicate_windows(db: Any, *, old_chat: int, new_chat: int, old_conver
         state = json.loads(old["state_json"])
         selected = [copied.remap(message) for message in deserialize_messages(state.get("messages") or [])]
         archived = await new_store.archive(selected)
-        extra = rewrite({key: value for key, value in state.items() if key not in {"messages", "sourceMessageHighWater", "calibration"}})
+        extra = rewrite({key: value for key, value in state.items() if key not in {"messages", "sourceMessageHighWater", "calibration", "neutralCalibration"}})
         high_water = None
         if old["owner_kind"] == "controller" and "sourceMessageHighWater" in state:
             old_high_water = int(state["sourceMessageHighWater"] or 0)

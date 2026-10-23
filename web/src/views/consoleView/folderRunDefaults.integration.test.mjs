@@ -141,8 +141,43 @@ test("folder property refresh preserves explicit draft choices and updates untou
   await h.run("loadLocalRunDefaults()");
   await h.run("patchLocalRunDefaults({agentFastMode:false})");
   current = {...paid, mainThinkingLevel: "medium"};
-  await h.run("refreshFolderRunDefaults({preserveManual:true})");
+  await h.run("refreshFolderRunDefaults()");
   assert.deepEqual(h.config(), {...current, agentFastMode: false});
+});
+
+test("returning to the same draft from another conversation keeps its explicit choices", async () => {
+  const h = harness();
+  await h.run("loadLocalRunDefaults()");
+  await h.run("patchLocalRunDefaults({mainModel:'cheap'})");
+  const chosen = h.config();
+  Object.assign(h.state.props, {conversationUuid: "existing", folderId: "other"});
+  h.state.folderChanged("other", "project");
+  Object.assign(h.state.props, {conversationUuid: "local:new", folderId: "project"});
+  h.state.folderChanged("project", "other");
+  assert.equal(h.state.localModel.value, "cheap");
+  await h.run("loadLocalRunDefaults('local:new')");
+  await flush();
+  assert.deepEqual(h.config(), chosen);
+  await h.run("ensureServerConversationForSend('hello', pending)");
+  assert.deepEqual(JSON.parse(JSON.stringify(h.creates[0].runConfig)), chosen);
+});
+
+test("sending or retargeting the draft forgets its explicit choices", async () => {
+  const h = harness();
+  await h.run("loadLocalRunDefaults()");
+  await h.run("patchLocalRunDefaults({mainModel:'cheap'})");
+  await h.run("ensureServerConversationForSend('hello', pending)");
+  h.state.props.conversationUuid = "local:new";
+  await h.run("loadLocalRunDefaults('local:new')");
+  assert.deepEqual(h.config(), paid);
+  await h.run("patchLocalRunDefaults({mainModel:'cheap'})");
+  h.state.props.folderId = "other";
+  h.state.folderChanged("other", "project");
+  await flush();
+  h.state.props.folderId = "project";
+  h.state.folderChanged("project", "other");
+  await flush();
+  assert.deepEqual(h.config(), paid);
 });
 
 test("create waits for folder defaults and refuses to send using stale values on failure", async () => {

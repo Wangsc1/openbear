@@ -18,17 +18,23 @@ def evidence(label, **facts):
     print('SIMPLIFICATION_EVIDENCE', label, json.dumps(facts,ensure_ascii=False))
 
 
-@pytest.mark.parametrize('removed',[
+REMOVED_ENDPOINT_CAPABILITIES=[
     {'budget':{}}, {'batching':{'groupBy':[]}}, {'batching':{'missingGroupValue':'separate'}},
     {'limits':{'burst':1}}, {'pre':{'sourceMode':'inline'}}, {'post':{'entryFile':'/tmp/script.py'}},
     {'pre':{'cwd':'/tmp'}}, {'pre':{'env':[]}}, {'post':{'env':[{'name':'X','secretRef':'@secret/x#y'}]}},
     {'pre':{'interpreter':'/usr/bin/python3'}},
-])
-async def test_removed_endpoint_capabilities_rejected_by_real_api(env,removed):
+]
+
+
+async def test_removed_endpoint_capabilities_rejected_by_real_api(env):
+    # One real HTTP environment; every removed input is still sent and checked
+    # separately (distinct requestId, so no idempotent replay can mask one).
     cookies={'openbear_web_session':await _login_cookie(env)}
-    response=await env.client.post('/api/webhooks',cookies=cookies,json={'scope':{'type':'folder','id':'folder'},'requestId':'removed','config':removed})
-    assert response.status==422 and (await response.json())['code']=='invalid_config'
-    assert not await one(env.db.conn,'SELECT endpoint_id FROM webhook_endpoints')
+    for i,removed in enumerate(REMOVED_ENDPOINT_CAPABILITIES):
+        response=await env.client.post('/api/webhooks',cookies=cookies,json={'scope':{'type':'folder','id':'folder'},'requestId':f'removed-{i}','config':removed})
+        body=await response.json()
+        assert response.status==422 and body['code']=='invalid_config', (removed,response.status,body)
+        assert not await one(env.db.conn,'SELECT endpoint_id FROM webhook_endpoints'), removed
 
 
 @pytest.mark.parametrize('removed',[
@@ -105,7 +111,10 @@ async def test_actual_new_conversation_fieldwise_run_config(env,overrides,expect
     row=await one(env.db.conn,'SELECT c.model AS main_model,s.thinking_level AS main_thinking_level,s.fast_mode AS main_fast_mode,c.folder_uuid FROM web_conversations c JOIN sessions s ON s.chat_id=c.internal_chat_id')
     assert (row['main_model'],row['main_thinking_level'],row['main_fast_mode'])==expected
     assert row['folder_uuid']=='folder' and selected and set(selected)=={expected[0]}
-    assert (await one(env.db.conn,'SELECT terminal_reason FROM webhook_assignments'))['terminal_reason']=='normal'
+    assignment=await one(env.db.conn,'SELECT assignment_id,conversation_uuid,terminal_reason FROM webhook_assignments')
+    assert assignment['terminal_reason']=='normal'
+    origin=await one(env.db.conn,'SELECT origin_kind,origin_ref FROM web_conversations WHERE conversation_uuid=?',(assignment['conversation_uuid'],))
+    assert (origin['origin_kind'],origin['origin_ref'])==('webhook',assignment['assignment_id'])
     evidence('actual_inheritance',overrides=overrides,created=row,executedModels=selected)
 
 
@@ -165,6 +174,8 @@ async def test_fixed_target_subtree_archive_and_runtime_move_guard(env):
     await env.worker.tick(); await asyncio.gather(*env.server.runs.scheduler.tasks(kind='controller'))
     after=await one(env.db.conn,'SELECT c.model AS main_model,s.thinking_level AS main_thinking_level,s.fast_mode AS main_fast_mode FROM web_conversations c JOIN sessions s ON s.chat_id=c.internal_chat_id WHERE c.conversation_uuid=?',(inside['conversation_uuid'],))
     assert after=={'main_model':'openai/cheap','main_thinking_level':'low','main_fast_mode':0}
+    # Delivering into the user's own conversation never relabels it.
+    assert (await one(env.db.conn,'SELECT origin_kind FROM web_conversations WHERE conversation_uuid=?',(inside['conversation_uuid'],)))['origin_kind']=='user'
     evidence('fixed_target_scope',outsideRejected=True,archivedRejected=True,movedBlocked=True,unchanged=after)
 
 

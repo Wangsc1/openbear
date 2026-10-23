@@ -1,28 +1,27 @@
-/* iOS zooms focused editable controls below 16px. Apply this to the actual
-   input/editable node (including teleported dialogs), not to surrounding copy.
-   Touch landscape/tablets, including fine-pointer peripherals, also need it;
-   non-touch desktop typography and pinch zoom stay
-   untouched. Important beats scoped form rules and Monaco's inline input size. */
-@media (max-width: 760px), (hover: none) and (pointer: coarse), (any-pointer: coarse) {
+/* iOS zooms focused controls below 16px; target editable nodes and teleported
+   dialogs without changing surrounding text or disabling pinch zoom. */
+@media (max-width: 760px) and (hover: none) and (pointer: coarse) {
   input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="file"]):not([type="image"]),
   textarea,
   select,
   [contenteditable]:not([contenteditable="false"]),
   .el-select__wrapper,
   .reference-editor-placeholder {
-    font-size: var(--ob-chat-input-font-size, 16px) !important;
+    font-size: 16px !important;
   }
 }
 
-/* A touchscreen PC can match any-pointer: coarse even with a mouse. Restore
-   only these compact chat fields in the desktop layout. iOS/iPadOS retain the
-   zoom-safe floor, including when a trackpad makes their primary pointer fine.
-   Feed the winning rule above instead of competing with its :not() specificity. */
-@supports not (-webkit-touch-callout: none) {
-  @media (min-width: 761px) and (hover: hover) and (pointer: fine) {
-    .conversation-tree .tree-search input { --ob-chat-input-font-size: 12px; }
-    .composer-shell .reference-editor-content,
-    .composer-shell .reference-editor-placeholder { --ob-chat-input-font-size: 14px; }
-    .run-config-menu-popper .model-search input { --ob-chat-input-font-size: 13px; }
+/* Wide iOS screens and iPads with trackpads still need the floor. A coarse
+   secondary pointer alone must not change typography on touchscreen PCs. */
+@supports (-webkit-touch-callout: none) {
+  @media (any-pointer: coarse) {
+    input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="file"]):not([type="image"]),
+    textarea,
+    select,
+    [contenteditable]:not([contenteditable="false"]),
+    .el-select__wrapper,
+    .reference-editor-placeholder {
+      font-size: 16px !important;
+    }
   }
 }

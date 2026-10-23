@@ -1,0 +1,42 @@
+# iPad 界面改版验收：竖屏双栏 -> 横屏三栏（侧栏 + 对话 + 本次运行）-> 切换侧栏 -> 输入区
+appId: dev.openbear.app
+---
+- tapOn:
+    text: "打开"
+    optional: true
+# dev client 的开发者菜单（仅开发构建），右上角关闭
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    point: "80%,45%"
+    optional: true
+- extendedWaitUntil:
+    visible:
+      id: "conversation-sidebar"
+    timeout: 60000
+- tapOn:
+    id: "conv-a6a877ad"
+- extendedWaitUntil:
+    visible:
+      id: "row-answer"
+    timeout: 30000
+- waitForAnimationToEnd
+- takeScreenshot: p01-portrait-split
+- setOrientation: LANDSCAPE_LEFT
+- waitForAnimationToEnd
+- takeScreenshot: p02-landscape-three-pane
+- tapOn:
+    id: "toggle-sidebar"
+- waitForAnimationToEnd
+- takeScreenshot: p03-sidebar-hidden
+- tapOn:
+    id: "toggle-sidebar"
+- waitForAnimationToEnd
+- tapOn:
+    id: "composer-input"
+- inputText: "iPad 输入"
+- waitForAnimationToEnd
+- takeScreenshot: p04-composer-keyboard
+- setOrientation: PORTRAIT
+- waitForAnimationToEnd

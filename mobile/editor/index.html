@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <style>
+      html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; -webkit-text-size-adjust: 100%; }
+      #editor { position: absolute; inset: 0; }
+      /* 补全浮层在 WebView 里不受外层容器裁剪，保持在最上面 */
+      .monaco-editor .suggest-widget, .monaco-editor .overflowingContentWidgets { z-index: 50 !important; }
+    </style>
+  </head>
+  <body>
+    <div id="editor"></div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

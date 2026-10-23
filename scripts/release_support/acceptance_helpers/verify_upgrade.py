@@ -43,6 +43,11 @@ for name, old_rows in before['tables'].items():
             errors.append({'table': name, 'row': old[key], 'changedFields': changed})
     counts[name] = {'before': len(old_rows), 'after': len(current)}
 additional = {}
+if 'heavyHistory' in before:
+    from heavy_upgrade import verify_heavy_history
+    additional['heavyHistory'] = verify_heavy_history(con, before['heavyHistory'])
+    if not additional['heavyHistory']['ok']:
+        errors.append({'additionalCheck': 'large historical frame/body preservation failed'})
 if 'legacy-terminal-time' in before.get('additionalChecks', []):
     from legacy_terminal_time import verify_legacy_terminal_time
     additional['legacyTerminalTime'] = verify_legacy_terminal_time(con, before['conversationUuid'])

@@ -12,8 +12,9 @@ from pathlib import Path, PurePosixPath
 from .common import ReleaseError, atomic_json, fingerprint, sha
 
 VERSION_FILES = {"app/__init__.py", "pyproject.toml", "uv.lock", "web/package.json", "web/package-lock.json"}
-PUBLIC_ROOTS = {".githooks", ".gitignore", "README.md", "README", "LICENSE", "app", "docs",
-                "openbear.json.example", "openbear.service", "prompts", "pyproject.toml", "scripts", "tests", "uv.lock", "web"}
+PUBLIC_ROOTS = {".githooks", ".gitignore", ".dockerignore", "Dockerfile", "README.md", "README", "LICENSE", "app", "docs",
+                "openbear.json.example", "openbear.service", "prompts", "pyproject.toml", "scripts", "tests", "uv.lock", "web", "gateway",
+                "mobile"}
 VERSION_RE = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
 
 
@@ -26,6 +27,8 @@ def version(repo: Path) -> str:
 
 def valid_path(name: str) -> bool:
     p = PurePosixPath(name)
+    if name.startswith("gateway/") and not (name.endswith((".go", ".md")) or name in {"gateway/go.mod", "gateway/go.sum", "gateway/LICENSE", "gateway/login.html"}):
+        return False
     return bool(name and not p.is_absolute() and ".." not in p.parts and "\\" not in name
                 and p.parts[0] in PUBLIC_ROOTS and not any(x in p.parts for x in ("__pycache__", "node_modules", ".venv", ".git"))
                 and not name.startswith(("web/dist/", "web/data/", "web/logs/", "web/.dist-before-"))

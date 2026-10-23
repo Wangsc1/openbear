@@ -129,6 +129,13 @@ class WebAdminMemoryMixin:
             selected = await self._resolved_prompt_policy(conv_uuid)
         selected = selected or policy(text=prompt)
         prompt = selected['text']
+        member_block = ""
+        collab = getattr(self, "collab_groups", None)
+        if collab is not None and conv_uuid:
+            member_block, member_workspace = await collab.member_prompt(conv_uuid)
+            if member_block:
+                prompt = (prompt.rstrip() + "\n\n" + member_block) if prompt.strip() else member_block
+                workspace = member_workspace or workspace
         params = self._prompt_template_params(
             available_agents=await self._available_agents_for_prompt(),
             current_model=model,
@@ -146,7 +153,11 @@ class WebAdminMemoryMixin:
         })
         for key in ('time', 'message', 'conversation'):
             params[key] = variables[key]
-        return filter_prompt_tools(params, selected)
+        params = filter_prompt_tools(params, selected)
+        if member_block:
+            from app.collab.runtime import filter_member_prompt_params
+            params = filter_member_prompt_params(params)
+        return params
 
     def _prompt_template_param_samples(self) -> list[dict[str, Any]]:
         base = self._prompt_template_params()

@@ -99,11 +99,14 @@ async def test_normal_large_requests_never_rewrite_images_or_emit_compaction(
     }[protocol]
     env.manager.backend = cls(None, "http://not-called.invalid", "test")
     env.manager.policy = WindowPolicy(128000, trigger_tokens=100000)
-    messages = [human(), *[attachment(tmp_path, i, size=4_000_000, browser=True) for i in range(3)]]
+    # Inline image bytes alone would be ~4x the 100k-token trigger (and 3x the
+    # 128k window) if they were ever counted as text; no byte budget exists.
+    size = 400_000
+    messages = [human(), *[attachment(tmp_path, i, size=size, browser=True) for i in range(3)]]
     original = copy.deepcopy(messages)
     result = await env.manager.prepare(messages, system="", tools=[])
     version = env.manager.window_version
-    assert result == original and env.manager.last_estimate.request_bytes > 12 * 1024 * 1024
+    assert result == original and env.manager.last_estimate.request_bytes > 3 * size
     for _ in range(2):
         result = await env.manager.prepare(result, system="", tools=[])
         assert result == original and env.manager.window_version == version

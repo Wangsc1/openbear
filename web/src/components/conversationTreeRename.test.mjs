@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import * as conversationGroupsTree from './conversationGroupsTree.js';
 
 const source = fs.readFileSync(new URL('./ConversationTree.vue', import.meta.url), 'utf8');
 const start = source.indexOf('async function renameRow(row) {');
@@ -12,7 +13,7 @@ test('manual conversation rename accepts and sends a long title without truncati
   const title = 'zcode parrot claude ' + '详细命名'.repeat(100);
   const updates = [];
   let validate;
-  const context = vm.createContext({
+  const context = vm.createContext({...conversationGroupsTree,
     rowLabel: row => row.title,
     ElMessageBox: { prompt: async (_message, _heading, options) => {
       validate = options.inputValidator;

@@ -2,13 +2,21 @@
 Description=OpenBear — 单人自用 Agent Web 控制台
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=10min
+StartLimitBurst=3
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=180
+TimeoutStopSec=90
+WatchdogSec=60
+TimeoutAbortSec=15
 WorkingDirectory=__OPENBEAR_DIR__
 ExecStart=__OPENBEAR_DIR__/.venv/bin/python -m app.main
 Restart=on-failure
-RestartSec=3
+RestartSec=10
+RestartPreventExitStatus=78
 Environment=OPENBEAR_CONFIG=__OPENBEAR_DIR__/openbear.json
 Environment=PYTHONUNBUFFERED=1
 Environment=TZ=Asia/Shanghai

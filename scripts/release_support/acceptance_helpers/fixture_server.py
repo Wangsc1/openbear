@@ -176,7 +176,7 @@ class Handler(BaseHTTPRequestHandler):
                 with lock:
                     updates[token] = [x for x in updates[token] if x["update_id"] >= offset]
                     result = list(updates[token])
-            elif method in {"sendMessage", "editMessageText"}:
+            elif method in {"sendMessage", "sendRichMessage", "editMessageText"}:
                 chat_id = int(fields.get("chat_id", "123456789"))
                 try:
                     markup = json.loads(fields.get("reply_markup", "{}"))

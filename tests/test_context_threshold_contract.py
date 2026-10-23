@@ -31,12 +31,12 @@ def test_output_capability_never_deducts_from_configured_threshold(output_limit,
     policy = WindowPolicy(500000, trigger_tokens=explicit, max_output_tokens=output_limit)
     expected = explicit or 350000
     assert policy.threshold == expected
-    assert policy.target() == int(expected * .15)
+    assert policy.target() == 40_000
     assert policy.max_output_tokens == output_limit
 
 
 def test_ratio_has_no_hidden_minimum_output_or_two_percent_reserve():
-    policy = WindowPolicy(1000, trigger_ratio=.9, max_output_tokens=1000)
+    policy = WindowPolicy(1000, trigger_ratio=.9, max_output_tokens=1000, retain_tokens=135)
     assert policy.threshold == 900
     assert policy.target() == 135
 

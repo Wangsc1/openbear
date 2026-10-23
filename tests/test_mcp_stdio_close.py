@@ -105,6 +105,12 @@ async def backpressure(transport):
     assert not transport._write_lock.locked()
 
 
+def shorten_sigint_grace(monkeypatch, transport):
+    # The peer ignores SIGINT; tests whose subject is not the escalation itself
+    # need not sit through the production SIGINT grace window before SIGTERM.
+    monkeypatch.setattr(transport, "_SIGINT_WAIT_S", 0.05)
+
+
 def assert_reaped(transport):
     proc = transport.proc
     assert proc.returncode is not None
@@ -120,9 +126,10 @@ def assert_reaped(transport):
 
 
 @pytest.mark.parametrize("mode", ["close", "disable_reload"])
-async def test_manager_shutdown_after_tool_timeout_reaps_backpressured_peer(paused_manager, mode):
+async def test_manager_shutdown_after_tool_timeout_reaps_backpressured_peer(paused_manager, monkeypatch, mode):
     env = paused_manager
     manager, transport = env.manager, env.transport
+    shorten_sigint_grace(monkeypatch, transport)
     result = json.loads(await manager.call_tool(
         manager.available_tools()[0].public_name, PAYLOAD,
         ToolRuntimeContext(source="web", conversation_uuid="test"),
@@ -144,9 +151,10 @@ async def test_manager_shutdown_after_tool_timeout_reaps_backpressured_peer(paus
     assert_reaped(transport)
 
 
-async def test_shutdown_budget_includes_waiting_for_request_write_lock(paused_manager):
+async def test_shutdown_budget_includes_waiting_for_request_write_lock(paused_manager, monkeypatch):
     env = paused_manager
     transport = env.transport
+    shorten_sigint_grace(monkeypatch, transport)
     request = env.spawn(transport.request("tools/call", PAYLOAD, timeout_s=30))
     async with asyncio.timeout(1):
         while not transport._write_lock.locked():
@@ -166,6 +174,8 @@ async def test_cancel_close_waits_for_cleanup_and_other_closers_join(paused_mana
     await backpressure(transport)
     entered = asyncio.Event()
     if stage == "notification":
+        # Termination keeps the real grace window: that case cancels during it.
+        shorten_sigint_grace(monkeypatch, transport)
         original = transport.notify
 
         async def observed(method, params=None):
@@ -204,6 +214,7 @@ async def test_cancel_close_waits_for_cleanup_and_other_closers_join(paused_mana
 async def test_shutdown_notification_failure_still_reaps_peer(paused_manager, monkeypatch):
     env = paused_manager
     transport = env.transport
+    shorten_sigint_grace(monkeypatch, transport)
     await backpressure(transport)
 
     async def failed_notify(method, params=None):

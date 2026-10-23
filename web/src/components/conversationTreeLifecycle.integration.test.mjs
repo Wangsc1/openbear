@@ -1,3 +1,4 @@
+import { userStorage } from '../sessionBoundary.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -14,7 +15,7 @@ const local=()=>conv('local:new','a',{local:true});
 function harness({rows=[local(),conv('saved')],active='local:new',confirm=async()=>{},remove=async()=>{},children=async()=>({items:[]}),mounted=true}={}){
  const calls={deletes:[],clears:[],forgotten:[],reveals:[],refresh:[],success:[],error:[],warning:[],confirms:[],lookups:[]};
  const storage=new Map([['openbear.console.drafts.v1',JSON.stringify({'local:new':'discard this',saved:'retain this',other:'also retain'})]]);
- const ctx=vm.createContext({ref,nextTick,isLocalConversation,normalizeConversationRows,
+ const ctx=vm.createContext({userStorage,ref,nextTick,isLocalConversation,normalizeConversationRows,
   conversations:ref(rows),activeConversationUuid:ref(active),selectedFolderId:ref('a'),draftFolderId:ref('a'),active:ref('console'),LOCAL_CONVERSATION_UUID:'local:new',deletingConversations:new Set(),
   restoringPosition:null,historyNavigationPending:false,navigationSequence:0,cronLeaveGuard:ref(null),
   window:{localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v)}},
@@ -126,10 +127,10 @@ test('directory deletion leaves descendant-folder and unrelated drafts in their 
  const h=harness({rows:[{...local(),folderId:'child'},conv('saved')]});h.ctx.draftFolderId.value='child';h.run("handleTreeFolderRemoved({folderId:'a',targetFolderId:'b'})");assert.equal(h.ctx.draftFolderId.value,'child');assert.equal(h.ctx.conversations.value.find(isLocalConversation).folderId,'child');assert.deepEqual(h.calls.clears,[]);
 });
 test('mounted editor clearing is targeted and removes active text before navigation saves it',()=>{
- const cleared=[],attachments=[],released=[],forgotten=[];const props={conversationUuid:'local:new'};
+ const cleared=[],attachments=[],released=[],forgotten=[],forgottenChoices=[];const props={conversationUuid:'local:new'};
  const hydration=new Map([['other',{}],['local:new',{}],['kept',{}]]);
- const ctx=vm.createContext({props,attachmentHydrations:hydration,activeAttachmentKey:()=>props.conversationUuid,attachmentRestoring:ref(true),draft:ref('deleted text'),draftKey:s=>s,clearDraftForConversation:id=>cleared.push(id),clearAttachments:()=>attachments.push(true),releaseStashedAttachments:id=>released.push(id),attachmentDrafts:{remove:async id=>{forgotten.push(id);}},adjustComposerHeight(){},defineExpose(){}});
- vm.runInContext(between(consoleSource,'function discardConversationDraft(','defineExpose('),ctx);vm.runInContext("discardConversationDraft('other')",ctx);assert.equal(ctx.draft.value,'deleted text');assert.equal(attachments.length,0);vm.runInContext("discardConversationDraft('local:new')",ctx);assert.equal(ctx.draft.value,'');assert.equal(attachments.length,1);assert.deepEqual(cleared,['other','local:new']);
+ const ctx=vm.createContext({props,attachmentHydrations:hydration,activeAttachmentKey:()=>props.conversationUuid,attachmentRestoring:ref(true),draft:ref('deleted text'),draftKey:s=>s,clearDraftForConversation:id=>cleared.push(id),clearAttachments:()=>attachments.push(true),releaseStashedAttachments:id=>released.push(id),attachmentDrafts:{remove:async id=>{forgotten.push(id);}},forgetLocalDraftChoices:()=>forgottenChoices.push(props.conversationUuid),adjustComposerHeight(){},defineExpose(){}});
+ vm.runInContext(between(consoleSource,'function discardConversationDraft(','defineExpose('),ctx);vm.runInContext("discardConversationDraft('other')",ctx);assert.equal(ctx.draft.value,'deleted text');assert.equal(attachments.length,0);vm.runInContext("discardConversationDraft('local:new')",ctx);assert.equal(ctx.draft.value,'');assert.equal(attachments.length,1);assert.deepEqual(cleared,['other','local:new']);assert.deepEqual(forgottenChoices,['local:new']);
  // A deleted conversation loses its parked files and its stored copy whether or not it is the one on screen.
  assert.deepEqual(released,['other','local:new']);assert.deepEqual(forgotten,['other','local:new']);
  assert.deepEqual([...hydration.keys()],['kept']);assert.equal(ctx.attachmentRestoring.value,false);

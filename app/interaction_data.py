@@ -187,7 +187,7 @@ def normalize_definition(payload: dict[str, Any]) -> tuple[dict[str, Any], list[
     """Validate once, before either transport can display an interaction."""
     action = str(payload.get("action") or "confirm").strip().lower()
     errors: list[dict[str, str]] = []
-    if action not in {"confirm", "select", "prompt", "questionnaire"}:
+    if action not in {"confirm", "select", "prompt", "questionnaire", "group_proposal"}:
         return {}, [{"path": "action", "message": "unknown interaction action"}]
     try:
         timeout = float(payload.get("timeoutSeconds", payload.get("timeout", 600)))
@@ -237,6 +237,19 @@ def normalize_definition(payload: dict[str, Any]) -> tuple[dict[str, Any], list[
     if action == "questionnaire":
         item["questions"], question_errors = normalize_questionnaire(payload.get("questions"))
         errors.extend(question_errors)
+    if action == "group_proposal":
+        proposal = payload.get("proposal")
+        mode = str(payload.get("mode") or "create")
+        if not isinstance(proposal, dict):
+            errors.append({"path": "proposal", "message": "proposal must be an object"})
+        if mode not in {"create", "add_members", "update", "remove_member"}:
+            errors.append({"path": "mode", "message": "unknown group proposal mode"})
+        item.update(proposal=proposal if isinstance(proposal, dict) else {}, mode=mode,
+                    reason=str(payload.get("reason") or ""), groupId=str(payload.get("groupId") or ""),
+                    lockedMemberKeys=list(payload.get("lockedMemberKeys") or []),
+                    memberRules=str(payload.get("memberRules") or ""),
+                    base=payload.get("base") if isinstance(payload.get("base"), dict) else None,
+                    models=list(payload.get("models") or []))
     if len(json.dumps(item, ensure_ascii=False)) > 200_000:
         errors.append({"path": "body", "message": "interaction definition is too large"})
     return item, errors
@@ -262,6 +275,8 @@ def empty_result(item: dict[str, Any], status: str, *, source: str = "system") -
     }
     if item["action"] == "questionnaire":
         result["answers"] = []
+    elif item["action"] == "group_proposal":
+        result.update(decision="cancel", approved=False, text="")
     elif item["action"] == "select":
         result.update(multiple=bool(item.get("multiple")), selectedIndexes=[], selectedValues=[], selectedLabels=[], text="", answerMode="unanswered")
     elif item["action"] == "prompt":
@@ -291,6 +306,19 @@ def canonical_answer(item: dict[str, Any], body: Any, *, source: str) -> tuple[d
     if action == "questionnaire":
         result["answers"], answer_errors = canonical_questionnaire_answers(item["questions"], body.get("answers"))
         errors.extend(answer_errors)
+    elif action == "group_proposal":
+        decision = body.get("decision")
+        text = _text(body, "text", errors)
+        if decision not in {"approve", "approve_with_comment", "reject"}:
+            errors.append({"path": "decision", "message": "decision must be approve, approve_with_comment or reject"})
+        if decision in {"approve_with_comment", "reject"} and not text:
+            errors.append({"path": "text", "message": "请填写你的意见。"})
+        proposal = body.get("proposal") if decision != "reject" else item.get("proposal")
+        if not isinstance(proposal, dict):
+            errors.append({"path": "proposal", "message": "proposal must be an object"})
+            proposal = {}
+        result.update(decision=decision, approved=decision in {"approve", "approve_with_comment"}, text=text, proposal=proposal)
+        text = ""
     elif action == "prompt":
         result["value"] = _text(body, "value", errors)
     elif action == "select":

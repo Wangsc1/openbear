@@ -32,6 +32,7 @@ def agent_system_prompt_params(
     tool_allowlist: list[str] | tuple[str, ...] | None,
     model_name: str = "",
     workspace_dir: str = "",
+    conversation_uuid: str = "",
 ) -> dict[str, Any]:
     tool_names = allowed_agent_tool_names(registry, tool_allowlist)
     all_summaries = registry.summaries(scope="agent") if registry is not None else {}
@@ -83,6 +84,8 @@ def agent_system_prompt_params(
         "outputFormat": "markdown",
         "defaultThinkLevel": "off",
         "reasoningLevel": "off",
+        # Folder prompt of the conversation that owns the Agent.
+        "conversationUuid": conversation_uuid,
     }
 
 
@@ -94,6 +97,7 @@ async def render_agent_base_system_prompt(
     tool_allowlist: list[str] | tuple[str, ...] | None,
     model_name: str = "",
     workspace_dir: str = "",
+    conversation_uuid: str = "",
 ) -> str:
     mem = BuiltinMemoryClient(db, identity=identity)
     params = agent_system_prompt_params(
@@ -101,5 +105,6 @@ async def render_agent_base_system_prompt(
         tool_allowlist=tool_allowlist,
         model_name=model_name,
         workspace_dir=workspace_dir,
+        conversation_uuid=conversation_uuid,
     )
     return (await mem.render_agent_system_prompt(params)).strip()

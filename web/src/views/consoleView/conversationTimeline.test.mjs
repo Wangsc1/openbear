@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 
 import {conversationTimelineEntries, isConversationTimelineEvent, shouldRenderAssistantDivider} from "./conversationTimeline.js";
+import {conversationWorkChunks} from "./conversationWork.js";
 import {applyOperationFrame, deriveOperationRunState, projectOperationMessages} from "../../timelineProjection.js";
 
 const turnListSource = readFileSync(new URL("./TurnList.vue", import.meta.url), "utf8");
@@ -108,7 +109,7 @@ test("Agent and ordinary tools keep their source positions in the working timeli
 	assert.match(turnListSource, /conversationTimelineEntries\(displayEvents\(turn\), eventPrimaryToolName, isAgentEvent\)/);
 });
 
-test("failed Agent stays out of the main conversation but remains available to work detail", () => {
+test("failed Agent stays in its turn and folds into the work detail like other finished Agents", () => {
 	const events = [
 		{kind: "tool", id: "running", toolName: "Agent", operation: {status: "running", lifecycle: "active", payload: {status: "running"}}},
 		{kind: "tool", id: "failed-task", toolName: "Agent", operation: {status: "failed", lifecycle: "terminal", payload: {task: {status: "failed"}}}},
@@ -119,8 +120,14 @@ test("failed Agent stays out of the main conversation but remains available to w
 	];
 	const entries = conversationTimelineEntries(events, (event) => event.toolName || "", isAgentFixture);
 
-	assert.deepEqual(entries.map(({event}) => event.id), ["running", "completed", "partial", "cancelled"]);
-	assert.equal(events.length, 6, "main timeline filtering must not delete source work events");
+	assert.deepEqual(entries.map(({event}) => event.id), ["running", "failed-task", "failed-launch", "completed", "partial", "cancelled"]);
+	const chunks = conversationWorkChunks(entries);
+	assert.deepEqual(chunks.map(chunk => [chunk.kind, chunk.entries.map(({event}) => event.id)]), [
+		["exposed", ["running"]],
+		["work", ["failed-task", "failed-launch", "completed", "partial", "cancelled"]],
+	]);
+	// A failed live row gives way to the persisted card instead of duplicating it.
+	assert.equal(isConversationTimelineEvent({kind: "live_agent", livePayload: {task: {status: "failed"}}}), false);
 });
 
 test("typed and legacy UserInteraction remain alongside ordinary work events", () => {
@@ -159,11 +166,4 @@ test("assistant progress adds a divider between adjacent visible answer entries"
 	assert.equal(entries[2].event.message.content, "进度二");
 	for (let i = 0; i < entries.length; i++) assert.equal(shouldRenderAssistantDivider(entries, i), false);
 	assert.equal(shouldRenderAssistantDivider([entries[0], entries[2]], 1), true);
-});
-
-test("only intermediate conversation rows retain hover time and duration badges", () => {
-	assert.doesNotMatch(turnListSource, /class="time-float time-float-right"/);
-	assert.match(turnListSource, /v-if="eventTimeMs\(entry\.event\) && showEventTimeBadge\(turn, turnIndex, conversationIndex\)" class="time-float time-float-left"/);
-	assert.match(turnListSource, /class="time-float time-float-left"[^>]*>\{\{ timeBadge\(eventTimeMs\(entry\.event\), durationMsForEvent\(entry\.event\)\) \}\}/);
-	assert.match(turnListSource, /\.timed-row:hover > \.time-float\s*\{/);
 });

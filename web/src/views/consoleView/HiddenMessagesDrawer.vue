@@ -3,6 +3,7 @@ import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue';
 import {Hide, View, RefreshLeft} from '@element-plus/icons-vue';
 import {ElMessage, ElMessageBox} from 'element-plus';
 import {Api, apiError} from '../../api.js';
+import { contextResourceUrl } from '../../sessionBoundary.js';
 import ConsoleMarkdown from './ConsoleMarkdown.vue';
 import {useMessageVisibility} from './messageVisibility.js';
 const props = defineProps({conversationUuid: {type: String, default: ''}});
@@ -18,7 +19,7 @@ const previewText = computed(() => {
   return [p.text, p.content, p.arguments || p.args, p.resultText || p.result, p.preview].filter(Boolean).map(value => typeof value === 'string' ? value : JSON.stringify(value, null, 2)).join('\n\n') || JSON.stringify(p, null, 2);
 });
 const files = computed(() => Array.isArray(payload.value.attachments) ? payload.value.attachments : []);
-const fileUrl = file => file.previewUrl || file.contentUrl || file.downloadUrl || '';
+const fileUrl = file => contextResourceUrl(file.previewUrl || file.contentUrl || file.downloadUrl || '');
 const time = value => value ? new Date(value).toLocaleString('zh-CN', {hour12: false}) : '';
 function closePreview() { request++; previewId.value = ''; preview.value = null; loadingId.value = ''; }
 function updateMedia() { phone.value = media.matches; }

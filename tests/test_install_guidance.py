@@ -323,17 +323,3 @@ PAYLOAD
     assert result.returncode == 0, result.stdout + result.stderr
     assert marker.read_text(encoding="utf-8") == "1"
     assert list(Path(env["TMPDIR"]).iterdir()) == []
-
-
-def test_readme_v012_bridge_discloses_required_boundaries():
-    text = README_PATH.read_text(encoding="utf-8")
-    assert "公开 v0.1.2 用户首次升级到 v0.2.0" in text
-    assert "不要" in text and "/opt/openbear/scripts/install.sh" in text
-    assert "不能反向保护" in text
-    assert "结束正在运行的主控/Agent 任务和待回答交互" in text
-    assert "手动刷新" in text
-    assert "不会覆盖已有的激活模板或用户自定义模板" in text
-    assert "Telegram 待答交互通知默认开启" in text
-    assert "数据库未自动回退" not in text  # prose uses the clearer code/DB rollback wording below
-    assert "代码/依赖自动回滚**不会**自动用旧快照覆盖数据库" in text
-    assert "备份时间点之后的数据会丢失" in text

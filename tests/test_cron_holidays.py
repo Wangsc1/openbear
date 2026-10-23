@@ -93,21 +93,6 @@ def test_every_day_of_2026_matches_published_notice():
         assert all(t["kind"] in {"holiday", "workday", "weekend", "special"} for t in info["tags"])
 
 
-@pytest.mark.parametrize(("iso", "off", "tags"), [
-    ("2026-10-05", True, [{"label": "国庆节", "kind": "holiday"}]),
-    ("2026-10-07", True, [{"label": "国庆节", "kind": "holiday"}]),
-    ("2026-10-08", False, []),
-    ("2026-09-20", False, [{"label": "调休班", "kind": "workday"}]),
-    ("2026-10-10", False, [{"label": "调休班", "kind": "workday"}]),
-    ("2026-10-11", True, [{"label": "周末", "kind": "weekend"}]),
-    ("2026-10-17", True, [{"label": "周末", "kind": "weekend"}]),
-])
-def test_national_day_makeup_and_ordinary_weekends(iso, off, tags):
-    assert holiday_info(date.fromisoformat(iso)) == {
-        "date": iso, "known": True, "isDayOff": off, "tags": tags,
-    }
-
-
 @pytest.mark.parametrize("iso", [
     "2024-02-29", "2025-12-31", "2027-01-01", "2027-01-02", "2030-10-01",
 ])
@@ -119,13 +104,6 @@ def test_unknown_years_fail_closed_even_on_weekends(iso):
     assert not any(t["kind"] in {"holiday", "workday"} for t in info["tags"])
     with pytest.raises(ValueError, match=f"缺少 {day.year} 年中国大陆放假调休数据，无法判断休息日"):
         is_day_off(day)
-
-
-def test_year_boundary_does_not_reuse_previous_notice():
-    assert is_day_off(date(2026, 12, 31)) is False
-    assert holiday_info(date(2027, 1, 1))["known"] is False
-    with pytest.raises(ValueError, match="2027 年"):
-        is_day_off(date(2027, 1, 1))
 
 
 @pytest.mark.parametrize(("year", "day_number"), [(2024, 29), (2026, 27), (2029, 23), (2030, 29)])

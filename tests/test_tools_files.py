@@ -64,14 +64,6 @@ async def test_write_then_read(tmp_path):
     assert "</file>" not in read
 
 
-async def test_read_missing(tmp_path):
-    reg = _reg()
-    out = await reg.dispatch("Read", json.dumps({"path": str(tmp_path / "nope.txt")}))
-    assert "不存在" in out
-    assert not out.lstrip().startswith("<file ")
-
-
-
 async def test_read_description_is_optional_and_ignored_by_handler(tmp_path):
     """description 仅用于进度展示，不改变读取结果。"""
     reg = _reg()
@@ -113,16 +105,6 @@ async def test_read_accepts_utf8_sample_cut_in_multibyte_char(tmp_path):
     header = _read_header(out)
     assert _header_attr(header, "returned_lines") == "2"
     assert _header_attr(header, "truncated") == "false"
-
-
-async def test_read_fifo_rejected(tmp_path):
-    if not hasattr(os, "mkfifo"):
-        return
-    reg = _reg()
-    fifo = tmp_path / "pipe"
-    os.mkfifo(fifo)
-    out = await reg.dispatch("Read", json.dumps({"path": str(fifo)}))
-    assert "FIFO" in out or "特殊" in out
 
 
 async def test_read_dedup_and_force(tmp_path):

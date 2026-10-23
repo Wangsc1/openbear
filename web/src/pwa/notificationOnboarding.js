@@ -1,4 +1,5 @@
 import {createPushClient} from "./pushClient.js";
+import { userStorage } from '../sessionBoundary.js';
 
 export const NOTIFICATION_PROMPT_KEY = "openbear.notifications.prompt.v1";
 export const NOTIFICATION_SETTINGS_PATH = "设置 → 系统设置 → 通知";
@@ -12,12 +13,12 @@ export function createNotificationOnboarding(win, state, {
   let checking = false;
   let disposed = false;
   function seen() {
-    try { return win.localStorage.getItem(NOTIFICATION_PROMPT_KEY) !== null; }
+    try { return userStorage(win.localStorage).getItem(NOTIFICATION_PROMPT_KEY) !== null; }
     catch { return true; } // Cannot persist "once": leave the manual entry available.
   }
   function remember(choice) {
     try {
-      win.localStorage.setItem(NOTIFICATION_PROMPT_KEY, JSON.stringify({choice, at: Date.now()}));
+      userStorage(win.localStorage).setItem(NOTIFICATION_PROMPT_KEY, JSON.stringify({choice, at: Date.now()}));
       return true;
     } catch { return false; }
   }

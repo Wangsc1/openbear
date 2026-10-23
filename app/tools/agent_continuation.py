@@ -142,8 +142,7 @@ class AgentContinuationTools:
         )
         pending = await cur.fetchone() is not None
         schemas = agent_phase_tool_names(granted, managed=managed, phase=phase,
-                                         approved=approved, pending_control=pending,
-                                         ceiling=data.get("presetToolCeiling") or [],
+                                         approved=approved, ceiling=data.get("presetToolCeiling") or [],
                                          available=agent_delegation_names(self.registry))
         schemas &= set(self.registry.names(scope="agent"))
         effective = set(schemas)

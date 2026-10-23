@@ -85,20 +85,6 @@ async def test_user_interaction_select_and_prompt_use_web_callback():
     assert seen == ["select", "prompt"]
 
 
-async def test_old_user_tools_are_removed():
-    manager = UserInteractionManager(FakeBot())  # type: ignore[arg-type]
-    reg = ToolRegistry()
-    register_user_interaction_tools(reg, manager)
-
-    assert "UserInteraction" in reg.names()
-    assert "UserInteraction" in reg.names(scope="main")
-    assert "UserInteraction" not in reg.names(scope="agent")
-    for name in ("UserConfirm", "UserSelect", "UserPrompt"):
-        assert name not in reg.names()
-        out = await reg.dispatch(name, json.dumps({"title": "t", "body": "b"}))
-        assert "未知工具" in out or "unknown tool" in out
-
-
 async def test_questionnaire_schema_and_dispatch_preserve_canonical_input():
     reg = ToolRegistry()
     register_user_interaction_tools(reg, UserInteractionManager(FakeBot()))

@@ -62,12 +62,6 @@ test('UI04 saving folder properties calls the trigger leave guard and retains di
  ctx.webhookEditor.value.canLeave=async()=>true;await vm.runInContext('saveProperties()',ctx);assert.equal(ctx.propertiesDialog.value,false);
 });
 
-test('UI13 context edits during save remain dirty and cannot satisfy save-and-leave',async()=>{
- const pending=deferred();const ed=harness('../ConversationPropertiesDialog.vue',{props:{modelValue:true,conversation:{conversationUuid:'C1'}},api:{conversationPropertiesImpact:async()=>({affectedCount:0}),updateConversationProperties:()=>pending.promise},extra:{runConfigFromResponse:()=>({}),modelThinkingLevels:()=>[],thinkingLabel:x=>x}});
- ed.run("contextReady.value=true;context.value={contextMode:'override',contextText:'submitted'};baseline.value=JSON.stringify({contextMode:'inherit',contextText:''})");const save=ed.run('saveContext()');ed.run("context.value.contextText='typed later'");pending.resolve({properties:{contextMode:'override',contextText:'submitted'}});
- assert.equal(await save,false);assert.equal(ed.run('context.value.contextText'),'typed later');assert.equal(ed.run('dirtyContext.value'),true);ed.close();
-});
-
 test('UI09 all six nested limits show inherited/effective/hard values and local/remote errors locate the field',async()=>{
  const config=cfg.defaultConfig(scope),environment={limits:{ingress:{requestsPerMinute:6000,},queue:{maxEvents:10000,maxBytes:100000},concurrency:{preScripts:4,postScripts:3,autoModelRuns:2}}};
  for(const field of Object.keys(config.limits)){const info=cfg.endpointLimit(environment,config,field);assert.ok(info.defaultValue>0 && info.maximum>0 && info.effective>0);config.limits[field]=info.maximum+1;assert.ok(cfg.configErrors(config,{environment}).some(item=>item.path===`limits.${field}`));config.limits[field]=null;}

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {ref} from 'vue';
+import * as conversationGroupsTree from './conversationGroupsTree.js';
 
 const source = fs.readFileSync(new URL('./ConversationPromptDialog.vue', import.meta.url), 'utf8');
 const script = source.split('<script setup>')[1].split('</script>')[0].replace(/^import .*;\n/gm, '');
@@ -12,7 +13,7 @@ function harness({get = async id => reviewed(id), put = async () => ({updated:tr
   const props = {modelValue:true, conversation:{conversationUuid:local?'local:new':'a', title:'A', local}};
   const calls = {get:[],put:[],emit:[],messages:[]};
   let changed, unmount;
-  const ctx=vm.createContext({ref, defineProps:()=>props, defineEmits:()=>(...args)=>calls.emit.push(args),
+  const ctx=vm.createContext({...conversationGroupsTree,ref, defineProps:()=>props, defineEmits:()=>(...args)=>calls.emit.push(args),
     watch:(_get,callback)=>{changed=callback;}, onBeforeUnmount:callback=>{unmount=callback;},
     ElMessage:{success:text=>calls.messages.push(text)}, apiError:error=>String(error),
     Api:{conversationSystemPromptPreview:id=>{calls.get.push(id);return get(id);},

@@ -92,6 +92,8 @@ async def test_real_turn_new_conversations_and_independent_origin(cron_env):
     assert (await e.cron.get(123, job['id']))['job']['nextRunAt'] == job['nextRunAt']
     conversations = await many(e.db.conn, 'SELECT * FROM web_conversations')
     assert len(conversations) == 2 and all(c['folder_uuid'] == 'folder' and c['title'].startswith('[定时]') for c in conversations)
+    runs = await many(e.db.conn, 'SELECT run_id, conversation_uuid FROM cron_runs')
+    assert {(c['conversation_uuid'], c['origin_kind'], c['origin_ref']) for c in conversations} == {(r['conversation_uuid'], 'cron', r['run_id']) for r in runs}
     assert not await many(e.db.conn, 'SELECT * FROM webhook_assignments')
     assert any('Scheduled task (trusted runtime provenance)' in str(m.get('content')) for m in e.backend.seen_convos[0])
     assert (await one(e.db.conn, "SELECT COUNT(*) n FROM runtime_runs WHERE json_extract(metadata_json,'$.inputProvenance')='cron'"))['n'] == 2
@@ -232,21 +234,104 @@ async def test_http_auth_config_preview_and_statistics(cron_env):
     assert bad.status == 409
 
 
-async def test_tool_runtime_identity_and_delete_feedback(cron_env):
+@pytest.mark.parametrize('source', ['web'])
+async def test_tool_runtime_identity_and_delete_feedback(cron_env, source):
     e = cron_env; job = await create(e); result = await run(e, job)
     row = await one(e.db.conn, 'SELECT * FROM web_conversations WHERE conversation_uuid=?', (result['conversationId'],))
-    ctx = ToolRuntimeContext(conversation_uuid=row['conversation_uuid'], chat_id=row['internal_chat_id'])
+    ctx = ToolRuntimeContext(conversation_uuid=row['conversation_uuid'], chat_id=row['internal_chat_id'],
+        source=source, webhook_automatic=source == 'webhook')
     assert (await dispatch(e.cron, 'list', {}, ctx))['total'] == 1
     assert (await dispatch(e.cron, 'list', {'folders': True}, ctx))['items'][0]['id'] == 'folder'
-    with pytest.raises(CronError): await dispatch(e.cron, 'list', {'owner': 123}, ctx)
-    ctx.source = 'cron'
-    with pytest.raises(CronError): await dispatch(e.cron, 'run', {'jobId': job['id']}, ctx)
-    ctx.source = 'web'
+    with pytest.raises(CronError, match='host_identity_not_a_parameter'):
+        await dispatch(e.cron, 'create', {'owner': 123}, ctx)
+    ctx.agent_session_uuid = 'agent'
+    with pytest.raises(CronError, match='main_controller_only'):
+        await dispatch(e.cron, 'create', {}, ctx)
+    ctx.agent_session_uuid = ''
+    ctx.chat_id = 999
+    with pytest.raises(CronError, match='host_identity_required'):
+        await dispatch(e.cron, 'create', {}, ctx)
+    ctx.chat_id = row['internal_chat_id']
+    params = {'jobId': job['id'], 'expectedRevision': 1, 'requestId': 'tool-delete'}
+    with pytest.raises(CronError, match='user_confirmation_unavailable'):
+        await dispatch(e.cron, 'delete', params, ctx)
     async def feedback(payload): return {'confirmed': True, 'text': '不要删除'}
     ctx.web_confirm = feedback
-    answer = await dispatch(e.cron, 'delete', {'jobId': job['id'], 'expectedRevision': 1, 'requestId': 'tool-delete'}, ctx)
+    answer = await dispatch(e.cron, 'delete', params, ctx)
     assert answer['cancelled']
     assert (await e.cron.get(123, job['id']))['job']['enabled']
+
+
+@pytest.mark.parametrize('source', ['cron'])
+async def test_tool_manages_schedules_from_automatic_runs(cron_env, source):
+    e = cron_env
+    row = await e.server._create_web_conversation(123, folder_uuid='folder')
+    ctx = ToolRuntimeContext(conversation_uuid=row['conversation_uuid'], chat_id=row['internal_chat_id'],
+        source=source, webhook_automatic=source == 'webhook')
+    params = {'folderId': 'folder', 'name': '后续任务', 'requestId': 'follow-up',
+        'config': {'instructions': 'Only execute the isolated follow-up.', 'notifications': {'mode': 'silent'},
+                   'schedule': {'kind': 'at', 'at': iso(e.cron.clock()+60000)}}}
+    created = await dispatch(e.cron, 'create', params, ctx)
+    assert await dispatch(e.cron, 'create', params, ctx) == created
+    job = created['job']
+    updated = await dispatch(e.cron, 'update', {'jobId': job['id'], 'expectedRevision': job['revision'],
+        'requestId': 'edit-follow-up', 'name': '调整后的任务', 'config': job['config']}, ctx)
+    job = updated['job']
+    assert job['name'] == '调整后的任务'
+    for enabled in (True, False, True):
+        job = (await dispatch(e.cron, 'set_enabled', {'jobId': job['id'], 'expectedRevision': job['revision'],
+            'requestId': uuid.uuid4().hex, 'enabled': enabled}, ctx))['job']
+        assert job['enabled'] is enabled
+    accepted = await dispatch(e.cron, 'run', {'jobId': job['id'], 'expectedRevision': job['revision'],
+        'requestId': 'run-follow-up'}, ctx)
+    await asyncio.gather(*list(e.cron.tasks.values()))
+    run_id = accepted['run']['id']
+    assert (await e.cron.get_run(123, run_id))['run']['status'] == 'completed'
+    await dispatch(e.cron, 'stop', {'runId': run_id, 'requestId': 'stop-follow-up'}, ctx)
+    async def confirm(payload): return {'confirmed': True}
+    ctx.web_confirm = confirm
+    deleted = await dispatch(e.cron, 'delete', {'jobId': job['id'], 'expectedRevision': job['revision'],
+        'requestId': 'delete-follow-up'}, ctx)
+    assert deleted['job']['scheduleState'] == 'deleted'
+
+
+async def test_scheduled_turn_creates_and_executes_one_time_follow_up(cron_env):
+    e = cron_env; now = e.cron.clock()
+    params = {'folderId': 'folder', 'name': '后续一次性任务', 'enabled': True, 'requestId': 'scheduled-follow-up',
+        'config': {'instructions': 'Only execute the isolated follow-up.', 'notifications': {'mode': 'silent'},
+                   'schedule': {'kind': 'at', 'at': iso(now+5000)}}}
+    backend = FakeStreamBackend([
+        [StreamEvent(kind='tool_call', tool_calls=[ToolCall('describe', 'Cron', json.dumps({'action': 'describe'}))]),
+         StreamEvent(kind='finish', finish_reason='tool_calls')],
+        [StreamEvent(kind='tool_call', tool_calls=[ToolCall('create', 'Cron', json.dumps({'action': 'create', 'params': params}))]),
+         StreamEvent(kind='finish', finish_reason='tool_calls')],
+        [StreamEvent(kind='content', text='ok'), StreamEvent(kind='finish', finish_reason='stop')],
+    ])
+    e.server.llm_factory = FakeRunFactory(backend, context_window=128000)
+    parent = await create(e, schedule={'kind': 'at', 'at': iso(now+1000)}, totalTokensBudget=1000000)
+    e.cron.clock = lambda: now+1001
+    await e.cron.tick()
+    await asyncio.gather(*list(e.cron.tasks.values()))
+    parent_runs = (await e.cron.runs(123, {'jobId': parent['id']}))['items']
+    assert len(parent_runs) == 1 and parent_runs[0]['status'] == 'completed'
+    jobs = (await e.cron.list(123, {}))['items']
+    assert len(jobs) == 2, jobs
+    child = next(job for job in jobs if job['id'] != parent['id'])
+    assert child['enabled'] and child['config']['schedule']['kind'] == 'at'
+    assert timestamp(child['nextRunAt']) == now+5000
+    prompt = str(backend.seen_convos[0])
+    assert 'The saved task instructions define the scope.' in prompt
+    assert 'Existing tool confirmation gates and current human corrections apply.' in prompt
+    assert 'Do not create, enable or modify schedules' not in prompt
+    e.cron.clock = lambda: now+5001
+    await e.cron.tick()
+    await asyncio.gather(*list(e.cron.tasks.values()))
+    child_runs = (await e.cron.runs(123, {'jobId': child['id']}))['items']
+    assert len(child_runs) == 1 and child_runs[0]['status'] == 'completed'
+    assert child_runs[0]['conversationId'] != parent_runs[0]['conversationId']
+    assert (await e.cron.get(123, child['id']))['job']['scheduleState'] == 'exhausted'
+    await e.cron.tick()
+    assert (await e.cron.runs(123, {'jobId': child['id']}))['total'] == 1
 
 
 @pytest.mark.parametrize('phase', ['pre', 'model'])

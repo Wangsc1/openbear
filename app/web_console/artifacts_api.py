@@ -237,55 +237,55 @@ class WebAdminArtifactsMixin:
                 with contextlib.suppress(Exception):
                     await copy_task
                 raise
-            cur = await self.db.conn.execute(
-                """
-                SELECT * FROM web_artifacts
-                WHERE conversation_uuid=? AND sha256=? AND file_name=? AND deleted_at=0
-                LIMIT 1
-                """,
-                (conv_uuid, sha256_value, safe_name),
-            )
-            existing = await cur.fetchone()
-            if existing is not None:
-                with contextlib.suppress(OSError):
-                    tmp_path.unlink()
-                return self._web_artifact_public(dict(existing), conv_uuid)
+            async with self.db.write_transaction(label="web-artifact-register"):
+                cur = await self.db.conn.execute(
+                    """
+                    SELECT * FROM web_artifacts
+                    WHERE conversation_uuid=? AND sha256=? AND file_name=? AND deleted_at=0
+                    LIMIT 1
+                    """,
+                    (conv_uuid, sha256_value, safe_name),
+                )
+                existing = await cur.fetchone()
+                if existing is not None:
+                    with contextlib.suppress(OSError):
+                        tmp_path.unlink()
+                    return self._web_artifact_public(dict(existing), conv_uuid)
 
-            blob_path = self._web_artifact_blob_path(sha256_value)
-            blob_path.parent.mkdir(parents=True, exist_ok=True)
-            if blob_path.exists():
-                with contextlib.suppress(OSError):
-                    tmp_path.unlink()
-            else:
-                tmp_path.replace(blob_path)
-            artifact_uuid = str(uuid.uuid4())
-            await self.db.conn.execute(
-                """
-                INSERT INTO web_artifacts (
-                  artifact_uuid, conversation_uuid, owner_chat_id, internal_chat_id,
-                  turn_uuid, message_id, op_id, file_name, mime_type, size_bytes,
-                  sha256, storage_path, source_path, source_url, created_at, deleted_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
-                """,
-                (
-                    artifact_uuid,
-                    conv_uuid,
-                    owner_chat_id,
-                    internal_chat_id,
-                    str(turn_uuid or ""),
-                    0,
-                    str(op_id or ""),
-                    safe_name,
-                    mime_type,
-                    size,
-                    sha256_value,
-                    str(blob_path),
-                    str(source),
-                    str(source_url or ""),
-                    now_ts(),
-                ),
-            )
-            await self.db.conn.commit()
+                blob_path = self._web_artifact_blob_path(sha256_value)
+                blob_path.parent.mkdir(parents=True, exist_ok=True)
+                if blob_path.exists():
+                    with contextlib.suppress(OSError):
+                        tmp_path.unlink()
+                else:
+                    tmp_path.replace(blob_path)
+                artifact_uuid = str(uuid.uuid4())
+                await self.db.conn.execute(
+                    """
+                    INSERT INTO web_artifacts (
+                      artifact_uuid, conversation_uuid, owner_chat_id, internal_chat_id,
+                      turn_uuid, message_id, op_id, file_name, mime_type, size_bytes,
+                      sha256, storage_path, source_path, source_url, created_at, deleted_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+                    """,
+                    (
+                        artifact_uuid,
+                        conv_uuid,
+                        owner_chat_id,
+                        internal_chat_id,
+                        str(turn_uuid or ""),
+                        0,
+                        str(op_id or ""),
+                        safe_name,
+                        mime_type,
+                        size,
+                        sha256_value,
+                        str(blob_path),
+                        str(source),
+                        str(source_url or ""),
+                        now_ts(),
+                    ),
+                )
             return self._web_artifact_public(
                 {
                     "artifact_uuid": artifact_uuid,

@@ -1,0 +1,29 @@
+# Whitelist only distributable application inputs. Never send live configuration,
+# databases, local skills/MCP installations or workspace secrets to the builder.
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!README.md
+!app/
+!app/**
+!prompts/
+!prompts/*.tpl
+!web/
+!web/src/
+!web/src/**
+!web/public/
+!web/public/**
+!web/scripts/
+!web/scripts/**
+!web/dist/
+!web/dist/**
+!web/*.json
+!web/*.js
+!web/*.mjs
+!web/index.html
+!scripts/
+!scripts/container-entrypoint.sh
+**/__pycache__
+**/*.pyc
+**/node_modules

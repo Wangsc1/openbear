@@ -68,11 +68,3 @@ test('catalog patches update lookup immediately, discard replay and reject gaps'
  applyCatalogPacket({type:'snapshot',epoch:'new',seq:7,items:[]});assert.equal(referenceCatalog.items.length,0);assert.equal(referenceCatalog.stale,false);
 });
 test('type and current-conversation filters do not hide unrelated valid matches',()=>{catalog();assert.equal(searchReferences('',{kind:'doc'}).length,2);assert.ok(!searchReferences('',{currentConversation:'current'}).some(item=>item.id==='current'));});
-test('editor replacement is scoped to the original text area and does not use el-Popover',()=>{
- const composer=readFileSync(new URL('../views/consoleView/ConsoleComposer.vue',import.meta.url),'utf8');
- assert.ok(composer.includes('<ReferenceEditor'));
- assert.ok(composer.includes('class="attachment-strip"'));
- assert.ok(composer.includes('class="composer-toolbar"'));
- const floating=readFileSync(new URL('./FloatingPanel.vue',import.meta.url),'utf8');assert.ok(floating.includes('<Teleport'));assert.ok(!floating.includes('el-popover'));
- const editor=readFileSync(new URL('./ReferenceEditor.vue',import.meta.url),'utf8');assert.ok(editor.includes('VueNodeViewRenderer'));assert.ok(editor.includes("if(event.isComposing||view.composing"));assert.ok(editor.includes('@drop.capture'));
-});

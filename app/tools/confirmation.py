@@ -15,7 +15,7 @@ from dataclasses import replace
 from app.runtime.tool_result import ToolOutcome
 
 APPROVAL_ARGUMENT = "_openbearApprovalId"
-GATED_TOOLS = {"OpenBearControl", "Browser", "Cron", "Webhook"}
+GATED_TOOLS = {"OpenBearControl", "Browser", "Cron", "Webhook", "InstanceControl"}
 APPROVAL_DESCRIPTION = (
     "Only after this tool returns amendments_required: apply all user conditions, "
     "then resubmit within its approvalPolicy with approvalId here. "

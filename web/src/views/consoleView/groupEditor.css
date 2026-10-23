@@ -1,0 +1,40 @@
+.group-editor { display: grid; min-width: 0; gap: .6rem; }
+/* Same segmented control as the Agent detail tabs. */
+/* Stays reachable while the proposal card scrolls internally. */
+.group-tabs { position: sticky; top: -.85rem; z-index: 2; display: flex; gap: 3px; min-width: 0; overflow-x: auto; border: 1px solid var(--ob-border); border-radius: 11px; background: var(--ob-interaction-surface); box-shadow: inset 0 0 0 100vmax rgb(var(--ob-surface-soft-rgb) / 0.5); padding: 3px; scrollbar-width: none; }
+.group-tabs::-webkit-scrollbar { display: none; }
+.group-tabs button { position: relative; display: inline-flex; flex: 0 0 auto; max-width: 11rem; align-items: center; gap: 5px; overflow: hidden; border: 0; border-radius: 8px; background: transparent; padding: 6px 11px; color: var(--ob-text-subtle); font-size: 12px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; transition: background .15s ease, color .15s ease, box-shadow .15s ease; }
+.group-tabs button:hover { color: var(--ob-text); }
+.group-tabs button.active { background: rgb(var(--ob-surface-rgb) / 0.96); color: var(--ob-text-strong); box-shadow: var(--ob-shadow-panel); }
+.group-tabs button.has-error { color: var(--ob-danger); }
+.group-tabs button:focus-visible { outline: 2px solid var(--ob-interaction-border-strong); outline-offset: -2px; }
+.tab-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--ob-interaction-accent); }
+.tab-dot.error { background: var(--ob-danger); }
+.group-tab-panel { display: grid; min-width: 0; gap: .55rem; }
+.member-config { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr) auto; gap: .5rem; align-items: start; }
+.proposal-field { display: grid; min-width: 0; gap: .28rem; font-size: .7rem; font-weight: 650; color: var(--ob-text); }
+.proposal-field > span em { margin-left: .35rem; font-style: normal; font-weight: 400; color: var(--ob-interaction-muted); }
+.proposal-field input, .proposal-field textarea { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--ob-border); border-radius: .6rem; background: var(--ob-interaction-surface-strong); padding: .45rem .55rem; font: inherit; font-size: .78rem; font-weight: 400; line-height: 1.5; color: var(--ob-interaction-ink); outline: none; }
+.proposal-field textarea { max-height: 14rem; overflow-y: auto; resize: none; }
+.member-prompt textarea { min-height: 5.5rem; max-height: 18rem; }
+.proposal-field input:focus, .proposal-field textarea:focus { border-color: var(--ob-interaction-border-strong); box-shadow: 0 0 0 3px var(--ob-interaction-focus); }
+.proposal-field.is-edited textarea, .proposal-field.is-edited input { border-color: var(--ob-interaction-border-strong); }
+.proposal-field.has-error input, .proposal-field.has-error textarea { border-color: var(--ob-danger); }
+.proposal-field small[role="alert"] { font-size: .68rem; font-weight: 400; color: var(--ob-danger); }
+.proposal-field :deep(.el-select) { width: 100%; }
+.proposal-field :deep(.el-select__wrapper) { min-height: calc(1.5em + .9rem + 2px); border-radius: .6rem; background: var(--ob-interaction-surface-strong); box-shadow: 0 0 0 1px var(--ob-border) inset; padding: .3rem .55rem; font-size: .78rem; font-weight: 400; }
+.proposal-field :deep(.el-select__wrapper.is-focused) { box-shadow: 0 0 0 1px var(--ob-interaction-border-strong) inset, 0 0 0 3px var(--ob-interaction-focus); }
+.proposal-field :deep(.el-select__selected-item) { font-weight: 400; color: var(--ob-interaction-ink); }
+.proposal-switch { justify-items: start; }
+.proposal-switch :deep(.el-switch) { height: calc(1.5em + .9rem + 2px); }
+.field-unsupported { padding: .45rem 0; font-size: .7rem; font-weight: 400; color: var(--ob-text-muted); }
+.proposal-hint { margin: 0; font-size: .7rem; font-weight: 400; color: var(--ob-interaction-muted); }
+.rules-body { border-radius: .6rem; background: var(--ob-surface-soft); padding: .5rem .6rem; font-size: .72rem; line-height: 1.55; color: var(--ob-text-subtle); }
+@media (max-width: 640px) {
+	.member-config { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+	.group-tabs button { padding: 7px 10px; }
+}
+@media (hover: none) and (pointer: coarse) {
+	.proposal-field input, .proposal-field textarea { font-size: 16px; }
+	.group-tabs button { min-height: 2.25rem; }
+}

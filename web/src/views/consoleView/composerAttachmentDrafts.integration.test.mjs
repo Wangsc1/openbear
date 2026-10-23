@@ -66,6 +66,9 @@ function harness({conversationUuid = "conv-a", records = new Map(), fail = null,
 		ElMessage: {warning: (payload) => warnings.push(payload?.message || payload)},
 		ElMessageBox: {confirm: async () => true},
 		createOutboundSendTracker,
+		// The real 30s prepare deadline is still scheduled, but an unanswered send
+		// left by a test must not keep this process alive for 30s after it ends.
+		unrefTimeout: (fn, delay) => setTimeout(fn, delay).unref(),
 		restoreOutboundDraft,
 		saveDraftStore: (next) => {state.draftByConversation.value = next;},
 		nextTick: (fn) => {fn?.(); return Promise.resolve();},
@@ -92,7 +95,7 @@ function harness({conversationUuid = "conv-a", records = new Map(), fail = null,
 		let readingAnchor=null, conversationSwitchGeneration=0;
 		const attachmentHydrations=new Map();
 		const attachmentsByConversation=new Map();
-		const outboundSends=createOutboundSendTracker({});
+		const outboundSends=createOutboundSendTracker({scheduleTimeout:unrefTimeout});
 		${actual}`, context);
 	const run = (code) => vm.runInContext(code, context);
 	return {

@@ -1,0 +1,38 @@
+# 性能：流式回放期间上下滚动
+appId: dev.openbear.app
+---
+- launchApp:
+    stopApp: false
+- tapOn:
+    id: "back"
+    optional: true
+- tapOn:
+    id: "${IMPL}"
+- tapOn:
+    id: "conv-d8e18cc9"
+- extendedWaitUntil:
+    visible:
+      id: "row-answer"
+    timeout: 30000
+- tapOn:
+    id: "composer-input"
+- inputText: "perf"
+- tapOn:
+    id: "composer-send"
+- hideKeyboard
+- waitForAnimationToEnd:
+    timeout: 6000
+- repeat:
+    times: 8
+    commands:
+      - swipe:
+          start: 50%, 35%
+          end: 50%, 75%
+          duration: 250
+      - swipe:
+          start: 50%, 75%
+          end: 50%, 35%
+          duration: 250
+- takeScreenshot: during-stream
+- tapOn:
+    id: "back"

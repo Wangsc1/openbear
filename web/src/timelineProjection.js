@@ -201,15 +201,9 @@ function operationPayloadText(payload = {}) {
   return value;
 }
 
-export function reduceOperationFrame(oldOperation, frame) {
-  if (!frame || typeof frame !== "object" || !frame.opId) return oldOperation || null;
-  const oldRevision = Number(oldOperation?.revision || 0) || 0;
-  const revision = Number(frame.revision || 0) || oldRevision + 1;
-  if (oldOperation && revision <= oldRevision) return oldOperation;
-  const payload = frame.payload && typeof frame.payload === "object" ? frame.payload : {};
-  const oldPayload = oldOperation?.payload && typeof oldOperation.payload === "object" ? oldOperation.payload : {};
-  let nextPayload = mergeOperationPayload(oldPayload, payload);
-  if (["assistant_message", "reasoning"].includes(String(frame.opType || oldOperation?.opType || ""))) {
+function reducePayloadPatch(opType, oldPayload, payload) {
+  const nextPayload = mergeOperationPayload(oldPayload, payload);
+  if (["assistant_message", "reasoning"].includes(opType)) {
     if (Object.prototype.hasOwnProperty.call(payload, "delta") && !payload.snapshot) {
       nextPayload.textChunks = appendPayloadDelta(oldPayload, payload.delta || "");
       delete nextPayload.text;
@@ -220,6 +214,17 @@ export function reduceOperationFrame(oldOperation, frame) {
     }
     if (Object.prototype.hasOwnProperty.call(payload, "complete")) nextPayload.complete = Boolean(payload.complete);
   }
+  return nextPayload;
+}
+
+export function reduceOperationFrame(oldOperation, frame) {
+  if (!frame || typeof frame !== "object" || !frame.opId) return oldOperation || null;
+  const oldRevision = Number(oldOperation?.revision || 0) || 0;
+  const revision = Number(frame.revision || 0) || oldRevision + 1;
+  if (oldOperation && revision <= oldRevision) return oldOperation;
+  const payload = frame.payload && typeof frame.payload === "object" ? frame.payload : {};
+  const oldPayload = oldOperation?.payload && typeof oldOperation.payload === "object" ? oldOperation.payload : {};
+  const nextPayload = reducePayloadPatch(String(frame.opType || oldOperation?.opType || ""), oldPayload, payload);
   const action = String(frame.action || "");
   const inferredTerminal = ["end", "error", "cancel", "stop"].includes(action) ? (action === "error" ? "failed" : action === "cancel" || action === "stop" ? "cancelled" : "completed") : "";
   const hasPayloadStatus = Object.prototype.hasOwnProperty.call(payload, "status") && payload.status !== null && payload.status !== undefined && payload.status !== "";
@@ -251,6 +256,8 @@ export function reduceOperationFrame(oldOperation, frame) {
     updatedAtMs: Number(frame.updatedAtMs || Date.now()) || Date.now(),
     terminalAtMs,
     revision,
+    // A durable frame carries everything shown so far; live progress restarts.
+    liveRev: 0,
     status,
     lifecycle,
     internal: Boolean(oldOperation?.internal || nextPayload.internal),
@@ -324,6 +331,48 @@ export function applyOperationFrame(store, frame) {
   store.orderedOpIds = ids;
   store.lastFrameSeq = Math.max(Number(store.lastFrameSeq || 0), Number(frame.frameSeq || 0) || 0);
   return true;
+}
+
+/**
+ * Apply one live (never stored) progress update at the operation's current
+ * durable revision. ``liveRev`` orders updates within that revision; a
+ * ``snapshot`` carries the complete current payload. Returns ``gap`` when an
+ * incremental update cannot be applied safely and a snapshot is needed.
+ */
+export function applyLiveOperationUpdate(store, update) {
+  if (!store || !update || typeof update !== "object" || !update.opId) return {applied: false};
+  const byId = store.operationsById instanceof Map ? store.operationsById : new Map();
+  const current = byId.get(update.opId);
+  if (!current) return {applied: false};
+  const revision = Number(update.revision || 0) || 0;
+  if (revision !== (Number(current.revision || 0) || 0)) return {applied: false};
+  const liveRev = Number(update.liveRev || 0) || 0;
+  const currentLiveRev = Number(current.liveRev || 0) || 0;
+  if (liveRev <= currentLiveRev) return {applied: false};
+  const snapshot = String(update.action || "") === "snapshot";
+  if (!snapshot && liveRev > currentLiveRev + 1) return {applied: false, gap: true};
+  const payload = isPlainObject(update.payload) ? update.payload : {};
+  const oldPayload = isPlainObject(current.payload) ? current.payload : {};
+  const nextPayload = snapshot
+    ? {...payload}
+    : reducePayloadPatch(String(current.opType || update.opType || ""), oldPayload, payload);
+  byId.set(update.opId, {
+    ...current,
+    liveRev,
+    updatedAtMs: Number(update.updatedAtMs || current.updatedAtMs || 0) || current.updatedAtMs,
+    payload: nextPayload,
+  });
+  store.operationsById = byId;
+  return {applied: true};
+}
+
+/** Keep a newer live state when an older HTTP snapshot of the same revision arrives. */
+export function preferNewerLiveOperations(incoming = [], currentById = new Map()) {
+  return (incoming || []).map((op) => {
+    const current = op?.opId ? currentById.get(op.opId) : null;
+    if (!current || (Number(current.revision || 0) || 0) !== (Number(op.revision || 0) || 0)) return op;
+    return (Number(current.liveRev || 0) || 0) > (Number(op.liveRev || 0) || 0) ? current : op;
+  });
 }
 
 export function isTerminalOperationFrame(frame = {}) {
@@ -430,11 +479,14 @@ export function deriveOperationRunState(operations = []) {
   return {
     rootTurnRunning,
     activeRootTurnId: activeRootRun?.runRootTurnId || activeRootRun?.run_root_turn_uuid || activeRootRun?.turnId || activeRootRun?.turnUuid || "",
+    activeRunId: activeRootRun?.runId || activeRootRun?.payload?.runId || "",
     foregroundRunning,
     backgroundRunning,
     running: foregroundRunning || backgroundRunning,
     statusLabel: modelOutput ? (outputStatus.payload.statusText || statusLabel) : statusLabel,
     modelOutput,
+    // A root turn waiting on Agents or other conversations says what it waits for.
+    waitingLabel: rootTurnRunning && activeSupervisor ? String(activeSupervisor.payload?.statusText || "") : "",
     activeTurnId: activeTurn?.turnId || activeTurn?.turnUuid || "",
     activeStartedAtMs: startedAt,
     activeOperationIds: active.map((op) => op.opId).filter(Boolean),
@@ -442,13 +494,22 @@ export function deriveOperationRunState(operations = []) {
   };
 }
 
-export function withTransientIdleThinking(turnList = [], runState = {}, options = {}) {
-  if (!runState?.rootTurnRunning || !runState?.activeRootTurnId || !turnList.length) return turnList;
-  const activeRootTurnId = String(runState.activeRootTurnId).trim();
-  const targetIndex = turnList.findIndex((turn) => {
+/** Index of the turn the running controller writes to: its continuation block, else its root turn. */
+export function findActiveTurnIndex(turnList = [], runState = {}) {
+  const runId = String(runState?.activeRunId || "").trim();
+  const continuation = runId ? turnList.findIndex((turn) => (turn?.user?.continuation?.runIds || []).includes(runId)) : -1;
+  if (continuation >= 0) return continuation;
+  const activeRootTurnId = String(runState?.activeRootTurnId || "").trim();
+  if (!activeRootTurnId) return -1;
+  return turnList.findIndex((turn) => {
     const turnUuid = String(turn?.turnUuid || turn?.user?.turnUuid || turn?.user?.turn_uuid || "").trim();
     return turnUuid === activeRootTurnId;
   });
+}
+
+export function withTransientIdleThinking(turnList = [], runState = {}, options = {}) {
+  if (!runState?.rootTurnRunning || !runState?.activeRootTurnId || !turnList.length) return turnList;
+  const targetIndex = findActiveTurnIndex(turnList, runState);
   if (targetIndex < 0) return turnList;
   return turnList.map((turn, index) => {
     if (index !== targetIndex) return turn;
@@ -461,6 +522,7 @@ export function withTransientIdleThinking(turnList = [], runState = {}, options 
         kind: "live_status",
         id: "transient-run-thinking",
         status: options.modelOutput ? "正在生成工具参数" : "正在思考 …",
+        waitingLabel: options.modelOutput ? "" : String(options.waitingLabel || ""),
         modelOutput: options.modelOutput || null,
         startedAt: Number(options.modelOutput?.startedAtMs || options.startedAtMs || options.lastVisibleOutputAtMs || Date.now()) || Date.now(),
         active: true,
@@ -934,6 +996,47 @@ export function projectOperationMessages(operations = [], options = {}) {
   const byTurn = new Map();
   const currentRef = { current: "" };
   let lastVisibleTurn = null;
+  // A root that runs again after a later turn began (its Agents finished)
+  // continues as its own segment where it actually ran, matching the model
+  // context. Runs of the latest turn still merge into that turn.
+  const latestSegmentByRoot = new Map();
+  const segmentByRun = new Map();
+
+  function turnForOperation(op, opType) {
+    const key = opTurnId(op);
+    const runId = String(op.targetType === "run" || opType === "run" ? op.runId || op.targetId || "" : "").trim();
+    let segment = runId ? segmentByRun.get(runId) : null;
+    if (!segment && key) {
+      const latest = latestSegmentByRoot.get(key);
+      // runId !== key: a turn's first run carries the turn's own id. The root
+      // may be outside the loaded page; the continuation still stands alone.
+      if (opType === "run" && runId && runId !== key && lastVisibleTurn && lastVisibleTurn !== latest) {
+        const root = byTurn.get(key);
+        segment = {
+          turnUuid: `${key}:continuation:${runId}`, user: null, events: [], localStats: null, queued: null,
+          parentTurnUuid: key, internal: false, startedAt: opTsSec(op), lastAt: opTsSec(op),
+          continuation: {
+            rootTurnUuid: key, runIds: [], source: String(op.payload?.source || ""),
+            rootUserOpId: root?.user?.opId || "", rootStartedAt: root?.user?.createdAt || root?.startedAt || 0,
+            rootPreview: String(root?.user?.content || "").replace(/\s+/g, " ").trim().slice(0, 40),
+          },
+        };
+        byTurn.set(segment.turnUuid, segment);
+        turns.push(segment);
+        lastVisibleTurn = segment;
+      } else {
+        segment = latest || null;
+      }
+    }
+    if (!segment) segment = ensureOperationTurn(turns, byTurn, op, currentRef);
+    if (key) latestSegmentByRoot.set(key, segment);
+    if (runId && !segmentByRun.has(runId)) {
+      segmentByRun.set(runId, segment);
+      segment.continuation?.runIds.push(runId);
+    }
+    currentRef.current = segment.turnUuid;
+    return segment;
+  }
 
   for (const op of ops) {
     const opType = String(op.opType || "");
@@ -943,7 +1046,7 @@ export function projectOperationMessages(operations = [], options = {}) {
     // Root transcript retry rows are sourced only from the dedicated root
     // operation. Agent/task retry payloads remain inside their own panel.
     if (opType === "model_retry" && operationTaskUuid(op)) continue;
-    const turn = ensureOperationTurn(turns, byTurn, op, currentRef);
+    const turn = turnForOperation(op, opType);
     if (isVisibleContextCompaction || isVisibleUserInteraction) turn.internal = false;
     else if (op.internal || payload.internal) turn.internal = true;
     if (payload.hidden) turn.hidden = true;
@@ -1001,8 +1104,9 @@ export function projectOperationMessages(operations = [], options = {}) {
         eventCard: payload.eventCard || null,
         cronCard: payload.cronCard || null,
         cronRunId: payload.cronRunId || '',
-        recommendationCard: payload.recommendationCard || null,
-        recommendationRunId: payload.recommendationRunId || '',
+        instanceCard: payload.instanceCard || null,
+        collabCard: payload.collabCard || null,
+        collabRequestId: payload.collabRequestId || '',
         content: String(payload.text || payload.content || ""),
         ...(payload.referenceBundleId ? {referenceBundleId: payload.referenceBundleId, references: payload.references || []} : {}),
         attachments: Array.isArray(payload.attachments) ? payload.attachments : [],
@@ -1172,8 +1276,11 @@ export function projectOperationMessages(operations = [], options = {}) {
   const out = [];
   for (const turn of turns) {
     if (turn.hidden && !turn.user) continue;
-    if (turn.internal && !turn.events.length && !turn.localStats) continue;
-    if (turn.user) out.push({ ...turn.user, queuedSteering: Boolean(turn.queuedSteering || turn.user.queuedSteering) });
+    // A continuation starts its own block even before its first output, so
+    // its running state has a place at the bottom of the timeline.
+    if (turn.continuation) out.push({ id: `op-continuation-${turn.turnUuid}`, role: "user", content: "", syntheticPlaceholder: true, continuation: turn.continuation, createdAt: turn.startedAt || turn.lastAt || Math.floor(Date.now() / 1000) });
+    else if (turn.internal && !turn.events.length && !turn.localStats) continue;
+    else if (turn.user) out.push({ ...turn.user, queuedSteering: Boolean(turn.queuedSteering || turn.user.queuedSteering) });
     else if (!turn.internal && (turn.events.length || turn.localStats)) out.push({ id: `op-user-${turn.turnUuid}`, role: "user", content: "", syntheticPlaceholder: true, createdAt: turn.startedAt || turn.lastAt || Math.floor(Date.now() / 1000) });
     // Completion stats are still retained in the operations/header, but a
     // stopped first request with no model output is not an assistant reply.

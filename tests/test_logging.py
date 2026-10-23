@@ -256,7 +256,10 @@ def _fill_socket(sock):
     return filled
 
 
-@pytest.mark.parametrize('mode', ['stdout', 'stdout-buffered', 'stderr', 'frontend-file', 'ws-file'])
+# frontend-file and ws-file share _WEB_DEBUG_LOG_WRITER and the same FIFO block;
+# only the callback name differs, and each child pays the web_console import.
+# The ws-file branch below is kept in _blocked_child for manual reproduction.
+@pytest.mark.parametrize('mode', ['stdout', 'stdout-buffered', 'stderr', 'frontend-file'])
 def test_process_exits_and_loop_advances_while_sink_stays_blocked(tmp_path, mode):
     """Unlike the pre-fix repro, the parent NEVER drains/unblocks the sink."""
     left, right = socket.socketpair()

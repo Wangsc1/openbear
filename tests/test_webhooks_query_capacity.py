@@ -1,6 +1,8 @@
-"""E15: 100k isolated rows, actual HTTP query plans and bounded pagination.
+"""E15: bulk isolated rows, actual HTTP query plans and bounded pagination.
 
 Bulk SQL supplies a known capacity fixture, not ingestion/telemetry acceptance.
+The schema is never ANALYZEd, so the asserted index plans do not depend on the
+row count; the fixture only needs enough rows for multi-page results.
 Queries use the authenticated product APIs. Timings are observations, not an SLA.
 """
 import json
@@ -15,7 +17,8 @@ from tests.test_webhooks_query_business import endpoint, query, report
 
 
 async def test_E15_capacity_http_queries_and_plans(env):
-    n = 100_000
+    n = 10_000
+    senders = 100  # n // senders == 100 typed-filter matches -> 4 pages of 30
     start = 1_800_000_000_000
     env.s.clock = lambda: start + n * 1000 + 1
     created = await endpoint(env, 'capacity')
@@ -42,7 +45,7 @@ async def test_E15_capacity_http_queries_and_plans(env):
                 SELECT series_id,?,observed_at_ms/(?*1000)*(?*1000),COUNT(*),SUM(value),MIN(value),MAX(value),1,MAX(observed_at_ms),MAX(sample_id),MAX(recorded_at_ms)
                 FROM webhook_metric_samples GROUP BY series_id,observed_at_ms/(?*1000)""", (resolution, resolution, resolution, resolution))
         await conn.execute("""INSERT INTO webhook_business_records(record_id,telemetry_id,item_no,endpoint_id,record_type,observed_at_ms,fields_json)
-            SELECT printf('record-%06d',n),printf('op-%06d',n),0,?,'order_result',?+n*1000,json_object('sender',printf('sender-%04d',n%1000),'amount',n%100,'done',json(CASE WHEN n%2=0 THEN 'false' ELSE 'true' END)) FROM fixture_numbers""", (eid, start))
+            SELECT printf('record-%06d',n),printf('op-%06d',n),0,?,'order_result',?+n*1000,json_object('sender',printf('sender-%04d',n%?),'amount',n%100,'done',json(CASE WHEN n%2=0 THEN 'false' ELSE 'true' END)) FROM fixture_numbers""", (eid, start, senders))
         await conn.execute("""INSERT INTO webhook_business_fields(record_id,endpoint_id,field_name,value_type,value_text,observed_at_ms)
             SELECT record_id,endpoint_id,'sender','string',json_extract(fields_json,'$.sender'),observed_at_ms FROM webhook_business_records""")
         for field, kind in [('amount', 'number'), ('done', 'boolean')]:
@@ -79,8 +82,8 @@ async def test_E15_capacity_http_queries_and_plans(env):
     common = {'endpointId': eid, 'start': start, 'end': start + n * 1000}
     overview = await measured('overview', 'overview', **common)
     assert overview['overview']['accepted'] == n
-    metrics = await measured('metric-time-range', 'metrics', **{**common, 'start': start + 90_000 * 1000})
-    assert metrics['metrics'][0]['count'] == 10_000 and metrics['metrics'][0]['sum'] == 10_000
+    metrics = await measured('metric-time-range', 'metrics', **{**common, 'start': start + (n - n // 10) * 1000})
+    assert metrics['metrics'][0]['count'] == n // 10 and metrics['metrics'][0]['sum'] == n // 10
     seen = []
     cursor = None
     for page in range(4):
@@ -88,11 +91,11 @@ async def test_E15_capacity_http_queries_and_plans(env):
             filters=json.dumps({'sender': 'sender-0042', 'amount': 42, 'done': False}), **({'cursor': cursor} if cursor else {}))
         seen.extend(r['recordId'] for r in result['items'])
         cursor = result['nextCursor']
-    assert cursor is None and seen == [f'record-{i:06}' for i in range(42, n, 1000)]
+    assert cursor is None and seen == [f'record-{i:06}' for i in range(42, n, senders)]
     ranking = await measured('numeric-ranking', 'ranking', **common, field='amount', limit=100)
-    assert len(ranking['items']) == 100 and all(r['count'] == 1000 for r in ranking['items'])
-    events = await measured('event-queue-time-range', 'events', **{**common, 'start': start + 99_000 * 1000}, state='eligible', limit=100)
-    assert [r['eventId'] for r in events['items']] == [f'event-{i:06}' for i in range(99_000, 99_100)]
+    assert len(ranking['items']) == 100 and all(r['count'] == n // 100 for r in ranking['items'])
+    events = await measured('event-queue-time-range', 'events', **{**common, 'start': start + (n - 1000) * 1000}, state='eligible', limit=100)
+    assert [r['eventId'] for r in events['items']] == [f'event-{i:06}' for i in range(n - 1000, n - 900)]
     # Save the actual plans so a failure can be diagnosed without replaying load generation.
     evidence = {'environment': {'platform': platform.platform(), 'python': platform.python_version(), 'sqlite': sqlite3.sqlite_version},
         'rows': {'events': n, 'metricSamples': n, 'businessRecords': n, 'businessFields': 3*n}, 'queries': observations}

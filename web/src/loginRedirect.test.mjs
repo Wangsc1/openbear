@@ -9,7 +9,7 @@ import {createLoginFlow} from './views/loginFlow.js';
 
 const origin = 'https://bear.test';
 const location = path => new URL(path, origin);
-const targets = ['/chat?id=a%26b%2F%E4%BC%9A%E8%AF%9D', '/settings?section=system-settings&domain=notifications', '/recommendations', '/recommendations?source=push'];
+const targets = ['/chat?id=a%26b%2F%E4%BC%9A%E8%AF%9D', '/settings?section=system-settings&domain=notifications'];
 
 for (const target of targets) {
   test(`notification destination survives the real API 401 and LoginView success chain: ${target}`, async () => {
@@ -19,8 +19,8 @@ for (const target of targets) {
     // Execute the actual API interceptor, not a duplicate of its redirect logic.
     const source = readFileSync(new URL('./api.js', import.meta.url), 'utf8');
     vm.runInNewContext(source.replace(/^import .*;\n/gm, '').replace(/^export /gm, ''), {
-      axios: {create: () => ({interceptors: {response: {use(ok, error) {interceptor = error;}}}})},
-      window: win, loginUrlForLocation,
+      axios: {create: () => ({interceptors: {request:{use(){}},response: {use(ok, error) {interceptor = error;}}}})},
+      window: win, loginUrlForLocation, isGateway: () => false,
     });
     const error = {response: {status: 401}};
     await assert.rejects(interceptor(error), actual => actual === error);
@@ -35,7 +35,8 @@ for (const target of targets) {
     const callbacks = [];
     const calls = [];
     const {descriptor} = parse(readFileSync(new URL('./views/LoginView.vue', import.meta.url), 'utf8'));
-    const context = vm.createContext({...Vue, window: win, loginSuccessTarget, onBeforeUnmount() {},
+    const context = vm.createContext({...Vue, window: win, loginSuccessTarget, onBeforeUnmount() {}, onMounted() {},
+      authMode: Vue.ref('controller'), authModeError: Vue.ref(''), loadAuthMode: async () => 'controller',
       ElMessage: {success() {}, error(message) {assert.fail(message);}},
       Api: {
         async loginStart() {calls.push('start'); return {requestUuid: 'request', expiresIn: 300};},
@@ -62,7 +63,7 @@ test('login targets reject external, ambiguous and non-whitelisted destinations'
   for (const value of ['https://evil.test/chat', '//evil.test/chat', '/\\evil.test/chat', 'javascript:alert(1)', '/api/auth/session', '/login?next=/chat', '/memory', '/%2f%2fevil.test/chat', '%2Fchat', '/chat\n?x=1', '/chat\t', 'https://bear.test/chat', 'chat?id=x']) {
     assert.equal(loginSuccessTarget(location(`/login?next=${encodeURIComponent(value)}`)), '/', value);
   }
-  for (const value of ['https://evil.test/recommendations', '//evil.test/recommendations', '/recommendations/', '/recommendations-extra', '/api/recommendations/cards', '/%72ecommendations']) {
+  for (const value of ['https://evil.test/chat', '//evil.test/chat', '/chat/', '/chat-extra', '/api/conversations', '/%63hat', '/recommendations']) {
     assert.equal(loginSuccessTarget(location(`/login?next=${encodeURIComponent(value)}`)), '/', value);
   }
   assert.equal(loginSuccessTarget(location('/login')), '/');

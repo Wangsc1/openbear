@@ -41,6 +41,53 @@ def data_dir_from_config(config: Any) -> Path:
     return db_path.parent
 
 
+# Instance deployment and the access gateway read these from the install root.
+# The 0.12 web updater did not replace them, so upgrading with it leaves them
+# out; it keeps the verified, extracted package until the next update starts.
+PACKAGE_EXTRAS = ("gateway/bin", "gateway/README.md", "Dockerfile", ".dockerignore", "docs/instances.md")
+
+
+def restore_package_extras(install_root: Path, data_dir: Path) -> list[str]:
+    """Copy missing package-only files from the retained package this install came from."""
+    missing = [rel for rel in PACKAGE_EXTRAS if not (install_root / rel).exists()]
+    extract = data_dir / "updater" / "staging" / "extract"
+    meta = install_root / "release-meta.json"
+    if not missing or not extract.is_dir() or not meta.is_file():
+        return []
+    kids = [p for p in extract.iterdir() if p.name not in {"__MACOSX", ".DS_Store"}]
+    package = extract if (extract / "app").is_dir() else kids[0] if len(kids) == 1 and kids[0].is_dir() else None
+    try:
+        same_package = package is not None and (package / "release-meta.json").read_bytes() == meta.read_bytes()
+    except OSError:
+        same_package = False
+    if not same_package:
+        return []
+    restored = []
+    for rel in missing:
+        src, dest = package / rel, install_root / rel
+        if not (src.is_dir() or src.is_file()):
+            continue
+        tmp = dest.with_name(f".{dest.name}.restore-{uuid.uuid4().hex}")
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_dir():
+                shutil.copytree(src, tmp)
+            else:
+                shutil.copy2(src, tmp)
+            tmp.rename(dest)
+        except OSError:
+            log.exception("补齐发行包文件失败", 路径=rel)
+            if tmp.is_dir():
+                shutil.rmtree(tmp, ignore_errors=True)
+            else:
+                tmp.unlink(missing_ok=True)
+            continue
+        restored.append(rel)
+    if restored:
+        log.info("已从升级留存的发行包补齐文件", 文件=restored)
+    return restored
+
+
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -76,6 +123,7 @@ class UpdateService:
         self._http: httpx.AsyncClient | None = None
 
     async def start(self) -> None:
+        restore_package_extras(self.install_root, self.data_dir)
         self._http = httpx.AsyncClient(
             timeout=httpx.Timeout(20.0),
             follow_redirects=True,
@@ -108,6 +156,8 @@ class UpdateService:
             self._http = None
 
     async def _loop(self) -> None:
+        from app.lifecycle import wait_for_startup
+        await wait_for_startup(self.svc)
         try:
             await self._consume_result_and_notify()
             while True:

@@ -3,11 +3,12 @@ import { computed, onBeforeUnmount, ref, shallowRef } from "vue";
 import { installController } from "../pwa/bootstrap.js";
 import { httpsOrigin, installPresentation } from "../pwa/install.js";
 import BearLogo from "../components/BearLogo.vue";
+import { authMode } from '../authMode.js';
 
 const state = shallowRef(installController.getState());
 const unsubscribe = installController.subscribe((next) => { state.value = next; });
 onBeforeUnmount(unsubscribe);
-const presentation = computed(() => installPresentation(state.value));
+const presentation = computed(() => authMode.value !== 'controller' && !state.value.secure ? {kind: 'insecure', title: '当前浏览器不提供应用安装', detail: '可继续使用网页版。安装和后台通知是否可用由浏览器能力决定，不影响登录或实例业务。'} : installPresentation(state.value));
 const resourceLabel = computed(() => ({ idle: "尚未检查", checking: "检查中…", ready: "清单与图标可获取", error: "检查失败" })[state.value.resources]);
 void installController.check();
 function install() {
@@ -70,7 +71,7 @@ function cancelAddress() {
         </div>
       </div>
 
-      <form v-if="state.http" class="install-panel" @submit.prevent="prepareAddress">
+      <form v-if="state.http && authMode === 'controller'" class="install-panel" @submit.prevent="prepareAddress">
         <h2 class="font-semibold">已有自己的 HTTPS 入口？</h2>
         <p id="pwa-https-help" class="mt-2 text-xs leading-relaxed text-macsub">仅填写你自己可信的 OpenBear 地址。这里只解析地址，不会在后台访问、验证或替你配置 HTTPS。跳转不复制当前会话或密钥，目标入口可能需要重新登录。</p>
         <template v-if="!destination">

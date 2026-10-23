@@ -1,7 +1,5 @@
 <script setup>
 import {computed} from "vue";
-import {MoreFilled} from '@element-plus/icons-vue';
-const emit = defineEmits(['properties']);
 import AnimatedConversationTitle from "../../components/AnimatedConversationTitle.vue";
 import {conversationPathText, fmtElapsedClockMs, headerDurationParts} from "./display.js";
 import {vElapsed} from "./elapsedDirective.js";
@@ -36,10 +34,6 @@ const durationParts = computed(() => headerDurationParts(props.durationMs));
 					<h1 class="header-title block max-w-full truncate" :title="props.title">
 						<AnimatedConversationTitle :text="props.title" :identity="props.titleIdentity" />
 					</h1>
-					<el-dropdown class="header-properties-dropdown" trigger="click" @command="emit('properties')">
-						<button type="button" class="header-properties-menu" aria-label="会话菜单" aria-haspopup="menu"><el-icon><MoreFilled /></el-icon></button>
-						<template #dropdown><el-dropdown-menu><el-dropdown-item command="properties">会话属性</el-dropdown-item></el-dropdown-menu></template>
-					</el-dropdown>
 				</div>
 				<span v-if="props.running" class="header-mobile-running" role="status" aria-label="运行中" title="运行中"><i aria-hidden="true"></i></span>
 			</div>
@@ -73,17 +67,12 @@ const durationParts = computed(() => headerDurationParts(props.durationMs));
 				<dd><span class="header-number">{{ props.costText }}</span></dd>
 			</div>
 		</dl>
-		<div class="header-mobile-recommendations"><slot name="mobile-recommendations"/></div>
 		<div class="header-mobile-actions"><slot name="mobile-actions"/></div>
 	</header>
 </template>
 
 <style scoped>
-.header-properties-menu {display:grid;place-items:center;min-width:28px;min-height:28px;border:0;border-radius:6px;background:transparent;color:var(--ob-chat-muted);}
-.header-properties-menu:hover {background:var(--ob-hover);}
-.header-properties-menu:focus-visible {outline:2px solid var(--ob-focus);}
 .header-mobile-navigation,
-.header-mobile-recommendations,
 .header-mobile-actions,
 .header-mobile-running { display: none; }
 
@@ -199,14 +188,11 @@ const durationParts = computed(() => headerDurationParts(props.durationMs));
 	}
 
 	.header-mobile-navigation { display: flex; flex: 0 0 44px; }
-	.header-mobile-recommendations { display: flex; flex: none; align-items: center; }
-	.header-mobile-recommendations:empty { display: none; }
 	.header-mobile-actions { display: flex; flex: 0 0 88px; }
 	.header-title-stack { position: relative; padding-right: 12px; }
 	.header-subtitle { display: none; }
 	.header-title-row { flex: 1; overflow: hidden; }
 	.header-title { margin-top: 0; }
-	.header-properties-dropdown { display: none; }
 	.header-mobile-running { display: inline-flex; position: absolute; right: 0; top: 50%; transform: translateY(-50%); width: 6px; height: 6px; color: var(--ob-success); }
 	.header-mobile-running i { width: 6px; height: 6px; flex: none; border-radius: 50%; background: currentColor; }
 	.header-metrics { display: none; }

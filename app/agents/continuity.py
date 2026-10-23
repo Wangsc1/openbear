@@ -52,18 +52,19 @@ class AgentContinuityDAO:
     ) -> AgentSession:
         sid = str(uuid.uuid4())
         ts = now_ts()
-        await self._db.conn.execute(
-            """INSERT INTO rath_agent_sessions
-               (session_uuid, session_kind, openbear_session_uuid, chat_id, workflow_uuid,
-                agent_key, status, title, metadata_json, created_at, updated_at)
-               VALUES (?, 'independent', ?, ?, ?, ?, 'active', ?, ?, ?, ?)""",
-            (sid, openbear_session_uuid, chat_id, workflow_uuid, agent_key, title or agent_key,
-             json.dumps(metadata or {}, ensure_ascii=False), ts, ts),
-        )
-        await self._db.conn.commit()
-        return await self.agent_session(sid)
+        async with self._db.write_transaction(label="agent_instance_create") as conn:
+            await conn.execute(
+                """INSERT INTO rath_agent_sessions
+                   (session_uuid, session_kind, openbear_session_uuid, chat_id, workflow_uuid,
+                    agent_key, status, title, metadata_json, created_at, updated_at)
+                   VALUES (?, 'independent', ?, ?, ?, ?, 'active', ?, ?, ?, ?)""",
+                (sid, openbear_session_uuid, chat_id, workflow_uuid, agent_key, title or agent_key,
+                 json.dumps(metadata or {}, ensure_ascii=False), ts, ts),
+            )
+            # The shared reader may still be serving a pre-insert WAL snapshot.
+            return await self.agent_session(sid)
 
-    async def freeze_agent_instance(self, session_uuid: str, **values: Any) -> None:
+    async def freeze_agent_instance(self, session_uuid: str, **values: Any) -> AgentSession:
         """Set missing immutable instance metadata without discarding prior fields."""
         async with self._db.write_transaction(label="agent_instance_snapshot") as conn:
             cur = await conn.execute("SELECT metadata_json FROM rath_agent_sessions WHERE session_uuid=?", (session_uuid,))
@@ -75,6 +76,7 @@ class AgentContinuityDAO:
                 metadata.setdefault(key, value)
             await conn.execute("UPDATE rath_agent_sessions SET metadata_json=? WHERE session_uuid=?",
                                (json.dumps(metadata, ensure_ascii=False), session_uuid))
+            return await self.agent_session(session_uuid)
 
     async def adopt_legacy_agent_task(self, task_uuid: str, *, preset_tool_ceiling: list[str] | None = None) -> AgentSession:
         """Adopt exactly one terminal legacy task, retaining memory UUIDs and results."""

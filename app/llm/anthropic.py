@@ -25,6 +25,7 @@ from app.llm.base import (
 from app.llm.client import HTTPClient
 from app.llm.error_payloads import error_event, read_error
 from app.llm.events import StreamEvent, ToolCall, Usage
+from app.llm.image_limits import prepare_image_payload
 from app.llm.multimodal import text_from_content, to_anthropic_content
 from app.llm.tool_input import ToolInputTracker
 from app.logging import get_logger
@@ -33,6 +34,7 @@ from app.models.thinking import api_effort, normalize_think_level
 log = get_logger("llm.anthropic")
 
 _CACHE_EPHEMERAL = {"type": "ephemeral"}
+_CACHE_EPHEMERAL_1H = {"type": "ephemeral", "ttl": "1h"}
 FAST_MODE_BETA = "fast-mode-2026-02-01"
 
 
@@ -120,7 +122,12 @@ def _to_anthropic(messages: list[Message], *, include_thinking: bool = True) -> 
                 }],
             })
         else:  # user
-            out.append({"role": "user", "content": to_anthropic_content(m.get("content"))})
+            content = to_anthropic_content(m.get("content"))
+            # Always the block form: a cache breakpoint needs a block, and a
+            # message must keep one wire shape whether or not it carries one.
+            if isinstance(content, str) and content:
+                content = [{"type": "text", "text": content}]
+            out.append({"role": "user", "content": content})
 
     # A neutral assistant may emit several tool results in one batch. Anthropic
     # represents every result as role=user, so combine only those already-adjacent
@@ -171,12 +178,12 @@ def _to_anthropic_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, An
 # 倒数第二个 user turn 上的断点保证新一轮追加后仍能命中上一轮的前缀。
 # parrot ≥ 0.23.5 尊重客户端显式断点、不再 strip 重打，这里的位置即实际生效位置。
 
-def _inject_cache_on_block(block: dict) -> dict:
+def _inject_cache_on_block(block: dict, control: dict = _CACHE_EPHEMERAL) -> dict:
     """给单个 content block 打 ephemeral 断点(浅拷贝,不改原对象)。"""
-    return {**block, "cache_control": _CACHE_EPHEMERAL}
+    return {**block, "cache_control": dict(control)}
 
 
-def _inject_cache_on_msg(msg: dict) -> dict:
+def _inject_cache_on_msg(msg: dict, control: dict = _CACHE_EPHEMERAL) -> dict:
     """给一条 message 的 content 末 block 打断点。"""
     msg = dict(msg)
     content = msg.get("content")
@@ -187,30 +194,33 @@ def _inject_cache_on_msg(msg: dict) -> dict:
                        if isinstance(content[i], dict)
                        and content[i].get("type") not in {"thinking", "redacted_thinking"}), None)
         if target is not None:
-            content[target] = _inject_cache_on_block(dict(content[target]))
+            content[target] = _inject_cache_on_block(dict(content[target]), control)
             msg["content"] = content
     elif isinstance(content, str):
-        msg["content"] = [{"type": "text", "text": content, "cache_control": _CACHE_EPHEMERAL}]
+        msg["content"] = [{"type": "text", "text": content, "cache_control": dict(control)}]
     return msg
 
 
-def _apply_cache_breakpoints(payload: dict) -> None:
-    """原地注入 prompt cache 断点到 payload 的 system/tools/messages。"""
+def _apply_cache_breakpoints(payload: dict, control: dict = _CACHE_EPHEMERAL) -> None:
+    """原地注入 prompt cache 断点到 payload 的 system/tools/messages。
+
+    All four breakpoints share one TTL; Anthropic rejects a 1h breakpoint after a 5m one.
+    """
     # system:字符串 → list[{type:text, text:..., cache_control}];list → 末 block 打断点
     system = payload.get("system")
     if isinstance(system, str) and system:
-        payload["system"] = [{"type": "text", "text": system, "cache_control": _CACHE_EPHEMERAL}]
+        payload["system"] = [{"type": "text", "text": system, "cache_control": dict(control)}]
     elif isinstance(system, list) and system:
         blocks = [dict(b) if isinstance(b, dict) else b for b in system]
         if isinstance(blocks[-1], dict):
-            blocks[-1] = _inject_cache_on_block(blocks[-1])
+            blocks[-1] = _inject_cache_on_block(blocks[-1], control)
         payload["system"] = blocks
 
     # tools:末 block 打断点
     tools = payload.get("tools")
     if isinstance(tools, list) and tools:
         tools = [dict(t) for t in tools]
-        tools[-1] = {**tools[-1], "cache_control": _CACHE_EPHEMERAL}
+        tools[-1] = {**tools[-1], "cache_control": dict(control)}
         payload["tools"] = tools
 
     # messages:最后一条 + 倒数第二个 user turn(滚动断点,缓存全部多轮历史前缀)
@@ -219,11 +229,11 @@ def _apply_cache_breakpoints(payload: dict) -> None:
         messages = list(messages)
         last = len(messages) - 1
         if isinstance(messages[last], dict):
-            messages[last] = _inject_cache_on_msg(messages[last])
+            messages[last] = _inject_cache_on_msg(messages[last], control)
         for index in range(last - 1, -1, -1):
             message = messages[index]
             if isinstance(message, dict) and message.get("role") == "user":
-                messages[index] = _inject_cache_on_msg(message)
+                messages[index] = _inject_cache_on_msg(message, control)
                 break
         payload["messages"] = messages
 
@@ -262,11 +272,11 @@ class AnthropicBackend(LLMBackend):
                  think_level: str | None = None,
                  session_id: str | None = None,
                  service_tier: str | None = None,
-                 fast_request: Any = None) -> dict[str, Any]:
+                 fast_request: Any = None, *, model: str = "", cache_ttl: str | None = None) -> dict[str, Any]:
         level = normalize_think_level(think_level) if think_level else None
         active_tool_turn = _active_tool_turn_start(messages) is not None
         payload: dict[str, Any] = {
-            "model": None,  # 调用方填
+            "model": model or None,
             "max_tokens": max_tokens,
             "messages": _to_anthropic(messages, include_thinking=level != "off"),
             "stream": stream,
@@ -293,7 +303,8 @@ class AnthropicBackend(LLMBackend):
                 {"session_id": session_id}, separators=(",", ":"))}
         # Prompt Cache:在 system/tools/messages 上注入 ephemeral 断点。
         # parrot ≥ 0.23.5 尊重客户端显式断点,直连裸 Anthropic 时同样生效,位置即实际生效位置。
-        _apply_cache_breakpoints(payload)
+        payload = prepare_image_payload(payload, base_url=self._base, protocol=self.protocol)
+        _apply_cache_breakpoints(payload, _CACHE_EPHEMERAL_1H if cache_ttl == "1h" else _CACHE_EPHEMERAL)
         fast_body, _ = fast_request_parts(fast_request)
         return apply_fast_request_body(payload, fast_body)
 
@@ -318,6 +329,8 @@ class AnthropicBackend(LLMBackend):
             opts.get("session_id"),
             opts.get("service_tier"),
             opts.get("fast_request"),
+            model=model,
+            cache_ttl=opts.get("cache_ttl"),
         )
         payload["model"] = model
         return payload
@@ -331,7 +344,8 @@ class AnthropicBackend(LLMBackend):
         fast_request = opts.get("fast_request")
         _, fast_headers = fast_request_parts(fast_request)
         payload = self._payload(messages, system, tools, max_tokens, True,
-                                opts.get("think_level"), sid, service_tier, fast_request)
+                                opts.get("think_level"), sid, service_tier, fast_request, model=model,
+                                cache_ttl=opts.get("cache_ttl"))
         payload["model"] = model
         url = f"{self._base}/messages"
 
@@ -365,6 +379,9 @@ class AnthropicBackend(LLMBackend):
                 in_usage.cache_read_tokens = u.get("cache_read_input_tokens", 0)
                 in_usage.cache_write_tokens = u.get("cache_creation_input_tokens", 0)
             elif t == "content_block_start":
+                # Even opaque/empty-start blocks mean the request has begun
+                # producing output; a later error is not a preflight rejection.
+                yield StreamEvent(kind="output_started")
                 idx = data.get("index", 0)
                 cb = data.get("content_block") or {}
                 blocks[idx] = {"type": cb.get("type"), "id": cb.get("id", ""),
@@ -487,7 +504,8 @@ class AnthropicBackend(LLMBackend):
         fast_request = opts.get("fast_request")
         _, fast_headers = fast_request_parts(fast_request)
         payload = self._payload(messages, system, tools, max_tokens, False,
-                                opts.get("think_level"), sid, service_tier, fast_request)
+                                opts.get("think_level"), sid, service_tier, fast_request, model=model,
+                                cache_ttl=opts.get("cache_ttl"))
         payload["model"] = model
         url = f"{self._base}/messages"
         data = await self._client.post_json(

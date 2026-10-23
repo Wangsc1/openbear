@@ -2,17 +2,23 @@
 
 The selector owns no permissions, persistence, or tool execution. Callers provide
 trusted provenance and a complete request estimator; a soft target is never a
-promise about a provider's tokenizer. Tool batches remain indivisible.
+promise about a provider's tokenizer. Tool call/result shells remain paired;
+seen result bodies may become history references under required-input pressure.
 """
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
+import io
 import json
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
+
+from PIL import Image
 
 from app.agent.native_continuation import (
     sanitize_paired_messages,
@@ -25,6 +31,15 @@ from app.utils import estimate_tokens
 CONTEXT_META = "openbear_context_source"
 PINNED_KINDS = frozenset({"human", "task", "cron", "control", "decision", "required_runtime", "legacy_handoff", "summary"})
 _MEDIA_TYPES = frozenset({"image", "image_url", "input_image", "input_audio", "input_file", "audio"})
+_IMAGE_TYPES = frozenset({"image", "image_url", "input_image"})
+# User-visible inputs whose text survives as dialogue after their round leaves
+# the execution window. Tool images and runtime snapshots are not dialogue.
+_DIALOGUE_INPUT_KINDS = frozenset({"human", "task", "cron", "webhook", "control", "decision", "summary", "legacy_handoff"})
+# Must equal app.references.BUNDLE_FIELD; importing it here would be circular.
+_REFERENCE_BUNDLE = "openbear_reference_bundle"
+# Enough base64 to reach the size header of PNG/GIF/WebP and of most JPEGs.
+_IMAGE_HEAD_CHARS = 65_536
+_IMAGE_DEFAULT_TOKENS = 1_600
 
 WINDOW_SYSTEM_POLICY = """## Context window runtime
 OpenBear's sliding window pins the current execution round's original user/task instructions, current controls and confirmation exchanges, their limited immediate assistant antecedents, and the latest runtime state. Older rounds' user messages, assistant replies, summaries and decisions are optional history retained only within the recent complete-batch budget. Older records may be outside the active window but remain retrievable where recorded. No model generates a new compaction summary, and no pre-compaction memory-writing checkpoint is required. These runtime facts replace older descriptions of automatic summary compaction in this system prompt; they do not change user instructions or authorization.
@@ -68,13 +83,21 @@ def mark_source(message: Message, *, kind: str = "execution", source_id: str = "
     return message
 
 
+_NATIVE_KEYS = ("native_output_items", "reasoning", "signature")
+
+
 def neutral_context(messages: list[Message]) -> list[Message]:
     """Start a fresh protocol chain without partially rewriting opaque turns."""
     result = copy.deepcopy(messages)
     for message in result:
-        for key in ("native_output_items", "reasoning", "signature"):
+        for key in _NATIVE_KEYS:
             message.pop(key, None)
     return result
+
+
+def neutral_view(messages: list[Message]) -> list[Message]:
+    """neutral_context() for read-only use: nested values are shared, never mutate them."""
+    return [{key: value for key, value in message.items() if key not in _NATIVE_KEYS} for message in messages]
 
 
 def sanitize_window_checkpoint(messages: list[Message]) -> tuple[list[Message], int]:
@@ -112,27 +135,72 @@ def protocol_groups(messages: list[Message]) -> list[tuple[int, int]]:
     return groups
 
 
-def _text_payload(value: Any) -> tuple[Any, bool]:
+def _image_tokens_for_size(width: int, height: int) -> int:
+    # Claude's published downscale (1568px long edge, ~1.15MP) and px/750 rule.
+    # Other providers differ; real usage calibration absorbs the remainder.
+    scale = min(1.0, 1568 / max(width, height), (1_150_000 / (width * height)) ** 0.5)
+    return max(1, int(width * height * scale * scale / 750))
+
+
+@lru_cache(maxsize=4096)
+def _inline_image_tokens(head: str) -> int:
+    head = head[:len(head) - len(head) % 4]
+    try:
+        with Image.open(io.BytesIO(base64.b64decode(head))) as image:
+            return _image_tokens_for_size(*image.size)
+    except Exception:
+        return _IMAGE_DEFAULT_TOKENS
+
+
+@lru_cache(maxsize=4096)
+def _file_image_tokens(path: str) -> int:
+    try:
+        with Image.open(path) as image:
+            return _image_tokens_for_size(*image.size)
+    except Exception:
+        return _IMAGE_DEFAULT_TOKENS
+
+
+def _media_tokens(block: dict[str, Any]) -> int:
+    """A size-based guess for images; audio/files stay at 0 and unknown."""
+    if block.get("type") not in _IMAGE_TYPES:
+        return 0
+    source = block.get("source")
+    if isinstance(source, dict) and source.get("type") == "base64":
+        return _inline_image_tokens(str(source.get("data") or "")[:_IMAGE_HEAD_CHARS])
+    url = block.get("image_url")
+    if isinstance(url, dict):
+        url = url.get("url")
+    if isinstance(url, str) and url.startswith("data:"):
+        return _inline_image_tokens(url.partition(",")[2][:_IMAGE_HEAD_CHARS])
+    if block.get("path"):
+        return _file_image_tokens(str(block["path"]))
+    return _IMAGE_DEFAULT_TOKENS
+
+
+def _text_payload(value: Any) -> tuple[Any, bool, int]:
     if isinstance(value, dict):
         if isinstance(value.get("type"), str) and value["type"] in _MEDIA_TYPES:
             # Vision/audio cost is provider-dependent. Neither file bytes nor a
             # base64 string is a trustworthy token count.
-            return {"type": "media_size_unknown"}, True
-        out, unknown = {}, False
+            return {"type": "media_size_unknown"}, True, _media_tokens(value)
+        out, unknown, media_tokens = {}, False, 0
         for key, item in value.items():
             if key == CONTEXT_META:
                 continue
-            out[key], media = _text_payload(item)
+            out[key], media, tokens = _text_payload(item)
             unknown |= media
-        return out, unknown
+            media_tokens += tokens
+        return out, unknown, media_tokens
     if isinstance(value, list):
-        out, unknown = [], False
+        out, unknown, media_tokens = [], False, 0
         for item in value:
-            clean, media = _text_payload(item)
+            clean, media, tokens = _text_payload(item)
             out.append(clean)
             unknown |= media
-        return out, unknown
-    return value, False
+            media_tokens += tokens
+        return out, unknown, media_tokens
+    return value, False, 0
 
 
 @dataclass(frozen=True)
@@ -140,13 +208,34 @@ class InputEstimate:
     tokens: int
     media_unknown: bool = False
     request_bytes: int = 0
+    # Replayed thinking is billed differently from its visible summary and
+    # signature, so a ratio measured with it does not transfer to text without it.
+    reasoning: bool = False
+
+
+_REASONING_TYPES = frozenset({"thinking", "redacted_thinking", "reasoning"})
+
+
+def _replays_reasoning(payload: Any) -> bool:
+    items = payload.get("messages", payload.get("input")) if isinstance(payload, dict) else None
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") in _REASONING_TYPES or item.get("reasoning") or item.get("signature") \
+                or item.get("reasoning_content"):
+            return True
+        for blocks in (item.get("content"), item.get("native_output_items")):
+            if isinstance(blocks, list) and any(
+                    isinstance(block, dict) and block.get("type") in _REASONING_TYPES for block in blocks):
+                return True
+    return False
 
 
 def estimate_payload(payload: Any) -> InputEstimate:
-    clean, media_unknown = _text_payload(payload)
+    clean, media_unknown, media_tokens = _text_payload(payload)
     text = json.dumps(clean, ensure_ascii=False, separators=(",", ":"), default=str)
     request_bytes = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str).encode())
-    return InputEstimate(estimate_tokens(text), media_unknown, request_bytes)
+    return InputEstimate(estimate_tokens(text) + media_tokens, media_unknown, request_bytes, _replays_reasoning(payload))
 
 
 def estimate_request(
@@ -166,15 +255,24 @@ def estimate_request(
     return estimate_payload(payload)
 
 
+RETAIN_TOKENS_DEFAULT = 40_000
+DIALOGUE_TOKENS_DEFAULT = 10_000
+
+
 @dataclass(frozen=True)
 class WindowPolicy:
     context_window: int
     trigger_tokens: int = 0
     trigger_ratio: float = 0.7
-    retain_ratio: float = 0.15
+    # Message tokens only; system prompt and tool definitions are measured
+    # separately. Execution records fill retain_tokens, older rounds keep their
+    # visible dialogue within dialogue_tokens.
+    retain_tokens: int = RETAIN_TOKENS_DEFAULT
+    dialogue_tokens: int = DIALOGUE_TOKENS_DEFAULT
     # Request serialization/routing only; never reserve output against the
     # user-configured input compression threshold.
     max_output_tokens: int = 0
+    tool_result_artifact_tokens: int = 16_000
 
     @property
     def threshold(self) -> int:
@@ -184,10 +282,22 @@ class WindowPolicy:
         return max(0, self.trigger_tokens or int(self.context_window * self.trigger_ratio))
 
     def target(self, attempt: int = 0) -> int:
-        threshold = self.threshold
-        if not threshold:
+        if not self.threshold:
             return 0
-        return max(1, int(threshold * self.retain_ratio / (2 ** max(0, attempt))))
+        return max(1, int(self.retain_tokens) >> max(0, attempt))
+
+    def dialogue_target(self, attempt: int = 0) -> int:
+        if not self.threshold:
+            return 0
+        return max(0, int(self.dialogue_tokens)) >> max(0, attempt)
+
+
+def capped_trigger_tokens(trigger_tokens: int, context_window: int, trigger_ratio: float, cap: int) -> int:
+    """The model's compaction threshold, lowered to ``cap`` when that is smaller (0 = no cap)."""
+    threshold = WindowPolicy(context_window, trigger_tokens=trigger_tokens, trigger_ratio=trigger_ratio).threshold
+    if cap <= 0:
+        return threshold
+    return min(threshold, cap) if threshold else cap
 
 
 @dataclass(frozen=True)
@@ -198,10 +308,13 @@ class WindowSelection:
     required_groups: tuple[int, ...]
     estimate: InputEstimate
     soft_target_exceeded: bool
+    referenced_results: int = 0
+    # Removed groups whose user-visible text is still in the window.
+    dialogue_groups: tuple[int, ...] = ()
 
     @property
     def changed(self) -> bool:
-        return bool(self.removed_groups)
+        return bool(self.removed_groups or self.referenced_results)
 
 
 def _decision_exchange(call: Any, group: list[Message]) -> bool:
@@ -348,19 +461,8 @@ def sliding_required_context_groups(
         group = messages[start:end]
         if current(i) and any(_decision_exchange(call, group) for call in group[0].get("tool_calls") or []):
             required.add(i)
-    for index in anchors:
-        # Agent's complete task brief is standalone. Only current controls need
-        # local antecedents; never backfill an old Agent round's entire brief.
-        if agent and not kinds[index] & {"control", "decision"}:
-            continue
-        previous = index - 1
-        while previous >= 0 and kinds[previous] <= {"runtime", "required_runtime", "notification"}:
-            previous -= 1
-        if previous < 0:
-            continue
-        first = messages[bounds[previous][0]]
-        if first.get("role") == "assistant" and first.get("content") and (not agent or current(previous)):
-            required.add(previous)
+    # No positional antecedent pin: the message before an input is not reliably
+    # what it answers. Earlier visible dialogue is retained as its own layer.
     batches = [i for i, (start, _end) in enumerate(bounds)
                if current(i) and messages[start].get("tool_calls")]
     if latest_batches > 0 and batches:
@@ -371,15 +473,104 @@ def sliding_required_context_groups(
     return required
 
 
+def _tool_result_reference(message: Message, call: Any, *, agent: bool) -> Message | None:
+    """A derived request view, never a rewrite of the archived execution event.
+
+    Owners archive and bind sources before selection. Without a durable source
+    identity there is no honest retrieval locator, so keep the body intact.
+    """
+    source = source_of(message)
+    event_id = str(source.get("id") or "")
+    if (not event_id or source.get("tool_result_reference")
+            or source.get("kind") in PINNED_KINDS | {"runtime"}):
+        return None
+    name = str(call.get("name") if isinstance(call, dict) else call.name)
+    body = message.get("content")
+    text = body if isinstance(body, str) else json.dumps(body, ensure_ascii=False, separators=(",", ":"), default=str)
+    history = "AgentHistory" if agent else "History"
+    arguments = {"action": "read_event", "eventId": event_id}
+    if not agent:
+        arguments["source"] = "execution"
+    content = (
+        f"[Historical tool result referenced: tool={name}; tool_call_id={message.get('tool_call_id')}; "
+        f"original size={len(text)} characters / {len(text.encode())} UTF-8 bytes. "
+        "The model has already seen this result. Its original body remains in execution history; "
+        f"retrieve with {history}({json.dumps(arguments, ensure_ascii=False, separators=(',', ':'))}). "
+        "Follow nextOffset if hasMore. This reference is not the result body.]"
+    )
+    # A tiny result is more useful and cheaper than its retrieval instructions.
+    if len(content) >= len(text):
+        return None
+    result = copy.deepcopy(message)
+    result["content"] = content
+    digest = hashlib.sha256(content.encode()).hexdigest()
+    mark_source(result, kind=str(source.get("kind") or "execution"),
+                source_id=f"{event_id}/tool-reference:{digest}", derived_from=event_id,
+                message_id=0, reference_only=False, tool_result_reference=True)
+    return result
+
+
+def _projection(message: Message, tag: str) -> Message:
+    """A derived copy with its own source identity; request overlays keyed by
+    the original identity (reference bodies) no longer apply to it."""
+    source = source_of(message)
+    event_id = str(source.get("id") or "")
+    body = {key: value for key, value in message.items() if key != CONTEXT_META}
+    digest = hashlib.sha256(json.dumps(
+        serialize_messages([body]), ensure_ascii=False, sort_keys=True, default=str,
+    ).encode()).hexdigest()
+    result = {**body, CONTEXT_META: dict(source)}
+    return mark_source(result, kind=str(source.get("kind") or "execution"),
+                       source_id=f"{event_id}/{tag}:{digest}", derived_from=event_id,
+                       message_id=0, reference_only=False, dialogue_projection=True)
+
+
+def _reference_marker(message: Message) -> Message:
+    """An earlier round keeps the reference links it was written with, not the bodies."""
+    if (message.get("role") != "user" or not message.get(_REFERENCE_BUNDLE)
+            or not source_of(message).get("id")):
+        return message
+    return _projection({key: value for key, value in message.items() if key != _REFERENCE_BUNDLE},
+                       "reference-marker")
+
+
+def _dialogue_items(group: list[Message]) -> list[Message]:
+    """The user-visible part of a removed group: inputs, assistant text and
+    confirmation exchanges. Tool calls and results are execution records."""
+    first = group[0]
+    source = source_of(first)
+    if source.get("dialogue_projection"):
+        return list(group)
+    if first.get("role") == "user":
+        return [first] if source.get("kind") in _DIALOGUE_INPUT_KINDS else []
+    if first.get("role") != "assistant":
+        return []
+    if not first.get("tool_calls"):
+        return [first] if first.get("content") else []
+    calls = [call for call in first["tool_calls"] if _decision_exchange(call, group)]
+    if len(calls) == len(first["tool_calls"]):
+        return list(group)
+    if not source.get("id") or (not first.get("content") and not calls):
+        return []
+    shell = {key: value for key, value in first.items() if key != "tool_calls"}
+    if calls:
+        shell["tool_calls"] = calls
+    ids = {str(call.get("id") if isinstance(call, dict) else call.id) for call in calls}
+    return [_projection(shell, "dialogue"), *(m for m in group[1:] if str(m.get("tool_call_id")) in ids)]
+
+
 def select_window(
     messages: list[Message], *, estimate: Callable[[list[Message]], InputEstimate],
-    target: int, input_ceiling: int = 0, latest_batches: int = 2,
+    target: int, input_ceiling: int = 0, latest_batches: int = 2, dialogue_target: int = 0,
     active_task_uuid: str = "", active_run_root_turn_uuid: str = "",
 ) -> WindowSelection:
-    """Pin active execution inputs, then retain recent contiguous complete batches.
+    """Pin active execution inputs, retain recent contiguous complete batches,
+    then the visible dialogue of earlier groups.
 
-    Runtime state must first be refreshed by the owner. Summary compression has
-    its own unchanged preservation policy, not this sliding-window policy.
+    Both budgets count message tokens only; the system prompt and tool
+    definitions are measured as the empty-request base. Runtime state must first
+    be refreshed by the owner. Summary compression has its own unchanged
+    preservation policy, not this sliding-window policy.
     """
     clean = neutral_context(messages)
     bounds = protocol_groups(clean)
@@ -390,18 +581,59 @@ def select_window(
         active_run_root_turn_uuid=active_run_root_turn_uuid, latest_batches=latest_batches,
     )
     required.add(len(bounds) - 1)
+    for index, (start, end) in enumerate(bounds):
+        if index not in required and end - start == 1:
+            clean[start] = _reference_marker(clean[start])
 
     def assemble(indices: set[int]) -> list[Message]:
         return [message for i in sorted(indices) for message in clean[bounds[i][0]:bounds[i][1]]]
 
     kept = set(required)
     minimum = estimate(assemble(required))
+    referenced = 0
     if input_ceiling and minimum.tokens > input_ceiling:
-        raise RequiredContextTooLarge(minimum.tokens, input_ceiling)
-    ceiling = min(target, input_ceiling) if target and input_ceiling else target or input_ceiling
+        # A required batch keeps its assistant text/calls and protocol shell,
+        # not an irrevocable pin on every parallel result's body. The same escape
+        # hatch applies to the seen batch in the recent-batch floor. A later tool
+        # batch proves a subsequent model turn; user/control arrivals alone do
+        # not prove the model has consumed the previous results. Conservatively
+        # keep the newest batch intact even if there is a final assistant reply.
+        batches = [i for i, (start, _end) in enumerate(bounds) if clean[start].get("tool_calls")]
+        newest = batches[-1] if batches else -1
+        for index in sorted(required):
+            if minimum.tokens <= input_ceiling:
+                break
+            start, end = bounds[index]
+            if index >= newest or not clean[start].get("tool_calls"):
+                continue
+            group = clean[start:end]
+            calls = {str(call.get("id") if isinstance(call, dict) else call.id): call
+                     for call in group[0]["tool_calls"]}
+            for position in range(start + 1, end):
+                call = calls[str(clean[position].get("tool_call_id"))]
+                if _decision_exchange(call, group):
+                    continue
+                replacement = _tool_result_reference(clean[position], call, agent=bool(active_task_uuid))
+                if replacement is None:
+                    continue
+                original = clean[position]
+                clean[position] = replacement
+                reduced = estimate(assemble(required))
+                if reduced.tokens >= minimum.tokens:
+                    clean[position] = original
+                    continue
+                minimum = reduced
+                referenced += 1
+                if minimum.tokens <= input_ceiling:
+                    break
+        if minimum.tokens > input_ceiling:
+            raise RequiredContextTooLarge(minimum.tokens, input_ceiling)
     # Per-group estimates provide a linear preliminary selection. The exact
     # selected request is then serialized as a whole, including system/tools.
     base = estimate([]).tokens
+    ceiling = base + target if target else 0
+    if input_ceiling:
+        ceiling = min(ceiling, input_ceiling) if ceiling else input_ceiling
     sizes = [max(0, estimate(clean[a:b]).tokens - base) for a, b in bounds]
     rough = minimum.tokens
     added: list[int] = []
@@ -419,11 +651,43 @@ def select_window(
         kept.remove(added.pop())
         selected = assemble(kept)
         measured = estimate(selected)
+    execution = measured
+
+    dialogue: dict[int, list[Message]] = {}
+    if dialogue_target:
+        limit = execution.tokens + dialogue_target
+        if input_ceiling:
+            limit = min(limit, input_ceiling)
+        rough = execution.tokens
+        for index in reversed(range(len(bounds))):
+            if index in kept:
+                continue
+            items = _dialogue_items(clean[bounds[index][0]:bounds[index][1]])
+            if not items:
+                continue
+            size = max(0, estimate(items).tokens - base)
+            if rough + size > limit:
+                break
+            dialogue[index] = items
+            rough += size
+
+    def with_dialogue() -> list[Message]:
+        return [message for i in sorted(kept | set(dialogue))
+                for message in (dialogue[i] if i in dialogue else clean[bounds[i][0]:bounds[i][1]])]
+
+    if dialogue:
+        selected = with_dialogue()
+        measured = estimate(selected)
+        while dialogue and input_ceiling and measured.tokens > input_ceiling:
+            del dialogue[min(dialogue)]
+            selected = with_dialogue()
+            measured = estimate(selected)
     if input_ceiling and measured.tokens > input_ceiling:
         raise RequiredContextTooLarge(measured.tokens, input_ceiling)
     if not validate_model_context(selected):
         raise UnsafeWindowBoundary("selected_context_not_closed")
     return WindowSelection(
         selected, tuple(sorted(kept)), tuple(sorted(set(range(len(bounds))) - kept)),
-        tuple(sorted(required)), measured, bool(target and measured.tokens > target),
+        tuple(sorted(required)), measured, bool(target and execution.tokens - base > target), referenced,
+        tuple(sorted(dialogue)),
     )

@@ -124,10 +124,10 @@ async def test_stop_joins_handoffs_and_rejects_late_callbacks(web_env, monkeypat
         entered.set()
         await release.wait()
 
-    async def paused_row(*args):
+    async def paused_row(*args, **kwargs):
         if boundary == "row" and asyncio.current_task().get_name().startswith("web-steering-handoff-"):
             await pause()
-        return await original_row(*args)
+        return await original_row(*args, **kwargs)
 
     async def paused_publish(event, **kwargs):
         if boundary == "user_publish" and event.get("type") == "user":

@@ -18,7 +18,7 @@ from app.agent.native_continuation import (
     transcript_message_fingerprint,
     validate_model_context,
 )
-from app.context.window import CONTEXT_META, mark_source, neutral_context, source_of
+from app.context.window import CONTEXT_META, mark_source, neutral_context, neutral_view, source_of
 from app.db.engine import DB, now_ts
 from app.llm.base import Message
 from app.logging import get_logger
@@ -32,6 +32,37 @@ def _json(value: Any) -> str:
 
 def _hash(value: Any) -> str:
     return hashlib.sha256(_json(value).encode()).hexdigest()
+
+
+def _json_with(value: dict[str, Any], key: str, encoded: str) -> str:
+    """Byte-identical to _json({**value, key: <decoded>}) for an already encoded member."""
+    marker = f"openbear-encoded-{uuid.uuid4().hex}"
+    return _json({**value, key: marker}).replace(_json(marker), encoded, 1)
+
+
+_ID_BATCH = 400
+
+# (event rows to append, exact empty tool-call alternates by event ID)
+ArchivePlan = tuple[list[tuple[str, str, str, str, int | None, str, str]], dict[str, str]]
+
+
+@dataclass
+class SavePlan:
+    source_message_high_water: int
+    messages_json: str
+    source_metas: list[dict[str, Any]]
+
+
+async def _existing_events(conn: Any, owner_key: str, event_ids: list[str], column: str = "fingerprint") -> dict[str, Any]:
+    found: dict[str, Any] = {}
+    for offset in range(0, len(event_ids), _ID_BATCH):
+        batch = event_ids[offset:offset + _ID_BATCH]
+        cur = await conn.execute(
+            f"SELECT event_id,{column} FROM context_execution_events WHERE owner_key=? AND event_id IN ({','.join('?' for _ in batch)})",
+            (owner_key, *batch),
+        )
+        found.update((str(row[0]), row[1]) for row in await cur.fetchall())
+    return found
 
 
 class StaleWindow(RuntimeError):
@@ -120,12 +151,17 @@ class RequestTicket:
     sequence: int
     request_id: str
     estimate_tokens: int = 0
+    # The estimated request replayed no thinking, so its usage calibrates
+    # thinking-free selections.
+    neutral: bool = False
 
 
 class WindowStore:
     def __init__(self, db: DB, owner: ContextOwner) -> None:
         self.db = db
         self.owner = owner
+        # Row ID -> (exact hashed column values, fingerprint); reused only on equality.
+        self._row_fingerprint_cache: dict[int, tuple[tuple[Any, ...], str]] = {}
 
     async def _ensure(self, conn: Any) -> None:
         owner, ts = self.owner, now_ts()
@@ -149,6 +185,12 @@ class WindowStore:
         data = dict(row)
         data["state"] = json.loads(data.pop("state_json"))
         return data
+
+    async def current_revision(self) -> int | None:
+        async with self.db.conn.transaction(label="context-state-read") as conn:
+            cur = await conn.execute("SELECT revision FROM context_windows WHERE owner_key=?", (self.owner.key,))
+            row = await cur.fetchone()
+        return int(row[0]) if row is not None else None
 
     async def _window_stamp(self, conn: Any) -> tuple[Any, ...]:
         cur = await conn.execute(
@@ -175,7 +217,16 @@ class WindowStore:
                 f"SELECT * FROM messages WHERE chat_id=? AND id IN ({','.join('?' for _ in chunk)})",
                 (self.owner.chat_id, *chunk))
             for row in await cur.fetchall():
-                fingerprints[int(row["id"])] = _hash({key: row[key] for key in row.keys() if key not in {"tokens", "compacted"}})
+                keys = [key for key in row.keys() if key not in {"tokens", "compacted"}]
+                values = tuple(row[key] for key in keys)
+                # 1 == 1.0 in Python but not in the hashed JSON.
+                values += tuple(map(type, values))
+                row_id = int(row["id"])
+                cached = self._row_fingerprint_cache.get(row_id)
+                if cached is None or cached[0] != values:
+                    cached = (values, _hash({key: row[key] for key in keys}))
+                    self._row_fingerprint_cache[row_id] = cached
+                fingerprints[row_id] = cached[1]
         return fingerprints
 
     def _boundary_conflict(self, reason: str, boundary: ControllerBoundary, actual: int,
@@ -474,13 +525,8 @@ class WindowStore:
             count = int((await cur.fetchone())[0])
             return ControllerBoundary(high_water, count, stamp, session, fingerprints, phase), additions
 
-    async def archive(self, messages: list[Message], *, controller_boundary: ControllerBoundary | None = None) -> dict[str, int]:
-        """Append previously unseen semantic units before any window can evict them.
-
-        Agent payloads are private originals, not 1000-character audit previews.
-        A source message ID can point to the Controller's existing transcript.
-        Runtime snapshots are regenerated, not accumulated as user instructions.
-        """
+    def plan_archive(self, messages: list[Message]) -> ArchivePlan:
+        """CPU-only part of archive(); computed before taking the writer."""
         payloads: list[tuple[str, str, str, str, int | None, str, str]] = []
         empty_tool_alternates: dict[str, str] = {}
         for message in messages:
@@ -490,7 +536,7 @@ class WindowStore:
             if not meta.get("id"):
                 mark_source(message, kind=str(meta.get("kind") or "execution"))
                 meta = source_of(message)
-            item = serialize_messages(neutral_context([message]))[0]
+            item = serialize_messages(neutral_view([message]))[0]
             item.pop(CONTEXT_META, None)
             # A pure tool-call assistant has no text in either representation.
             # Legacy live checkpoints used null, SQLite rows used an empty string.
@@ -506,21 +552,29 @@ class WindowStore:
             payloads.append((str(meta["id"]), str(meta.get("kind") or "execution"),
                              str(meta.get("task_uuid") or self.owner.task_uuid),
                              str(meta.get("turn_uuid") or ""), message_id, _json(body), _hash(item)))
+        return payloads, empty_tool_alternates
+
+    async def archive(self, messages: list[Message], *, controller_boundary: ControllerBoundary | None = None,
+                      plan: ArchivePlan | None = None) -> dict[str, int]:
+        """Append previously unseen semantic units before any window can evict them.
+
+        Agent payloads are private originals, not 1000-character audit previews.
+        A source message ID can point to the Controller's existing transcript.
+        Runtime snapshots are regenerated, not accumulated as user instructions.
+        """
+        payloads, empty_tool_alternates = plan if plan is not None else self.plan_archive(messages)
         async with self.db.conn.transaction(label="context-history-append") as conn:
             if controller_boundary is not None:
                 await self._check_controller_boundary(conn, controller_boundary)
             await self._ensure(conn)
             added = 0
+            existing = await _existing_events(conn, self.owner.key, list(dict.fromkeys(item[0] for item in payloads)))
             for event_id, kind, task_uuid, turn_uuid, message_id, body, fingerprint in payloads:
-                cur = await conn.execute(
-                    "SELECT fingerprint FROM context_execution_events WHERE owner_key=? AND event_id=?",
-                    (self.owner.key, event_id),
-                )
-                row = await cur.fetchone()
-                if row is not None:
-                    if row["fingerprint"] not in (fingerprint, empty_tool_alternates.get(event_id)):
+                if event_id in existing:
+                    if existing[event_id] not in (fingerprint, empty_tool_alternates.get(event_id)):
                         raise StaleWindow("source_event_changed; invalidate the edited lineage before continuing")
                     continue
+                existing[event_id] = fingerprint
                 await conn.execute(
                     """INSERT INTO context_execution_events
                        (owner_key,event_id,kind,task_uuid,turn_uuid,message_id,payload_json,fingerprint,created_at)
@@ -545,6 +599,19 @@ class WindowStore:
             controller_boundary.window_stamp = stamp
         return result
 
+    def plan_save(self, messages: list[Message], *, serialized: list[dict[str, Any]] | None = None) -> SavePlan:
+        """CPU-only part of save(); ``serialized`` must be serialize_messages(neutral_context(messages))."""
+        # The independent fallback contains neutral, protocol-closed content.
+        # Provider opaque items live solely in their existing private checkpoint.
+        clean = neutral_view(messages)
+        if not validate_model_context(clean):
+            raise ValueError("context_window_has_incomplete_tool_batch")
+        return SavePlan(
+            max((int(source_of(message).get("message_id") or 0) for message in clean), default=0),
+            _json(serialize_messages(clean) if serialized is None else serialized),
+            [meta for meta in map(source_of, clean) if meta.get("kind") != "runtime"],
+        )
+
     async def save(
         self, messages: list[Message], *, expected_revision: int,
         expected_source_revision: int, route: str, rotated: bool = False,
@@ -553,14 +620,12 @@ class WindowStore:
         controller_boundary: ControllerBoundary | None = None,
         source_message_high_water: int | None = None,
         extra_state: dict[str, Any] | None = None,
+        plan: SavePlan | None = None,
     ) -> dict[str, Any]:
-        # The independent fallback contains neutral, protocol-closed content.
-        # Provider opaque items live solely in their existing private checkpoint.
-        clean = neutral_context(messages)
-        if not validate_model_context(clean):
-            raise ValueError("context_window_has_incomplete_tool_batch")
-        state = {**(extra_state or {}), "version": 1, "messages": serialize_messages(clean),
-                 "sourceMessageHighWater": max((int(source_of(message).get("message_id") or 0) for message in clean), default=0)}
+        plan = plan if plan is not None else self.plan_save(messages)
+        state = {**(extra_state or {}), "version": 1, "sourceMessageHighWater": plan.source_message_high_water}
+        state.pop("messages", None)
+        messages_json, source_metas = plan.messages_json, plan.source_metas
         async with self.db.conn.transaction(label="context-window-save") as conn:
             if controller_boundary is not None:
                 await self._check_controller_boundary(conn, controller_boundary)
@@ -578,18 +643,11 @@ class WindowStore:
                                 "expectedRevision": expected_revision, "actualRevision": old["revision"]}
                     log.warning("context.window_conflict", reason="new_controller_message_arrived", **metadata)
                     raise StaleWindow("new_controller_message_arrived", **metadata)
-            for message in clean:
-                meta = source_of(message)
-                if meta.get("kind") == "runtime":
-                    continue
-                if not meta.get("id"):
-                    raise ContextHistoryUnavailable("unarchived_context_message")
-                cur = await conn.execute(
-                    "SELECT 1 FROM context_execution_events WHERE owner_key=? AND event_id=?",
-                    (self.owner.key, str(meta["id"])),
-                )
-                if await cur.fetchone() is None:
-                    raise ContextHistoryUnavailable("context_source_not_in_owner_history")
+            if any(not meta.get("id") for meta in source_metas):
+                raise ContextHistoryUnavailable("unarchived_context_message")
+            required = list(dict.fromkeys(str(meta["id"]) for meta in source_metas))
+            if len(await _existing_events(conn, self.owner.key, required, column="1")) != len(required):
+                raise ContextHistoryUnavailable("context_source_not_in_owner_history")
             cur = await conn.execute(
                 "SELECT COALESCE(MAX(message_id),0) AS high_water FROM context_execution_events WHERE owner_key=?",
                 (self.owner.key,))
@@ -606,7 +664,7 @@ class WindowStore:
             state["sourceMessageHighWater"] = max(
                 int(old_state.get("sourceMessageHighWater") or 0), covered,
             )
-            for key in ("calibration", "strategy"):
+            for key in ("calibration", "neutralCalibration", "strategy", "lastRequestAt"):
                 if key in old_state:
                     state.setdefault(key, old_state[key])
             changed_route = old["route_fingerprint"] != route
@@ -616,7 +674,7 @@ class WindowStore:
                 """UPDATE context_windows SET revision=revision+1,window_version=?,route_fingerprint=?,state_json=?,
                    task_uuid=?,usage_known=CASE WHEN ? THEN 0 ELSE usage_known END,
                    usage_tokens=CASE WHEN ? THEN 0 ELSE usage_tokens END,updated_at=? WHERE owner_key=?""",
-                (version, route, _json(state), self.owner.task_uuid, invalidate, invalidate, now_ts(), self.owner.key),
+                (version, route, _json_with(state, "messages", messages_json), self.owner.task_uuid, invalidate, invalidate, now_ts(), self.owner.key),
             )
             if rotated:
                 if self.owner.kind == "controller":
@@ -642,23 +700,35 @@ class WindowStore:
             if row is None or row["route_fingerprint"] != route:
                 raise StaleWindow("request_context_route_changed")
             sequence = int(row["request_sequence"]) + 1
-            await conn.execute("UPDATE context_windows SET request_sequence=? WHERE owner_key=?", (sequence, self.owner.key))
+            # lastRequestAt tells a later round whether the provider cache can still be warm.
+            await conn.execute("UPDATE context_windows SET request_sequence=?,state_json=json_set(state_json,'$.lastRequestAt',?) WHERE owner_key=?",
+                               (sequence, now_ts(), self.owner.key))
             state = json.loads(row["state_json"])
-            estimate = int(state.get("rawEstimatedInputTokens") or 0) if not state.get("mediaTokensUnknown") else 0
-            return RequestTicket(self.owner.key, int(row["window_version"]), route, sequence, str(uuid.uuid4()), estimate)
+            estimate = int(state.get("rawEstimatedInputTokens") or 0)
+            return RequestTicket(self.owner.key, int(row["window_version"]), route, sequence, str(uuid.uuid4()), estimate,
+                                 neutral=state.get("rawEstimateReasoning") is False)
 
     async def observe_usage(self, ticket: RequestTicket, *, tokens: int | None) -> bool:
         if ticket.owner_key != self.owner.key:
             return False
+        if tokens is None:
+            # A request that reported no prompt usage (e.g. rejected upstream)
+            # measured nothing; the last real measurement and its calibration
+            # stay valid. Rotation and route changes invalidate them in save().
+            return False
+        calibrations = [_json({"tokens": tokens, "estimate": ticket.estimate_tokens, "route": ticket.route,
+                               "windowVersion": ticket.window_version})]
+        if ticket.neutral and tokens and ticket.estimate_tokens:
+            calibrations.append(_json({"tokens": tokens, "estimate": ticket.estimate_tokens, "route": ticket.route}))
+        paths = ",'$.neutralCalibration',json(?)" if len(calibrations) > 1 else ""
         async with self.db.conn.transaction(label="context-request-usage") as conn:
             cur = await conn.execute(
-                """UPDATE context_windows SET usage_known=?,usage_tokens=?,usage_request_id=?,usage_request_sequence=?,updated_at=?,
-                   state_json=json_set(state_json,'$.calibration',json(?))
+                f"""UPDATE context_windows SET usage_known=?,usage_tokens=?,usage_request_id=?,usage_request_sequence=?,updated_at=?,
+                   state_json=json_set(state_json,'$.calibration',json(?){paths})
                    WHERE owner_key=? AND window_version=? AND route_fingerprint=?
                      AND usage_request_sequence<? AND request_sequence=?""",
                 (tokens is not None, max(0, int(tokens or 0)), ticket.request_id, ticket.sequence, now_ts(),
-                 _json({"tokens": tokens, "estimate": ticket.estimate_tokens, "route": ticket.route, "windowVersion": ticket.window_version}),
-                 self.owner.key, ticket.window_version, ticket.route, ticket.sequence, ticket.sequence),
+                 *calibrations, self.owner.key, ticket.window_version, ticket.route, ticket.sequence, ticket.sequence),
             )
             return cur.rowcount == 1
 
@@ -675,6 +745,27 @@ class WindowStore:
         if not validate_model_context(messages):
             raise ContextHistoryUnavailable("invalid_saved_window")
         return messages
+
+    async def archived_originals(self, event_ids: list[str]) -> dict[str, Message]:
+        """Archived model-side originals by source ID, for sources outside the saved window.
+
+        A send may archive its time-suffixed input and then fail before the
+        window is saved; rebuilding that tail from the public transcript would
+        then collide with the immutable archived fingerprint.
+        """
+        found: dict[str, Message] = {}
+        for start in range(0, len(event_ids), 400):
+            chunk = event_ids[start:start + 400]
+            cur = await self.db.conn.execute(
+                f"SELECT event_id,payload_json FROM context_execution_events WHERE owner_key=? AND event_id IN ({','.join('?' * len(chunk))})",
+                (self.owner.key, *chunk),
+            )
+            for row in await cur.fetchall():
+                payload = json.loads(row["payload_json"] or "{}")
+                # Reference-only records store no body: the public row is the original.
+                if payload:
+                    found[str(row["event_id"])] = deserialize_messages([payload])[0]
+        return found
 
     async def event_payload(self, event_id: str) -> dict[str, Any]:
         cur = await self.db.conn.execute("SELECT * FROM context_execution_events WHERE owner_key=? AND event_id=?", (self.owner.key, event_id))

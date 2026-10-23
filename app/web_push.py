@@ -12,6 +12,8 @@ import aiohttp
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from app.db.maintenance import prune_rows
+from app.lifecycle import wait_for_startup
 from app.logging import get_logger
 
 log = get_logger("web.push")
@@ -58,8 +60,12 @@ def validate_subscription(value: object) -> dict:
 
 
 class BrowserPush:
-    def __init__(self, db):
+    def __init__(self, db, *, managed=None):
         self.db = db
+        self.gateway_sessions = None
+        if managed is not None and managed.enabled and managed.auth_mode == "gateway":
+            from app.managed.push import GatewayPushSessions
+            self.gateway_sessions = GatewayPushSessions(db, managed)
         self.wake = asyncio.Event()
         self.task = None
         self.http = None
@@ -78,15 +84,27 @@ class BrowserPush:
         public = private.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
         return pem, b64url(public)
 
+    def _active_subscriptions(self):
+        if self.gateway_sessions:
+            from app.managed.push import ACTIVE_SUBSCRIPTIONS
+            return ACTIVE_SUBSCRIPTIONS
+        return _ACTIVE
+
+    def scoped_payload(self, payload: dict) -> dict:
+        if self.gateway_sessions:
+            return {**payload, "instanceId": self.gateway_sessions.settings.instance_id}
+        return payload
+
     async def subscriptions(self, owner: int) -> list[dict]:
-        rows = await (await self.db.conn.execute(_ACTIVE + " AND p.owner_chat_id=?", (int(time.time()), owner))).fetchall()
+        rows = await (await self.db.conn.execute(self._active_subscriptions() + " AND p.owner_chat_id=?", (int(time.time()), owner))).fetchall()
         return [dict(row) for row in rows]
 
     async def start(self):
         # Recover the post-operation / pre-observer gap before opening delivery.
+        if self.gateway_sessions:
+            await self.gateway_sessions.open()
         await self.recover()
-        await self.prune()
-        self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+        self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), trust_env=False)
         self.task = asyncio.create_task(self._worker(), name="browser-push-delivery")
 
     async def stop(self):
@@ -101,8 +119,7 @@ class BrowserPush:
 
     @staticmethod
     def payload(kind: str, conversation: str, key: str, *, task_title: str = "", elapsed_seconds: int | None = None) -> dict:
-        labels = {"completed": "任务已完成", "failed": "任务执行失败", "interrupted": "任务已中断", "interaction": "有一项操作需要你确认", "test": "本设备的通知测试",
-                  "recommendation": "推荐已更新"}
+        labels = {"completed": "任务已完成", "failed": "任务执行失败", "interrupted": "任务已中断", "interaction": "有一项操作需要你确认", "test": "本设备的通知测试"}
         title = " ".join(str(task_title or "").split())
         if len(title) > 80:
             title = title[:79] + "…"
@@ -116,8 +133,7 @@ class BrowserPush:
             detail += " · 耗时 " + duration
         body = f"{title}\n{detail}" if title else detail
         return {"title": "OpenBear", "body": body, "conversationUuid": conversation,
-                "tag": "openbear:" + key, "kind": kind, "createdAt": int(time.time()),
-                **({"path": "/recommendations"} if kind == "recommendation" else {})}
+                "tag": "openbear:" + key, "kind": kind, "createdAt": int(time.time())}
 
     async def enqueue(self, owner: int, conversation: str, key: str, kind: str, *, conn=None,
                       task_title: str = "", elapsed_seconds: int | None = None):
@@ -137,8 +153,8 @@ class BrowserPush:
                                                  (conversation, owner))).fetchone()
                 if row:
                     title = str(row["title"] or "").strip() or "未命名会话"
-            payload = json.dumps(self.payload(kind, conversation, key, task_title=title,
-                                             elapsed_seconds=elapsed_seconds), ensure_ascii=False)
+            payload = json.dumps(self.scoped_payload(self.payload(kind, conversation, key, task_title=title,
+                                             elapsed_seconds=elapsed_seconds)), ensure_ascii=False)
             for row in rows:
                 await target.execute("""INSERT OR IGNORE INTO web_push_deliveries
                     (subscription_id,event_key,payload_json,next_attempt_at,created_at) VALUES(?,?,?,?,?)""",
@@ -255,6 +271,9 @@ class BrowserPush:
             self.wake.set()
 
     async def prune(self) -> tuple[int, int]:
+        if self.gateway_sessions:
+            async with asyncio.timeout(0.2):
+                await self.gateway_sessions.prune()
         totals = [0, 0]
         now = int(time.time())
         for index, (table, predicate, params) in enumerate((
@@ -264,16 +283,18 @@ class BrowserPush:
                 AND o.op_id='run:'||web_push_runs.root_uuid AND o.op_type='run'
                 AND o.lifecycle IN ('active','paused','waiting_control')))""", (now - 7 * 86400,)),
         )):
-            while True:
-                async with self.db.write_transaction(label="browser-push-prune") as conn:
-                    cur = await conn.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {predicate} LIMIT 500)", params)
-                totals[index] += cur.rowcount
-                if cur.rowcount < 500:
-                    break
+            totals[index] = await prune_rows(self, table, predicate, params)
         self._prune_presence()
         return totals[1], totals[0]
 
     async def send(self, subscription: dict, payload: dict) -> int:
+        # Both queue delivery and the direct test button pass this same live
+        # authorization check. The mapping alone never authorizes a push.
+        if self.gateway_sessions:
+            await self.gateway_sessions.check(subscription, self.http)
+        return await self._send_provider(subscription, self.scoped_payload(payload))
+
+    async def _send_provider(self, subscription: dict, payload: dict) -> int:
         # Standard RFC 8291 encryption and VAPID signing; no custom crypto.
         from py_vapid import Vapid
         from pywebpush import WebPusher
@@ -296,7 +317,7 @@ class BrowserPush:
             WHERE state='pending' AND next_attempt_at<=? ORDER BY id LIMIT 1""", (now,))).fetchone()
         if not row:
             return False
-        subscription = await (await self.db.conn.execute(_ACTIVE + " AND p.id=?", (now, row["subscription_id"]))).fetchone()
+        subscription = await (await self.db.conn.execute(self._active_subscriptions() + " AND p.id=?", (now, row["subscription_id"]))).fetchone()
         status = 0
         payload = json.loads(row["payload_json"])
         self._prune_presence()
@@ -306,6 +327,8 @@ class BrowserPush:
         state = "failed"
         if not subscription:
             error = "subscription_inactive"
+            if self.gateway_sessions:
+                state = "suppressed"
         elif now - row["created_at"] >= 900:
             error = "expired"
         elif payload.get("kind") == "interaction" and not await self.interaction_pending(
@@ -323,10 +346,15 @@ class BrowserPush:
                 raise
             except Exception as exc:
                 # Store only the exception class, never endpoint/payload content.
+                from app.managed.push import GatewaySessionInactive
                 error = type(exc).__name__
-                log.warning("浏览器推送投递失败", error_type=error)
-            retry = attempts < 3 and (status == 0 or status == 429 or status >= 500)
-            state = "pending" if retry else ("accepted" if 200 <= status < 300 else "failed")
+                if isinstance(exc, GatewaySessionInactive):
+                    state, error = "suppressed", "gateway_session_inactive"
+                else:
+                    log.warning("浏览器推送投递失败", error_type=error)
+            if state != "suppressed":
+                retry = attempts < 3 and (status == 0 or status == 429 or status >= 500)
+                state = "pending" if retry else ("accepted" if 200 <= status < 300 else "failed")
         async with self.db.write_transaction(label="browser-push-delivery") as conn:
             await conn.execute("""UPDATE web_push_deliveries SET attempts=?,state=?,next_attempt_at=?,last_status=?,last_error=?
                 WHERE id=? AND state='pending'""", (attempts, state, now + 30 * attempts, status, error, row["id"]))
@@ -335,6 +363,7 @@ class BrowserPush:
         return True
 
     async def _worker(self):
+        await wait_for_startup(self)
         while True:
             self.wake.clear()
             try:

@@ -1,5 +1,7 @@
+import { activeManifestPath, MANIFEST_PATH } from "./manifest.js";
+
 // Installation capability only: no service worker, storage, API or offline cache.
-export const MANIFEST_PATH = "/manifest.webmanifest";
+export { MANIFEST_PATH };
 export const INSTALL_ICONS = Object.freeze([
   { path: "/icons/openbear-192.png", size: 192 },
   { path: "/icons/openbear-512.png", size: 512 },
@@ -66,6 +68,8 @@ function validPng(bytes, size) {
 
 export async function checkInstallResources(win, { timeoutMs = 8000 } = {}) {
   const origin = win.location.origin;
+  const manifestPath = activeManifestPath(win.document);
+  const manifestUrl = `${origin}${manifestPath}`;
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), timeoutMs);
   const get = async (path, type) => {
@@ -78,15 +82,15 @@ export async function checkInstallResources(win, { timeoutMs = 8000 } = {}) {
     return response;
   };
   try {
-    const response = await get(MANIFEST_PATH, /^application\/(?:manifest\+json|json)(?:;|$)/i);
+    const response = await get(manifestPath, /^application\/(?:manifest\+json|json)(?:;|$)/i);
     const manifest = await response.json();
-    if (!manifest || ![manifest.id, manifest.start_url, manifest.scope].every((value) => rootRelative(value, origin)) || manifest.display !== "standalone") {
+    if (!manifest || ![manifest.id, manifest.start_url, manifest.scope].every((value) => rootRelative(value, origin, manifestUrl)) || manifest.display !== "standalone") {
       throw new Error("安装清单无效：启动地址与作用域必须属于当前站点，且不绑定会话。");
     }
     for (const { path, size } of INSTALL_ICONS.slice(0, 2)) {
       if (!Array.isArray(manifest.icons) || !manifest.icons.some((icon) => {
         if (typeof icon?.src !== "string" || /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(icon.src)) return false;
-        const url = new URL(icon.src, `${origin}${MANIFEST_PATH}`);
+        const url = new URL(icon.src, manifestUrl);
         return url.href === `${origin}${path}` && icon.sizes === `${size}x${size}` && icon.type === "image/png";
       })) throw new Error("安装清单缺少所需的同源 PNG 图标。");
     }

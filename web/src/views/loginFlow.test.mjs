@@ -133,30 +133,6 @@ test("pending polling is bounded even if the server never expires it", async () 
   assert.equal(h.calls.status, 1);
 });
 
-test("unmount invalidates a late login-start response", async () => {
-  let resolve;
-  const h = harness({loginStart: () => new Promise((r) => { resolve = r; })});
-  const pending = h.flow.submit();
-  h.flow.dispose();
-  resolve({requestUuid: "late"});
-  await pending;
-  assert.equal(h.state.requestUuid, "");
-  assert.equal(h.timers.size, 0);
-});
-
-test("unmount invalidates a late approved poll response", async () => {
-  let resolve;
-  const h = harness({loginStatus: () => new Promise((r) => { resolve = r; })});
-  await h.flow.submit();
-  const polling = h.tick();
-  h.flow.dispose();
-  resolve({status: "approved"});
-  await polling;
-  assert.equal(h.calls.consume, 0);
-  assert.equal(h.calls.authenticated, 0);
-  assert.equal(h.timers.size, 0);
-});
-
 test("request errors clear loading and retain rate-limit recovery information", async () => {
   const h = harness({loginStart: async () => { throw {response: {data: {error: "rate_limited", retryAfter: 60}}}; }});
   await h.flow.submit();

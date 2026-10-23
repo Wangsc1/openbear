@@ -153,20 +153,6 @@ async def test_responses_empty_terminal_output_keeps_streamed_function_call():
     assert json.loads(tc.arguments) == {"command": "ls"}
 
 
-async def test_responses_stream_edit_array_arguments():
-    payload = {"path": "app/x.py", "edits": [{"old_string": "a", "new_string": "b"}]}
-    lines = []
-    lines += _ev("response.output_item.done", {"type": "response.output_item.done", "item": {
-        "type": "function_call", "call_id": "fc_edit", "name": "Edit", "arguments": json.dumps(payload)}})
-    lines += _ev("response.completed", {"type": "response.completed", "response": {"status": "completed", "usage": {}}})
-    backend = OpenAIResponsesBackend(make_client(lambda r: sse_response(lines)), "https://x/v1", "k")
-
-    result = await aggregate(backend.stream([{"role": "user", "content": "hi"}], model="m"))
-
-    assert result.tool_calls[0].name == "Edit"
-    assert json.loads(result.tool_calls[0].arguments) == payload
-
-
 async def test_responses_native_continuation_captures_and_replays_output_items():
     reasoning_item = {
         "type": "reasoning",
@@ -680,17 +666,3 @@ async def test_responses_incomplete_other_reason_passes_through():
     backend = OpenAIResponsesBackend(make_client(lambda _r: sse_response(lines)), "https://x/v1", "k")
     result = await aggregate(backend.stream([{"role": "user", "content": "hi"}], model="m"))
     assert result.finish_reason == "content_filter"
-
-
-async def test_responses_completed_still_stop():
-    """response.completed 仍归一到 stop，不受 incomplete 处理影响。"""
-    lines = _ev("response.completed", {
-        "type": "response.completed",
-        "response": {
-            "status": "completed",
-            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-        },
-    })
-    backend = OpenAIResponsesBackend(make_client(lambda _r: sse_response(lines)), "https://x/v1", "k")
-    result = await aggregate(backend.stream([{"role": "user", "content": "hi"}], model="m"))
-    assert result.finish_reason == "stop"

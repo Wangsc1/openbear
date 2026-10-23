@@ -158,6 +158,8 @@ def is_tool_allowed(
         return False, "global_disabled"
     if not server_config.enabled:
         return False, "server_disabled"
+    if raw_tool_name in server_config.disabled_tools:
+        return False, "tool_disabled"
     candidates = match_candidates(server_key, raw_tool_name, public_tool_name)
     if matches_any(mcp_config.deny_tools, candidates):
         return False, "global_deny"
@@ -286,6 +288,7 @@ def build_tool_meta(
         annotations=raw_tool.annotations,
         approval=approval,
         risk=risk,
+        enabled=allowed,
         filtered=not allowed,
         filter_reason=reason,
     )

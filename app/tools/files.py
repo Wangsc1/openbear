@@ -1,16 +1,19 @@
 """文件工具 —— Read / Write / Edit。
 
 文件工具参考 Claude Code 的成熟语义做了安全化：
-- Read 会拒绝设备/FIFO/socket 等可能阻塞的特殊文件，提前识别二进制/非 UTF-8 文本。
-- Read 记录当前会话/Agent scope 下的读取状态，重复读取同一范围会去重。
+- Read 支持文本和本地图片；拒绝设备/FIFO/socket 等特殊文件及其他二进制文件。
+- Read 记录当前会话/Agent scope 下的文本读取状态，重复读取同一范围会去重；图片每次返回。
 - Write/Edit 覆盖或修改既有文件前不再要求事先 Read，由工具内部读取校验。
 - Write/Edit 写前强制备份、尽量保留原编码/换行风格，并返回 diff 摘要和文件摘要。
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
+from app.runtime.tool_result import ToolOutcome
 from app.tools.base import ToolRegistry
+from app.tools.file_images import image_tool_outcome, load_image_for_tool, write_image_snapshot
 from app.tools.file_state import (
     DEFAULT_DIFF_MAX_CHARS,
     DEFAULT_FILE_STATE,
@@ -21,6 +24,7 @@ from app.tools.file_state import (
     FileStateStore,
     FileToolError,
     ReadLimits,
+    _artifact_base,
     edit_file_batch_for_tool,
     edit_file_for_tool,
     read_file_for_tool,
@@ -83,7 +87,7 @@ def make_read_tool(
     output_limit_bytes: int = DEFAULT_READ_LIMIT_BYTES,
     max_line_bytes: int = DEFAULT_READ_MAX_LINE_BYTES,
 ):
-    async def _read(args: dict[str, Any]) -> str:
+    async def _read(args: dict[str, Any]) -> str | ToolOutcome:
         path = str(args.get("path") or "")
         if not path:
             return "error: missing path"
@@ -103,6 +107,11 @@ def make_read_tool(
             max_line_bytes=max(1024, int(max_line_bytes)),
         )
         try:
+            image = await asyncio.to_thread(load_image_for_tool, path)
+            if image is not None:
+                directory = _artifact_base("images")
+                snapshot = await asyncio.to_thread(write_image_snapshot, directory, image)
+                return image_tool_outcome(image, snapshot)
             result = read_file_for_tool(
                 path,
                 offset=offset,
@@ -339,14 +348,14 @@ def register_file_tools(
     reg.file_state = store
     reg.add(
         "Read",
-        "Read text files; rejects binary/special files, supports offset/limit and force.",
+        "Read local text files or images. JPEG, PNG, GIF and WebP images (up to 20 MiB) are sent to your vision input, with resizing or compression when required by supported model limits; source files remain unchanged. Images are returned on every call without text deduplication. Other binary/special files are rejected. Text supports offset/limit and force.",
         {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "文件路径"},
-                "offset": {"type": "integer", "description": "起始行（0 基）"},
-                "limit": {"type": "integer", "description": "最多读取行数"},
-                "force": {"type": "boolean", "description": "即使文件未变化也强制重新返回内容，默认 false"},
+                "offset": {"type": "integer", "description": "文本起始行（0 基）；图片不适用"},
+                "limit": {"type": "integer", "description": "文本最多读取行数；图片不适用"},
+                "force": {"type": "boolean", "description": "文本即使未变化也强制重新返回，默认 false；图片每次均返回"},
                 "description": {"type": "string", "description": "一句话说明这次读取做什么，便于进度展示"},
             },
             "required": ["path"],

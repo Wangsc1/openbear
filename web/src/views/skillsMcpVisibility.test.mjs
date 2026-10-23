@@ -11,12 +11,22 @@ function page(name, api = {}, search = '') {
   const source = descriptor.scriptSetup.content;
   const ast = parseJs(source, { sourceType: 'module' });
   const code = ast.program.body.filter(n => n.type !== 'ImportDeclaration').map(n => source.slice(n.start, n.end)).join('\n');
-  const context = vm.createContext({ ...Vue, onMounted: () => {}, defineEmits: () => () => {}, Api: api, apiError: e => e.message,
+  const context = vm.createContext({ ...Vue, authMode: Vue.ref('controller'), onMounted: () => {}, defineEmits: () => () => {}, Api: api, apiError: e => e.message,
     ElMessage: { error: () => {}, success: () => {} }, ElMessageBox: {},
     window: { location: { search } }, URLSearchParams });
   vm.runInContext(code, context);
   return { template: descriptor.template.content, run: code => vm.runInContext(code, context) };
 }
+
+test('Skills direct navigation keeps its page instead of auto-opening a conversation', () => {
+  const app = parse(fs.readFileSync(new URL('../App.vue', import.meta.url), 'utf8')).descriptor;
+  const binding = app.template.content.match(/<ConversationTree\b[\s\S]*?:auto-open-selected="([^"]+)"/);
+  assert.ok(binding);
+  for (const active of ['skills', 'instances']) {
+    assert.equal(vm.runInNewContext(binding[1], {active}), false, active);
+  }
+  assert.equal(vm.runInNewContext(binding[1], {active: 'console'}), true);
+});
 
 test('Skills hides only disabled by default and permits explicit display and status filtering', () => {
   const p = page('Skills');

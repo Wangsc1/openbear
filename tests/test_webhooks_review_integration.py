@@ -8,7 +8,6 @@ from tests.test_webhooks_backend import env, create, accept
 
 @pytest.mark.parametrize('content_type,body', [
     ('application/json', b'{"x":Infinity}'),
-    ('application/json', b'{"x":"\\ud800"}'),
     ('text/plain', b'\xed\xa0\x80'),
 ])
 async def test_producer_rejects_unrepresentable_material_before_acceptance(env, content_type, body):

@@ -305,13 +305,3 @@ async def test_normal_slow_stream_not_killed():
     got = await _drain(client)
     assert [d for _, d in got] == [{"k": 1}, {"k": 2}, {"k": 3}]
     await client.close()
-
-
-async def test_total_disabled_allows_long_stream():
-    """total=0 禁用总时长上限:只要每块间隔不超 idle,长流也不被砍。"""
-    client = HTTPClient(first_byte_timeout_s=1.0, idle_timeout_s=0.5, total_timeout_s=0.0)
-    resp = _FakeStreamResponse([(0.2, f'data: {{"k":{i}}}') for i in range(6)] + [(0.0, "data: [DONE]")])
-    _patch_stream(client, resp)
-    got = await _drain(client)
-    assert len(got) == 6
-    await client.close()

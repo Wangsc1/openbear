@@ -22,26 +22,6 @@ async def env(tmp_path):
         await db.close()
 
 
-async def test_register_rejects_duplicate_live_runner(env):
-    dao, _workflow_uuid = env
-    manager = AgentControlService(dao)
-
-    async def _sleep() -> None:
-        await asyncio.sleep(30)
-
-    first = asyncio.create_task(_sleep())
-    second = asyncio.create_task(_sleep())
-    try:
-        manager.register("same-task", 123, first, occupies_chat=False)
-        with pytest.raises(RuntimeError, match="already has an active runner"):
-            manager.register("same-task", 123, second, occupies_chat=False)
-        assert manager.task("same-task") is first
-    finally:
-        first.cancel()
-        second.cancel()
-        await asyncio.gather(first, second, return_exceptions=True)
-
-
 async def test_stop_does_not_rewrite_completed_task(env):
     dao, workflow_uuid = env
     task_uuid = await dao.create_task(

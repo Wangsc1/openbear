@@ -98,6 +98,23 @@ async def test_cancel_mid_batch_keeps_completed_result_without_replaying_uncerta
     assert (await dao.get_task(first["task"]["taskId"])).status == "cancelled"
 
 
+async def test_continuation_resends_the_previous_round_as_an_unchanged_prefix(env):
+    """Rewriting the opening runtime snapshots would discard the provider cache."""
+    from app.llm.anthropic import _to_anthropic
+    dao, reg, backend, ctx, _ = env
+    first = await call(reg, "Agent", {"prompt": "prefix-fact", "tools": ["TaskMemory"]}, ctx)
+    previous = _to_anthropic(backend.calls[-1]["messages"])
+    assert any("当前 Agent 运行事实" in str(message) for message in previous)
+    second = await call(reg, "AgentContinue", {"to": first["agentSession"]["agentId"], "prompt": "next-round",
+                                               "tools": ["TaskMemory"]}, ctx)
+    assert second["status"] == "completed", second
+    current = _to_anthropic(backend.calls[-1]["messages"])
+    assert current[:len(previous)] == previous
+    tail = str(current[len(previous):])
+    assert "以本轮最新追加的为准" in tail and "next-round" in tail
+    assert tail.count("当前 Agent 运行事实") == 1
+
+
 async def test_new_round_keeps_control_facts_but_not_old_ack_or_native_state(env):
     dao, reg, backend, ctx, _ = env
     first = await call(reg, "Agent", {"prompt": "retained-facts", "tools": []}, ctx)
@@ -261,7 +278,7 @@ async def test_window_continuation_keeps_same_instance_memory_without_summary(en
                                                task_uuid=sid, name="persisted-before-compaction", body="exact-fact")
 
     monkeypatch.setattr(AgentTools, "_context_window_kwargs", lambda self, model: {
-        "context_window": 128000, "rollover_trigger_tokens": trigger, "window_retain_ratio": 0.15,
+        "context_window": 128000, "rollover_trigger_tokens": trigger, "window_retain_tokens": int(trigger * .15),
     })
     second = await call(reg, "AgentContinue", {"to": sid, "prompt": "只读复查。" + "已提供材料与保留约束。" * 1000,
                                                "tools": ["TaskMemory"]}, ctx)

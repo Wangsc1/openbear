@@ -3,6 +3,7 @@ import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, r
 import { ElMessage, ElMessageBox } from "element-plus";
 import {Bell} from "@lucide/vue";
 import { Api, apiError } from "../api";
+import { authMode } from '../authMode.js';
 import ModelOrderPicker from "../components/ModelOrderPicker.vue";
 import DeviceNotifications from "../pwa/DeviceNotifications.vue";
 import { settingDisplayValue, settingStorageValue, settingRangeLabel } from "./settingsDisplay.js";
@@ -12,10 +13,8 @@ const webhookSettingFailures = reactive({});
 const MdEditor = defineAsyncComponent(() => import("../components/AdaptiveMdEditor.vue"));
 const PromptTemplateEditor = defineAsyncComponent(() => import("../components/PromptTemplateEditor.vue"));
 const userMessageTemplateCompletionRoots = ['time', 'message', 'conversation', 'runtimeInfo.model', 'runtimeInfo.host', 'runtimeInfo.os', 'folderWorkspaceDir'];
-const progressReminderCompletionRoots = ['loop'];
 function templateCompletionRoots(path) {
   if (path === 'userMessageTemplate.template') return userMessageTemplateCompletionRoots;
-  if (path === 'agent.progressReminder.controllerPrompt' || path === 'agent.progressReminder.agentPrompt') return progressReminderCompletionRoots;
   return null;
 }
 
@@ -87,8 +86,14 @@ function matchesQuery(spec) {
   return [spec?.path, spec?.title, spec?.desc, spec?.effect, spec?.unit]
     .some((x) => String(x || "").toLowerCase().includes(q));
 }
+const managedMaintenancePaths = new Set(['web.enabled', 'web.host', 'web.port', 'tools.skillsDir', 'mcp.installDir', 'media.downloadDir', 'web.loginRequestTtlSeconds']);
+function settingAvailable(spec) {
+  if (!spec) return false;
+  if (authMode.value !== 'controller' && (spec.group === 'web_notifications' || /^(telegram\.|web\.(taskNotifications|interactionNotifications)\.)/.test(spec.path))) return false;
+  return !['managed', 'gateway'].includes(authMode.value) || !managedMaintenancePaths.has(spec.path);
+}
 function specsForSection(section) {
-  return (section?.paths || []).map((path) => specs.value[path]).filter(Boolean).filter(matchesQuery);
+  return (section?.paths || []).map((path) => specs.value[path]).filter(settingAvailable).filter(matchesQuery);
 }
 function revealNotificationDomain() {
   const params = new URLSearchParams(window.location.search);
@@ -107,10 +112,13 @@ function matchesDeviceNotificationQuery() {
 function domainSettingCount(domain, filtered = false) {
   return (domain?.sections || []).reduce((total, section) => {
     if (filtered) return total + specsForSection(section).length;
-    return total + (section.paths || []).filter((path) => specs.value[path]).length;
+    return total + (section.paths || []).filter((path) => settingAvailable(specs.value[path])).length;
   }, domain?.key === 'notifications' && (!filtered || matchesDeviceNotificationQuery()) ? 1 : 0);
 }
-const activeDomainInfo = computed(() => domains.value.find((domain) => domain.key === activeDomain.value) || domains.value[0] || {});
+const activeDomainInfo = computed(() => {
+  const domain = domains.value.find((domain) => domain.key === activeDomain.value) || domains.value[0] || {};
+  return ['managed', 'gateway'].includes(authMode.value) && domain.key === 'notifications' ? {...domain, desc: '本设备系统通知；实例登录和健康事件由主控管理。'} : domain;
+});
 const visibleSections = computed(() => {
   const sourceDomains = query.value.trim() ? domains.value : [activeDomainInfo.value];
   return sourceDomains.flatMap((domain) => (domain?.sections || []).map((section) => ({
@@ -122,9 +130,9 @@ const visibleSections = computed(() => {
 });
 const showDeviceNotifications = computed(() => domains.value.some(domain => domain.key === 'notifications') &&
   (query.value.trim() ? matchesDeviceNotificationQuery() : activeDomain.value === 'notifications'));
-const totalSettings = computed(() => Object.keys(specs.value || {}).length + Number(domains.value.some(domain => domain.key === 'notifications')));
-const restartCount = computed(() => Object.values(specs.value || {}).filter((s) => s.effect === "需要重启").length);
-const dirtyCount = computed(() => Object.values(specs.value || {}).filter((spec) => isDirty(spec)).length);
+const totalSettings = computed(() => Object.values(specs.value || {}).filter(settingAvailable).length + Number(domains.value.some(domain => domain.key === 'notifications')));
+const restartCount = computed(() => Object.values(specs.value || {}).filter(settingAvailable).filter((s) => s.effect === "需要重启").length);
+const dirtyCount = computed(() => Object.values(specs.value || {}).filter(settingAvailable).filter((spec) => isDirty(spec)).length);
 const resultCount = computed(() => visibleSections.value.reduce((total, section) => total + section.specs.length, Number(showDeviceNotifications.value)));
 function optionsFor(spec) {
   if (Array.isArray(spec?.choices) && spec.choices.length) return spec.choices;
@@ -176,6 +184,7 @@ function displayedValue(spec) {
   if (isPromptEditorSpec(spec) && (value == null || (spec.editor === 'prompt' && value === ""))) return builtinPrompt(spec);
   if (value === undefined || value === null || value === "") return spec.path.startsWith('webhooks.') ? (spec.path.includes('retention.') ? '不自动清理' : '使用服务器默认') : "未设置";
   if (hasOptions(spec)) return optionLabel(spec, value);
+  if (spec.path === 'contextManagement.toolResultArtifactTokens' && Number(value) === 0) return '关闭（0 token）';
   return `${settingDisplayValue(spec, value)}${spec.unit || ""}`;
 }
 function isDirty(spec) {
@@ -190,6 +199,7 @@ function inputPlaceholder(spec) {
   if (spec.sensitive) return "留空不修改，输入新值后保存";
   if (spec.nullable) return spec.path.includes('retention.') ? '留空不自动清理' : '留空使用默认值';
   if (spec.displayScale > 1) return `输入数字（${spec.unit}）`;
+  if (spec.path === 'contextManagement.toolResultArtifactTokens') return 'token 数，0 关闭';
   if (spec.kind === "int") return "整数";
   if (spec.kind === "float") return "数字";
   return "输入文本";
@@ -214,6 +224,8 @@ async function load() {
       : (specData.groups || []).map((group) => ({ ...group, sections: [group] }));
     const visiblePaths = new Set(domains.value.flatMap((domain) =>
       (domain.sections || []).flatMap((section) => section.paths || [])));
+    // Only render/save server-advertised fields: new compression settings must
+    // not be sent to an older backend before its authorized restart.
     specs.value = Object.fromEntries(Object.entries(specData.specs || {}).filter(([path]) => visiblePaths.has(path)));
     // MCP 管理页的深链只定位真实可编辑的设置项，不猜测默认分区。
     const settingPath = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("setting") || "";
@@ -250,7 +262,7 @@ function reset(spec, options = {}) {
   if (!options.keepOpen && editingPath.value === spec.path) editingPath.value = "";
 }
 async function save(spec, overrideValue = undefined) {
-  if (!spec || saving[spec.path]) return false;
+  if (!settingAvailable(spec) || saving[spec.path]) return false;
   if (spec.sensitive && !String(draft[spec.path] || "").trim()) {
     ElMessage.info("敏感字段留空表示不修改");
     reset(spec, { keepOpen: true });
@@ -366,7 +378,7 @@ async function testBrowserConnection() {
 }
 
 async function testTaskNotification() {
-  if (testingNotification.value) return;
+  if (authMode.value !== 'controller' || testingNotification.value) return;
   testingNotification.value = true;
   try {
     okOrThrow(await Api.testWebTaskNotification());
@@ -423,7 +435,7 @@ onMounted(load);
             <span class="settings-domain__icon"><Bell v-if="domain.key === 'notifications'" :size="16" aria-hidden="true" /><svg v-else class="settings-icon" viewBox="0 0 24 24" aria-hidden="true"><path :d="domainIcons[domain.key] || domainIcons.agent" /></svg></span>
             <span class="settings-domain__copy">
               <strong>{{ domain.title }}</strong>
-              <small>{{ domain.desc }}</small>
+              <small>{{ ['managed', 'gateway'].includes(authMode) && domain.key === 'notifications' ? '本设备系统通知与实例事件' : domain.desc }}</small>
             </span>
             <span class="settings-domain__count">{{ domainSettingCount(domain) }}</span>
           </button>
@@ -450,6 +462,7 @@ onMounted(load);
           </div>
         </section>
 
+        <p v-if="['managed', 'gateway'].includes(authMode)" class="text-xs text-macsub mb-3">此实例不使用 Telegram。容器重启、升级和持久化目录由主控维护；其他业务设置仍可在此管理。</p>
         <DeviceNotifications v-if="showDeviceNotifications" />
 
         <div v-if="!visibleSections.length && !showDeviceNotifications" class="settings-empty">
@@ -468,7 +481,7 @@ onMounted(load);
               <p>{{ section.specs.length }} 项设置</p>
             </div>
             <button
-              v-if="section.key === 'web_notifications'"
+              v-if="authMode === 'controller' && section.key === 'web_notifications'"
               type="button"
               class="mac-text-button"
               :class="testingNotification ? 'is-loading' : ''"
@@ -554,12 +567,12 @@ onMounted(load);
                         </button>
                       </div>
                     </template>
-                    <template v-else-if="['models.compressionModels', 'models.namingModels'].includes(spec.path)">
+                    <template v-else-if="['models.compressionModels', 'models.namingModels', 'models.suggestionModels'].includes(spec.path)">
                       <div class="summary-model-setting">
                         <ModelOrderPicker v-model="draft[spec.path]" :models="compressionModels" :disabled="saving[spec.path]"
-                          :label="spec.path === 'models.namingModels' ? '命名模型' : '摘要模型'"
-                          :empty-label="spec.path === 'models.namingModels' ? '自动选择最便宜模型' : '使用当前执行模型'"
-                          :footer-text="spec.path === 'models.namingModels' ? '按调用次数循环候选；配置候选后不追加隐藏模型。' : ''" />
+                          :label="{'models.namingModels': '命名模型', 'models.suggestionModels': '推荐模型'}[spec.path] || '摘要模型'"
+                          :empty-label="spec.path === 'models.compressionModels' ? '使用当前执行模型' : '自动选择最便宜模型'"
+                          :footer-text="{'models.namingModels': '按调用次数循环候选；配置候选后不追加隐藏模型。', 'models.suggestionModels': '按顺序尝试，前一个失败才换下一个；配置候选后不追加隐藏模型。'}[spec.path] || ''" />
                         <p v-if="spec.path === 'models.namingModels'" class="naming-model-plan">{{ namingCallPlan() }}</p>
                         <div v-if="isDirty(spec)" class="summary-model-save">
                           <button type="button" class="mac-text-button" :disabled="saving[spec.path]" @click="reset(spec)">取消更改</button>

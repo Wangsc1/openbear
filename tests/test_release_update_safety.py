@@ -262,6 +262,11 @@ def test_install_upgrade_prepares_before_stop_and_rolls_back(
 ):
     install = tmp_path / "install"
     package = make_release(tmp_path / "package")
+    (package / "gateway" / "bin").mkdir(parents=True)
+    (package / "gateway" / "bin" / "openbear-gateway-linux-amd64").write_text("new-gateway", encoding="utf-8")
+    (package / "docs").mkdir()
+    for name in ("gateway/README.md", "Dockerfile", ".dockerignore", "docs/instances.md"):
+        (package / name).write_text(f"new-{name}", encoding="utf-8")
     unit_dir = tmp_path / "systemd"
     fake_bin = tmp_path / "bin"
     events = tmp_path / "events"
@@ -288,7 +293,7 @@ def test_install_upgrade_prepares_before_stop_and_rolls_back(
     (install / "skills" / "keep").write_text("skills", encoding="utf-8")
     (install / "mcp-servers" / "keep").write_text("mcp", encoding="utf-8")
     (install / "openbear.json").write_text('{"web":{"port":18961}}', encoding="utf-8")
-    for name in ("pyproject.toml", "uv.lock", "openbear.service", "openbear.json.example", "release-meta.json"):
+    for name in ("pyproject.toml", "uv.lock", "openbear.service", "openbear.json.example", "release-meta.json", "Dockerfile"):
         (install / name).write_text(f"old-{name}", encoding="utf-8")
     (install / ".venv" / "bin").mkdir(parents=True)
     old_python = install / ".venv" / "bin" / "python"
@@ -300,8 +305,19 @@ def test_install_upgrade_prepares_before_stop_and_rolls_back(
     fake_uv.write_text(
         "#!/bin/bash\n"
         f'echo "prepare:$(cat {install}/app/marker)" >> {events}\n'
-        'mkdir -p "$(dirname "$UV_PROJECT_ENVIRONMENT")"\n'
-        f'ln -s {ROOT / ".venv"} "$UV_PROJECT_ENVIRONMENT"\n',
+        # Stand-in environment for the developer venv: the dependency import
+        # probe is recorded (it must precede stop) instead of importing the
+        # developer venv's aiogram; every other use runs the real interpreter.
+        'mkdir -p "$UV_PROJECT_ENVIRONMENT/bin"\n'
+        "cat > \"$UV_PROJECT_ENVIRONMENT/bin/python\" <<'PY'\n"
+        "#!/bin/bash\n"
+        'if [[ "${1:-}" == -c && "${2:-}" == "import aiogram, aiohttp, aiosqlite, httpx, pydantic, yaml" ]]; then\n'
+        f'    echo "deps:$(cat {install}/app/marker)" >> {events}\n'
+        "    exit 0\n"
+        "fi\n"
+        f'exec {ROOT / ".venv" / "bin" / "python"} "$@"\n'
+        "PY\n"
+        'chmod +x "$UV_PROJECT_ENVIRONMENT/bin/python"\n',
         encoding="utf-8",
     )
     fake_uv.chmod(0o755)
@@ -329,7 +345,11 @@ systemctl() {{
         *) return 0 ;;
     esac
 }}
-verify_web_ready() {{ echo "verify:$(cat {install}/app/marker)" >> {events}; return 1; }}
+verify_web_ready() {{
+    echo "verify:$(cat {install}/app/marker)" >> {events}
+    echo "extras:$(cat {install}/gateway/bin/openbear-gateway-linux-amd64):$(cat {install}/Dockerfile):$(cat {install}/docs/instances.md)" >> {events}
+    return 1
+}}
 validate_release_package {package}
 prepare_release_upgrade {package}
 [[ "$(cat {install}/app/marker)" == old ]]
@@ -347,10 +367,13 @@ fi
     assert result.returncode == 0, result.stdout + result.stderr
 
     lines = events.read_text(encoding="utf-8").splitlines()
-    assert lines.index("prepare:old") < lines.index("stop:old")
+    assert lines.index("prepare:old") < lines.index("deps:old") < lines.index("stop:old")
     assert "daemon:new" in lines
     assert "verify:new" in lines
+    assert "extras:new-gateway:new-Dockerfile:new-docs/instances.md" in lines
     assert (install / "app" / "marker").read_text(encoding="utf-8") == "old"
+    assert (install / "Dockerfile").read_text(encoding="utf-8") == "old-Dockerfile"
+    assert not (install / "gateway" / "bin").exists() and not (install / "docs" / "instances.md").exists()
     assert (install / "app" / "old-only.py").is_file()
     assert not (install / "app" / "main.py").exists()
     assert (install / ".venv" / "bin" / "python").read_text(encoding="utf-8").startswith("#!/bin/sh")

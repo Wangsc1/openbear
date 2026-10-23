@@ -27,7 +27,7 @@ const actual = [
   between("function activeAttachmentKey()", "function queueSentAttachmentPreviewRevokes("),
   between("function closeWs() {", "function normalizePendingSteering("),
   between("function finishPendingOutboundSend(", "function applyLoadedConversationState("),
-  between("async function send() {", "async function stop() {"),
+  between("async function send(", "async function stop() {"),
   between("async function stop() {", "async function newSession() {"),
   between("async function switchConversation(", "watch(() => props.conversationUuid,"),
 ].join("\n");
@@ -66,7 +66,7 @@ function harness({local = false, halfOpenFirst = false, createConversation} = {}
   const props = {conversationUuid: local ? "local:new" : "conv-a"};
   let context;
   const globals = {
-    WebSocket: Socket, AbortController,
+    WebSocket: Socket, contextWebSocket: (...args) => new Socket(...args), pageSession: {blocked:false}, AbortController,
     operationFrameBuffer: createOperationFrameBuffer(), conversationStateRequests: {pending:false,invalidate(){}},
     window: {setTimeout: timer.scheduleTimeout, clearTimeout: timer.clearScheduledTimeout, dispatchEvent: noop},
     document: {visibilityState: "visible"},
@@ -98,7 +98,7 @@ function harness({local = false, halfOpenFirst = false, createConversation} = {}
     attachmentDrafts: createAttachmentDraftStorage({driver: attachmentDriver}),
     noteVisibleOutput: noop, clearActiveRun: noop, lockAutoScroll: noop, scrollBottom: async () => {},
     emit: (event, uuid) => {if (event === "conversation-created") props.conversationUuid = uuid;},
-    nextTick: async () => {}, completeLocalRunConfig: () => ({}), ensureLocalRunDefaults: async () => {},
+    nextTick: async () => {}, completeLocalRunConfig: () => ({}), ensureLocalRunDefaults: async () => {}, forgetLocalDraftChoices: noop, updatePromptSuggestions: noop,
     Api: {
       createConversation: createConversation || (async () => ({conversation: {conversationUuid: "conv-created"}})),
       uploadConversationFiles: async (_uuid, files) => files.map((file) => ({uploadId: `uploaded-${file.name}`})),

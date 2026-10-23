@@ -6,7 +6,7 @@ import {ref,watch} from 'vue';
 import {referenceToken,referencesInText} from './codec.js';
 const source=fs.readFileSync(new URL('../views/consoleView/ConsoleView.vue',import.meta.url),'utf8');
 const start=source.indexOf('async function deleteTurnSuffix(turn) {');
-const end=source.indexOf('async function send()',start);
+const end=source.indexOf('async function send(',start);
 assert.ok(start >= 0 && end > start, 'extract the real suffix deletion handler');
 const code=source.slice(start,end);
 const resetStart=source.indexOf('function applyCommittedTurnDeletion(');

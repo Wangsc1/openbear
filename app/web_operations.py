@@ -203,6 +203,27 @@ def status_lifecycle(op_type: str, status: str = "", payload: dict[str, Any] | N
     return ""
 
 
+LIVE_APPEND_OPERATION_TYPES = frozenset({"reasoning", "assistant_message"})
+LIVE_PATCH_OPERATION_TYPES = frozenset({
+    "status", "stats", "tool", "agent", "agent_control", "agent_supervision", "user_interaction",
+})
+
+
+def is_live_update(op_type: str, action: str, payload: dict[str, Any] | None = None) -> bool:
+    """Whether an update may stay in memory while the operation keeps its status.
+
+    Only intermediate progress qualifies. Creation, every status/lifecycle
+    change and the final statistics remain durable operation frames.
+    """
+    op_type = str(op_type or "")
+    action = str(action or "")
+    if action == "append":
+        return op_type in LIVE_APPEND_OPERATION_TYPES
+    if action != "patch" or op_type not in LIVE_PATCH_OPERATION_TYPES:
+        return False
+    return op_type != "stats" or bool((payload or {}).get("live"))
+
+
 def _append_or_snapshot_text(old_text: str, incoming: str, delta: str = "") -> str:
     old_text = str(old_text or "")
     incoming = str(incoming or "")
@@ -655,7 +676,11 @@ def tool_event_operation_specs(
             status = ""
             if is_agent:
                 parsed_result = json_loads_dict(str(result or ""))
-                if not agent_task_uuid and (parsed_result.get("ok") is False or parsed_result.get("error")):
+                if not agent_task_uuid and (
+                    parsed_result.get("ok") is False
+                    or parsed_result.get("error")
+                    or str(result or "").strip().lower().startswith("error:")
+                ):
                     status = "failed"
                     action = "error"
                 elif agent_task_uuid:
@@ -746,7 +771,7 @@ def web_event_operation_specs(event: dict[str, Any]) -> list[dict[str, Any]]:
 
     if typ == "accepted":
         task_notification = bool(event.get("taskNotification"))
-        source = "task_notification" if task_notification else (event.get("source") if event.get("source") in {"telegram", "webhook", "cron", "recommendation"} else "user")
+        source = "task_notification" if task_notification else (event.get("source") if event.get("source") in {"telegram", "webhook", "cron", "collab"} else "user")
         payload = {
             "turnId": turn_uuid,
             "runId": execution_run_uuid,
@@ -775,14 +800,15 @@ def web_event_operation_specs(event: dict[str, Any]) -> list[dict[str, Any]]:
                 "attachments": event.get("attachments") if isinstance(event.get("attachments"), list) else [],
                 **({"source": "webhook", "eventTriggered": True, "eventCard": event.get("eventCard"), "assignmentId": event.get("assignmentId")} if event.get("source") == "webhook" else {}),
                 **({"source": "cron", "eventTriggered": True, "cronRunId": event.get("cronRunId"), "cronCard": event.get("cronCard")} if event.get("source") == "cron" else {}),
-                **({"source": "recommendation", "eventTriggered": True, "recommendationRunId": event.get("recommendationRunId"), "recommendationCard": event.get("recommendationCard")} if event.get("source") == "recommendation" else {}),
+                **({"source": "instance", "eventTriggered": True, "instanceCard": event.get("instanceCard")} if event.get("source") == "instance" else {}),
+                **({"source": "collab", "eventTriggered": True, "collabRequestId": event.get("collabRequestId"), "collabCard": event.get("collabCard")} if event.get("source") == "collab" else {}),
                 **({"references": event["references"], "referenceBundleId": str(event.get("referenceBundleId") or "")} if event.get("references") else {}),
                 "queued": bool(event.get("queued", False)),
                 "interruption": bool(event.get("interruption") or event.get("steeringInjected")),
                 "status": str(event.get("status") or ("插话已交给主会话" if event.get("steeringInjected") else "")),
                 "createdAtMs": ts,
             },
-            status="completed", source=event.get("source") if event.get("source") in {"telegram", "webhook", "cron", "recommendation"} else "user",
+            status="completed", source=event.get("source") if event.get("source") in {"telegram", "webhook", "cron", "instance", "collab"} else "user",
         ))
         return specs
 

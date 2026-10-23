@@ -13,8 +13,35 @@ const TOOL_LABELS = {
 	mcp__parrot__web_search: '搜索', mcp__parrot__web_fetch: '阅读网页',
 	mcp__parrot__image_generate: '生成图片', mcp__parrot__image_edit: '编辑图片',
 	mcp__parrot__video_generate: '生成视频', mcp__parrot__video_status: '视频进度',
-	Recommendation: '推荐',
+	InstanceControl: '实例管理',
+	ConversationRequest: '会话请求', ConversationGroup: '小组',
 };
+const REQUEST_OUTCOMES = {completed: '完成', needs_input: '需要补充', rejected: '拒绝'};
+
+function conversationRequestSummary(data) {
+	switch (data.action) {
+		case 'send': return join('发出请求', quoted(data.title));
+		case 'supply': return '补充对方要的材料';
+		case 'respond': return `声明结果：${REQUEST_OUTCOMES[data.outcome] || text(data.outcome) || '完成'}`;
+		case 'cancel': return '撤回请求';
+		case 'list': return '列出会话请求';
+		case 'get': return '查看会话请求';
+		default: return text(data.action);
+	}
+}
+
+function conversationGroupSummary(data) {
+	const group = object(data.group);
+	switch (data.action) {
+		case 'propose': return join('提议建立小组', quoted(group.name), Array.isArray(group.members) ? `${group.members.length} 位成员` : '');
+		case 'add_members': return join('提议新增成员', Array.isArray(data.members) ? `${data.members.length} 位` : '');
+		case 'update': return '提议修改小组设定';
+		case 'remove_member': return join('提议移除成员', text(data.reason));
+		case 'list': return '列出小组';
+		case 'get': return '查看小组';
+		default: return text(data.action);
+	}
+}
 export function toolDisplayLabel(name, fallback = '') {
 	return TOOL_LABELS[name] || fallback || name || '工具';
 }
@@ -156,25 +183,38 @@ function agentSummary(name, data) {
 	return '';
 }
 
-const REC_KINDS = {interest: '关注点', ongoing: '进行中的事', preference: '偏好', background: '背景', habit: '工作习惯'};
-const REC_STATUS = {active: '进行中', paused: '搁置', done: '已完成', dropped: '放弃', unknown: '不清楚'};
-const REC_LANES = {external: '外部发现', openbear: 'OpenBear 建议'};
-function recommendationSummary(data) {
+const INSTANCE_OUTCOMES = {completed: '完成', failed: '失败', needs_verification: '待检查'};
+const INSTANCE_METHODS = {GET: '读取', POST: '提交', PUT: '写入', PATCH: '修改', DELETE: '删除'};
+// Recognizes what a remote command does when the model gave no description.
+function remoteCommand(command) {
+	const value = String(command || '');
+	if (/docker\s+compose\b[^\n]*\bup\b/.test(value)) return '启动容器';
+	if (/docker\s+compose\b[^\n]*\b(down|stop)\b/.test(value)) return '停止容器';
+	if (/docker\s+(build|buildx\s+build)\b/.test(value)) return '构建镜像';
+	if (/docker\s+(logs|compose\b[^\n]*\blogs)\b/.test(value)) return '查看容器日志';
+	if (/docker\s+(ps|inspect|version|info)\b/.test(value)) return '检查 Docker 环境';
+	const first = value.split(/\r?\n/).map(line => line.trim()).find(line => line && !/^(set\s+-|#|printf\s)/.test(line));
+	return first ? `执行命令：${first}` : '执行命令';
+}
+function instanceSummary(data) {
 	const p = object(data.params);
 	switch (data.action) {
-		case 'status': return '查看本轮范围、预算与当前画像';
-		case 'source.next': return '读取下一批对话材料';
-		case 'source.commit': return '确认这批材料已分析';
-		case 'source.read': return '读取某个会话的完整原文';
-		case 'profile.list': return join('查看画像', REC_KINDS[p.kind] || '');
-		case 'profile.upsert': return join(`${p.id ? '更新' : '记录'}画像：${REC_KINDS[p.kind] || '条目'}`, quoted(p.topic), REC_STATUS[p.status] || '');
-		case 'profile.remove': return '移除一条画像';
-		case 'card.save': return join(`保存推荐卡片（${REC_LANES[p.lane] || '外部发现'}）`, quoted(p.title));
-		case 'card.list': return '查看近期卡片';
-		case 'follow.list': return '查看持续关注';
-		case 'follow.resolve': return '处理一条关注变化';
-		case 'insights.get': return '查看 OpenBear 运行统计';
-		case 'internal.search': return join('查找自己的会话和记忆', quoted(p.query));
+		case 'describe': return '查看实例工具用法';
+		case 'list': return '查看实例列表';
+		case 'status': return p.instanceId ? '查看实例状态' : '查看本次部署目标';
+		case 'operations': return '查看部署记录';
+		case 'events': return '查看登录与运行事件';
+		case 'verify': return '检查实例运行状态';
+		case 'deliver': return p.image ? join('交付部署文件', `使用镜像 ${text(p.image, 48)}`) : '交付部署文件和同版本源码';
+		case 'remote': return text(p.description) || remoteCommand(p.command);
+		case 'apply_initial_config': return '写入初始模型配置';
+		case 'request': return join(`${INSTANCE_METHODS[String(p.method || 'GET').toUpperCase()] || '请求'}实例配置`, text(p.path, 60));
+		case 'deploy': return '开始重新部署';
+		case 'maintenance': return join('开始维护', text(p.instructions));
+		case 'archive': return '归档实例';
+		case 'report': return join(`报告结果：${INSTANCE_OUTCOMES[p.outcome] || text(p.outcome)}`, text(p.summary));
+		case 'gateway_status': return '查看访问网关状态';
+		case 'gateway_sync': return '同步账号到访问网关';
 		default: return text(data.action);
 	}
 }
@@ -199,7 +239,9 @@ export function toolActionSummary(name, value) {
 	else if (name === 'WebSearch' || name === 'mcp__parrot__web_search') summary = join(quoted(data.query), data.freshness ? ({day:'一天内',week:'一周内',month:'一月内',year:'一年内'})[data.freshness] || '' : '');
 	else if (name === 'WebExtract' || name === 'mcp__parrot__web_fetch') summary = pageAddress(data.url);
 	else if (['mcp__parrot__image_generate','mcp__parrot__image_edit','mcp__parrot__video_generate'].includes(name)) summary = text(data.prompt);
-	else if (name === 'Recommendation') summary = recommendationSummary(data);
+	else if (name === 'InstanceControl') summary = instanceSummary(data);
+	else if (name === 'ConversationRequest') summary = conversationRequestSummary(data);
+	else if (name === 'ConversationGroup') summary = conversationGroupSummary(data);
 	else if (name === 'mcp__parrot__video_status') summary = join('查询视频生成进度', text(data.request_id, 36));
 	return text(summary, 160);
 }

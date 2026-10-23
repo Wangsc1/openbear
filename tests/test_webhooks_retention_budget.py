@@ -85,10 +85,20 @@ async def test_D12_processing_snapshots_and_assignment_only_reference(env,protec
 
 async def test_D12_cleanup_advances_past_purged_first_page(env):
     now=[1800000000000]; env.s.clock=lambda:now[0]
-    env.s.config.ingress.requests_per_minute=2000
-    c=await create(env,limits={'pendingEvents':2000,'requestsPerMinute':2000})
-    ids=[(await accept(env,c,key=str(i)))['eventId'] for i in range(1001)]
+    c=await create(env)
+    # Two genuinely accepted events; 999 more are bulk copies of the first
+    # accepted inbox/payload rows (receive writes only these two tables when
+    # pre is disabled), so 1001 eligible payloads exceed the LIMIT 1000 page.
+    ids=[(await accept(env,c,key=str(i)))['eventId'] for i in (0,1000)]
     async with env.db.webhook_transaction() as conn:
+        for table,fixed in (('webhook_events',{'receive_seq','event_id','idempotency_key','acceptance_json'}),('webhook_event_payloads',{'event_id'})):
+            cols=[r['name'] for r in await many(conn,f'PRAGMA table_info({table})') if r['name'] not in fixed]
+            extra=",idempotency_key,acceptance_json" if table=='webhook_events' else ''
+            values=",'bulk-'||n,json_set(acceptance_json,'$.eventId',?||'-bulk-'||n)" if table=='webhook_events' else ''
+            await conn.execute(f"""WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<999)
+                INSERT INTO {table}(event_id{extra},{','.join(cols)}) SELECT ?||'-bulk-'||n{values},{','.join(cols)} FROM seq,{table} WHERE event_id=? ORDER BY n""",
+                (ids[0],ids[0],ids[0]) if table=='webhook_events' else (ids[0],ids[0]))
+        assert (await one(conn,'SELECT COUNT(*) n FROM webhook_event_payloads'))['n']==1001
         await conn.execute("UPDATE webhook_events SET route_state='terminal',terminal_at_ms=?,terminal_reason='expired'",(now[0],))
     env.s.config.retention.payload_days=1; now[0]+=3*86400000
     assert (await prune(env.s))['payloads']==1000

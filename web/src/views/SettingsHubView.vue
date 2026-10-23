@@ -2,6 +2,7 @@
 import { computed, onMounted, onBeforeUnmount, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Api, apiError } from "../api";
+import { authMode } from '../authMode.js';
 import { defineLazyView } from "../lazyView.js";
 import "./settings-ui.css";
 
@@ -44,6 +45,7 @@ function runningSummary(r = {}) {
 }
 
 async function requestRestart(force = false) {
+  if (authMode.value !== 'controller') return;
   restarting.value = true;
   try {
     const data = await Api.systemRestart({ confirm: true, force, reason: "web settings page" });
@@ -69,6 +71,7 @@ async function requestRestart(force = false) {
 }
 
 async function confirmRestart() {
+  if (authMode.value !== 'controller') return;
   try {
     await ElMessageBox.confirm("确认重启 OpenBear？当前 Web 会短暂断开，重启完成后会通过 Telegram 发通知。", "重启确认", {
       type: "warning",
@@ -129,7 +132,8 @@ watch(activeSection, (next) => emit("section-changed", next));
             </button>
           </div>
         </nav>
-        <el-button class="settings-restart" type="danger" plain round :loading="restarting" :aria-busy="restarting" aria-label="重启 OpenBear" title="重启 OpenBear" @click="confirmRestart"><span>重启<span class="settings-restart-product"> OpenBear</span></span></el-button>
+        <span v-if="['managed', 'gateway'].includes(authMode)" class="settings-managed-note">重启与升级由主控维护</span>
+        <el-button v-if="authMode === 'controller'" class="settings-restart" type="danger" plain round :loading="restarting" :aria-busy="restarting" aria-label="重启 OpenBear" title="重启 OpenBear" @click="confirmRestart"><span>重启<span class="settings-restart-product"> OpenBear</span></span></el-button>
       </div>
     </header>
     <div class="settings-content min-h-0 flex-1">
@@ -139,6 +143,7 @@ watch(activeSection, (next) => emit("section-changed", next));
 </template>
 
 <style scoped>
+.settings-managed-note { flex: none; max-width: 105px; color: var(--ob-chat-subtle); font-size: 11px; line-height: 1.5; }
 .settings-hub { background: var(--ob-chat-bg); }
 .settings-header { padding: 12px 24px; border-color: var(--ob-chat-line); background: var(--ob-chat-bg); backdrop-filter: none; }
 .settings-heading > div:first-child { font-size: 13px; font-weight: 500; }

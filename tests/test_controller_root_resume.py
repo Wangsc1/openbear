@@ -78,8 +78,10 @@ async def test_evicted_root_restores_originals_decisions_and_frozen_references(w
     assert result and backend.calls == calls + 1
     sent = backend.seen_convos[calls]
     assert validate_model_context(sent)
-    for marker in ("A_ORIGINAL", "A_PROPOSAL", "A_FEEDBACK", "A_CONFIRM_QUESTION", "A_CONFIRMED", "A_FROZEN_REFERENCE", "A_BACKGROUND_RESULT"):
+    for marker in ("A_ORIGINAL", "A_FEEDBACK", "A_CONFIRM_QUESTION", "A_CONFIRMED", "A_FROZEN_REFERENCE", "A_BACKGROUND_RESULT"):
         assert marker in str(sent)
+    # The reply before the resumed input is not reliably what it answers; it is not restored by position.
+    assert "A_PROPOSAL" not in str(sent)
     assert "OLD_OPTIONAL_EVIDENCE" not in str(sent)
     notification = next(m for m in sent if "A_BACKGROUND_RESULT" in str(m.get("content")))
     assert source_of(notification)["kind"] == "notification"

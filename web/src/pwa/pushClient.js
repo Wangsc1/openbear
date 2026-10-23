@@ -1,6 +1,33 @@
 import {installationEnvironment} from "./install.js";
 import {notificationTarget} from "../loginRedirect.js";
+import { contextFetch, isGateway, pageSession, notificationInstanceMatches, assertSession, onSessionEnd } from '../sessionBoundary.js';
+const PUSH_OWNER = 'openbear.gateway.push-owner';
+function pushOwner(win) { try { return win.localStorage.getItem(PUSH_OWNER) || ''; } catch { return ''; } }
+function ownSubscription(win) { return !isGateway() || pushOwner(win) === pageSession.instanceId; }
+function rememberPushOwner(win, registration, instanceId) {
+  if (!isGateway()) return;
+  try { if (instanceId) win.localStorage.setItem(PUSH_OWNER, instanceId); else if (pushOwner(win) === pageSession.instanceId) win.localStorage.removeItem(PUSH_OWNER); } catch {}
+  registration?.active?.postMessage({type: 'openbear:push-boundary', gateway: true, instanceId});
+}
+export async function retireGatewayPush(win = window) {
+  if (!isGateway() || !win.navigator?.serviceWorker) return;
+  const registration = await win.navigator.serviceWorker.getRegistration('/');
+  if (!registration || !ownSubscription(win)) return;
+  const subscription = await registration.pushManager.getSubscription();
+  if (subscription) { await pushRequest('subscription', {endpoint: subscription.endpoint}, 'DELETE'); assertSession(); await subscription.unsubscribe(); }
+  rememberPushOwner(win, registration, '');
+}
 
+onSessionEnd(async () => {
+  if (typeof window === 'undefined' || !window.navigator?.serviceWorker || !ownSubscription(window)) return;
+  const registration = await window.navigator.serviceWorker.getRegistration('/');
+  const subscription = await registration?.pushManager.getSubscription();
+  if (!ownSubscription(window)) return;
+  await subscription?.unsubscribe().catch(() => {});
+  rememberPushOwner(window, registration, '');
+  const notifications = await registration?.getNotifications() || [];
+  for (const notification of notifications) if (notification.data?.instanceId === pageSession.instanceId) notification.close();
+});
 const PUSH_CHANGED = "openbear:push-changed";
 const pageIds = new WeakMap();
 function pageId(win) {
@@ -26,9 +53,9 @@ function notifyPushChanged(win) {
 
 export function pushSupport(win) {
   const env = installationEnvironment(win);
-  if (!env.secure) return {supported: false, reason: "系统通知需要通过 HTTPS 访问 OpenBear。"};
+  if (!env.secure) return {supported: false, reason: "当前浏览器环境不提供后台系统通知，可继续使用网页；不影响登录和其他功能。"};
   if (env.ios && !env.standalone) return {supported: false, reason: "iPhone / iPad 需 iOS 16.4 或更新版本，并先将 OpenBear 添加到主屏幕，再从图标打开。"};
-  if (!win.Notification || !win.PushManager || !win.navigator?.serviceWorker) return {supported: false, reason: "当前系统或浏览器不支持后台通知，可继续使用 Telegram 通知。"};
+  if (!win.Notification || !win.PushManager || !win.navigator?.serviceWorker) return {supported: false, reason: "当前系统或浏览器不支持后台通知，可继续在网页查看任务动态。"};
   return {supported: true, reason: ""};
 }
 
@@ -41,7 +68,7 @@ export async function pushRequest(path, body, method = "POST") {
   const abort = new AbortController();
   const timeout = setTimeout(() => abort.abort(), 30000);
   try {
-    const response = await fetch(`/api/push/${path}`, {
+    const response = await contextFetch(`/api/push/${path}`, {
       method, credentials: "same-origin", cache: "no-store", signal: abort.signal,
       ...(body === undefined ? {} : {headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)}),
     });
@@ -82,7 +109,7 @@ export function createPushClient(win, request = pushRequest) {
       const support = pushSupport(win);
       if (!support.supported) return {...support, enabled: false};
       const {subscription} = await current();
-      const data = subscription ? await request("status", {endpoint: subscription.endpoint}) : {enabled: false};
+      const data = subscription && ownSubscription(win) ? await request("status", {endpoint: subscription.endpoint}) : {enabled: false};
       return {...support, permission: win.Notification.permission, enabled: Boolean(data.enabled && win.Notification.permission === "granted")};
     },
     async enable() {
@@ -96,6 +123,11 @@ export function createPushClient(win, request = pushRequest) {
       await waitForPushWorker(registration);
       try {
         let subscription = await registration.pushManager.getSubscription();
+        if (isGateway()) {
+          assertSession();
+          if (subscription && !ownSubscription(win)) { await subscription.unsubscribe(); subscription = null; }
+          rememberPushOwner(win, registration, pageSession.instanceId);
+        }
         const key = decodePushKey(publicKey);
         if (subscription?.options?.applicationServerKey && String(new Uint8Array(subscription.options.applicationServerKey)) !== String(key)) {
           await subscription.unsubscribe();
@@ -114,18 +146,20 @@ export function createPushClient(win, request = pushRequest) {
     async disable() {
       const {subscription} = await current();
       try {
-        if (subscription) {
+        if (subscription && ownSubscription(win)) {
           // Disable server delivery first. Keep the worker: it never caches or
           // intercepts the application, and may be shared by another open tab.
           await request("subscription", {endpoint: subscription.endpoint}, "DELETE");
+          if (isGateway()) assertSession();
           await subscription.unsubscribe();
+          rememberPushOwner(win, (await current()).registration, '');
         }
       } finally { changed(); }
       return {supported: true, permission: win.Notification.permission, enabled: false};
     },
     async test() {
       const {subscription} = await current();
-      if (!subscription) throw new Error("请先开启本设备通知");
+      if (!subscription || !ownSubscription(win)) throw new Error("请先开启本设备通知");
       return request("test", {endpoint: subscription.endpoint});
     },
   };
@@ -136,7 +170,7 @@ export function installPushNavigation(win, navigate) {
     if (event.data?.type !== "openbear:notification-open") return;
     try {
       const target = notificationTarget(event.data.url, win.location.origin);
-      if (!target) return;
+      if (!target || !notificationInstanceMatches(target)) return;
       if (target !== win.location.pathname + win.location.search && await navigate(target) === false) return;
       // Also reveal the device card when system settings is already mounted.
       win.dispatchEvent(new win.Event("openbear:notification-navigated"));
@@ -157,7 +191,7 @@ export function installPushPresence(win, currentConversation, request = pushRequ
       const registration = await win.navigator.serviceWorker?.getRegistration("/");
       const subscription = await registration?.pushManager.getSubscription();
       if (closed || version !== refreshVersion) return;
-      endpoint = subscription?.endpoint || "";
+      endpoint = ownSubscription(win) ? subscription?.endpoint || "" : '';
       // Refresh existing worker code without registering, prompting or rebinding login.
       if (registration) void registration.update().catch(() => {});
       update();

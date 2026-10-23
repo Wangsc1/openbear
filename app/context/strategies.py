@@ -39,6 +39,7 @@ class CompressionRequest:
     input_ceiling: int
     active_task_uuid: str = ""
     active_run_root_turn_uuid: str = ""
+    dialogue_target: int = 0
 
 
 @dataclass
@@ -56,7 +57,7 @@ class SlidingWindowStrategy:
     async def compress(self, request: CompressionRequest) -> CompressionResult:
         try:
             selected = select_window(request.messages, estimate=request.estimate, target=request.target,
-                                     input_ceiling=request.input_ceiling,
+                                     input_ceiling=request.input_ceiling, dialogue_target=request.dialogue_target,
                                      active_task_uuid=request.active_task_uuid,
                                      active_run_root_turn_uuid=request.active_run_root_turn_uuid)
         except ActiveContextUnavailable as exc:
@@ -65,7 +66,9 @@ class SlidingWindowStrategy:
             "removedBatches": len(selected.removed_groups), "retainedBatches": len(selected.kept_groups),
             "softTargetExceeded": selected.soft_target_exceeded,
             "requiredBatches": len(selected.required_groups),
+            "referencedToolResults": selected.referenced_results,
             "optionalRetainedBatches": len(selected.kept_groups) - len(selected.required_groups),
+            "dialogueBatches": len(selected.dialogue_groups),
         })
 
 

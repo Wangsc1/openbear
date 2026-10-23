@@ -141,27 +141,6 @@ def read_catalog(
                 "updatedAt": row["updated_at"] or 0,
                 "revision": revisions.get(key, 0),
             }
-        for row in conn.execute(
-            """SELECT card_id,title,body,category,created_at_ms FROM rec_cards
-                WHERE owner_chat_id=? AND removed_at_ms IS NULL
-                ORDER BY created_at_ms DESC LIMIT 300""",
-            (owner,),
-        ):
-            key = "rec:" + row["card_id"]
-            items[key] = {
-                "key": key,
-                "kind": "rec",
-                "id": row["card_id"],
-                "name": row["card_id"],
-                "label": row["title"],
-                "group": "",
-                "category": row["category"],
-                "preview": catalog_preview(row["body"]),
-                "archived": False,
-                # Other catalog rows use seconds; recency sorting mixes kinds.
-                "updatedAt": int(row["created_at_ms"] or 0) // 1000,
-                "revision": revisions.get(key, 0),
-            }
         return seq, items
 
 
@@ -336,6 +315,8 @@ class GlobalRealtime:
             )
 
     async def run(self):
+        from app.lifecycle import wait_for_startup
+        await wait_for_startup(self.owner)
         while not self._stopping:
             try:
                 await asyncio.wait_for(self.wake.wait(), timeout=2.0)

@@ -1,6 +1,7 @@
 """SQLite 引擎 —— aiosqlite + WAL。"""
 from __future__ import annotations
 
+import contextlib
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -9,9 +10,10 @@ from pathlib import Path
 import aiosqlite
 
 from app.db.agent_continuity_migration import migrate_agent_continuity
-from app.db.connection_router import SQLiteConnectionRouter
+from app.db.connection_router import SQLiteConnectionRouter, open_sqlite_connection
 from app.db.reference_schema import reference_schema
 from app.db.schema_migrations import (
+    backfill_conversation_origins,
     dedupe_active_rath_agent_sessions,
     migrate_web_operation_history,
     remove_removed_tools_from_agent_allowlists,
@@ -22,7 +24,7 @@ log = get_logger("db.engine")
 
 _SCHEMA = "\n".join(
     (Path(__file__).parent / name).read_text(encoding="utf-8")
-    for name in ("schema.sql", "user_interactions.sql", "interaction_telegram.sql", "web_telegram_replies.sql", "web_push.sql", "context_schema.sql", "runtime_schema.sql", "cron.sql", "recommendations.sql")
+    for name in ("schema.sql", "user_interactions.sql", "interaction_telegram.sql", "web_telegram_replies.sql", "web_push.sql", "context_schema.sql", "runtime_schema.sql", "cron.sql", "collab.sql")
 )
 
 
@@ -30,11 +32,24 @@ class DB:
     def __init__(self, db_path: str) -> None:
         self._path = db_path
         self._conn: aiosqlite.Connection | SQLiteConnectionRouter | None = None
+        self._connecting_reader: aiosqlite.Connection | None = None
 
     async def connect(self) -> None:
+        if self._conn is not None:
+            raise RuntimeError("数据库已连接")
+        try:
+            await self._connect()
+        except BaseException:
+            # Includes cancellation anywhere in schema migration or reader setup.
+            # Keep the original failure, but never leave either worker behind.
+            with contextlib.suppress(BaseException):
+                await self.close()
+            raise
+
+    async def _connect(self) -> None:
         db_file = Path(self._path).expanduser()
         db_file.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = await aiosqlite.connect(self._path)
+        self._conn = await open_sqlite_connection(self._path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
@@ -49,28 +64,22 @@ class DB:
         await self._pre_migrate_memory_assets_schema()
         await migrate_agent_continuity(self._conn)
         await self._conn.executescript(_SCHEMA)
+        await self._migrate_memory_document_order()
+        await self._add_column_if_missing("collab_requests", "from_tool_call_id", "from_tool_call_id TEXT NOT NULL DEFAULT ''")
+        for name in ("kind", "subject_json", "verdict", "subject_changed", "related_request_uuid"):
+            await self._drop_column_if_present("collab_requests", name)
         await self._add_column_if_missing("web_push_deliveries", "last_status", "last_status INTEGER NOT NULL DEFAULT 0")
         await self._add_column_if_missing("web_push_deliveries", "last_error", "last_error TEXT NOT NULL DEFAULT ''")
-        for name in ("daily_page_json", "follow_page_json"):
-            await self._add_column_if_missing("rec_cursors", name, f"{name} TEXT NOT NULL DEFAULT ''")
-        # Follows are about the matter itself: what the user wants watched, and the latest finding.
-        for name, ddl in (("note", "note TEXT NOT NULL DEFAULT ''"), ("last_update", "last_update TEXT NOT NULL DEFAULT ''"),
-                          ("last_update_ms", "last_update_ms INTEGER NOT NULL DEFAULT 0")):
-            await self._add_column_if_missing("rec_follows", name, ddl)
-        # What the card could not confirm about the user's own situation, and the later review of it.
-        for name, ddl in (("to_check_json", "to_check_json TEXT NOT NULL DEFAULT '[]'"), ("review", "review TEXT NOT NULL DEFAULT ''"),
-                          ("review_issue", "review_issue TEXT NOT NULL DEFAULT ''"), ("reviewed_at_ms", "reviewed_at_ms INTEGER")):
-            await self._add_column_if_missing("rec_cards", name, ddl)
         await self._conn.executescript(reference_schema())
         await self._remove_structural_memory_categories()
+        # executescript() commits first, so the removal shares the final startup transaction.
+        await self._remove_retired_assistant_features()
         backfilled_terminal_times, repaired_web_frames = await migrate_web_operation_history(self._conn)
         if backfilled_terminal_times:
             log.info("已固化历史 Web Operation 首次终结时间", 数量=backfilled_terminal_times)
         if repaired_web_frames:
             log.info("已补齐历史 Web Operation 快照帧", 数量=repaired_web_frames)
         await self._migrate_rath_schema()
-        from app.recommendations.ledger import migrate as migrate_rec_usage
-        await migrate_rec_usage(self._conn)
         await self._conn.commit()
 
         # From this point onward every application write is routed to the one
@@ -78,17 +87,24 @@ class DB:
         # so a stale read snapshot can never be upgraded into a writer after a
         # different connection committed (SQLITE_BUSY_SNAPSHOT).
         writer = self._conn
-        reader = await aiosqlite.connect(self._path)
+        reader = await open_sqlite_connection(self._path)
+        self._connecting_reader = reader
         reader.row_factory = aiosqlite.Row
         await reader.execute("PRAGMA query_only=ON")
         await reader.execute("PRAGMA busy_timeout=5000")
         self._conn = SQLiteConnectionRouter(reader=reader, writer=writer)
+        self._connecting_reader = None
         from app.webhooks.schema import migrate as migrate_webhooks
+        await migrate_webhooks(self)
+        # Webhook assignments exist only after their versioned migration. Origins
+        # only label conversations; a failed pass must not block startup.
         try:
-            await migrate_webhooks(self)
-        except BaseException:
-            await self.close()
-            raise
+            async with self.write_transaction(label="conversation-origin-backfill") as conn:
+                attributed = await backfill_conversation_origins(conn)
+            if attributed:
+                log.info("已补齐历史会话来源", 数量=attributed)
+        except Exception as exc:
+            log.warning("历史会话来源补齐失败，下次启动重试", 错误=str(exc))
         log.info("数据库已连接", 路径=self._path, 写入模式="single-writer")
 
     async def _table_exists(self, table: str) -> bool:
@@ -111,6 +127,12 @@ class DB:
             return
         if name not in await self._columns(table):
             await self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+    async def _drop_column_if_present(self, table: str, name: str) -> None:
+        if self._conn is None or not await self._table_exists(table):
+            return
+        if name in await self._columns(table):
+            await self._conn.execute(f"ALTER TABLE {table} DROP COLUMN {name}")
 
     async def _pre_migrate_existing_session_schema(self) -> None:
         await self._add_column_if_missing("sessions", "fast_mode", "fast_mode INTEGER DEFAULT 0")
@@ -136,6 +158,51 @@ class DB:
                 tuple(category_ids),
             )
 
+    _RETIRED_TABLES = (
+        # Recommendations.
+        "rec_settings", "rec_runs", "rec_cursors", "rec_profile", "rec_cards", "rec_feedback",
+        "rec_weights", "rec_usage", "rec_usage_migrations", "rec_follows",
+        # Background assistant: request snapshots and regression cases.
+        "request_snapshots", "request_blobs", "regression_cases",
+        # Automatic memory extraction: version log of assistant-maintained entries.
+        "memory_entry_versions",
+        # Conversation resource monitoring.
+        "resource_epochs", "resource_objects", "resource_package_pending", "resource_handles",
+        "resource_statistics", "resource_pages", "resource_page_items", "resource_plans",
+        "resource_requests", "resource_jobs",
+    )
+    # Triggers that retired features attached to tables which remain.
+    _RETIRED_TRIGGERS = ("resource_archive_epoch", "resource_unarchive", "resource_delivery_created")
+    _RETIRED_APP_STATE_PREFIXES = ("recommendation_prompt_default:", "recommendation_managed_tools:")
+
+    async def _remove_retired_assistant_features(self) -> None:
+        """Remove the recommendation, background-assistant, habit and resource-monitoring data. Idempotent.
+
+        Conversations those features started stay; only their own tables, the
+        habit memory category with its entries, and their app_state keys go.
+        """
+        if self._conn is None:
+            return
+        for trigger in self._RETIRED_TRIGGERS:
+            await self._conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        for table in self._RETIRED_TABLES:
+            # Dropping a table also drops its indexes and triggers.
+            await self._conn.execute(f"DROP TABLE IF EXISTS {table}")
+        if await self._table_exists("memory_categories"):
+            cur = await self._conn.execute("SELECT id FROM memory_categories WHERE key='habit'")
+            habit_ids = [int(row["id"]) for row in await cur.fetchall()]
+            for category_id in habit_ids:
+                await self._conn.execute("DELETE FROM memory_entries WHERE category_id=?", (category_id,))
+                await self._conn.execute("DELETE FROM memory_categories WHERE id=?", (category_id,))
+        # Authorship columns existed only for the assistant's habit maintenance.
+        for name in ("author", "user_edited"):
+            await self._drop_column_if_present("memory_entries", name)
+        if await self._table_exists("app_state"):
+            for prefix in self._RETIRED_APP_STATE_PREFIXES:
+                await self._conn.execute("DELETE FROM app_state WHERE substr(key,1,?)=?", (len(prefix), prefix))
+        if await self._table_exists("web_catalog_changes"):
+            await self._conn.execute("DELETE FROM web_catalog_changes WHERE kind='rec'")
+
     async def _pre_migrate_memory_assets_schema(self) -> None:
         """Add grouping/order/timestamp columns without inventing historical creation times."""
         await self._add_column_if_missing("memory_entries", "expanded", "expanded INTEGER DEFAULT 0")
@@ -145,15 +212,34 @@ class DB:
         await self._add_column_if_missing("memory_docs", "grp", "grp TEXT DEFAULT ''")
         await self._add_column_if_missing("memory_docs", "sort", "sort INTEGER DEFAULT 0")
         await self._add_column_if_missing("memory_docs", "created_at", "created_at INTEGER DEFAULT 0")
-        if self._conn is None or not await self._table_exists("memory_docs"):
-            return
-        cur = await self._conn.execute("SELECT id FROM memory_docs ORDER BY importance DESC, id")
-        rows = await cur.fetchall()
-        for index, row in enumerate(rows, start=1):
+
+    async def _migrate_memory_document_order(self) -> None:
+        """Seed historical ordering once; current writers own all later sort values."""
+        assert self._conn is not None
+        marker = "memory_document_order_v1"
+        async with self._conn.execute(
+            "SELECT 1 FROM schema_data_migrations WHERE name=?", (marker,)
+        ) as cur:
+            if await cur.fetchone() is not None:
+                return
+        await self._conn.execute("SAVEPOINT memory_document_order_migration")
+        try:
+            async with self._conn.execute(
+                "SELECT id, sort FROM memory_docs ORDER BY importance DESC, id"
+            ) as cur:
+                rows = await cur.fetchall()
+            updates = [(index * 10, int(row[0])) for index, row in enumerate(rows, start=1) if not row[1]]
+            if updates:
+                await self._conn.executemany("UPDATE memory_docs SET sort=? WHERE id=?", updates)
             await self._conn.execute(
-                "UPDATE memory_docs SET sort=? WHERE id=? AND COALESCE(sort, 0)=0",
-                (index * 10, int(row[0])),
+                "INSERT INTO schema_data_migrations(name, applied_at) VALUES (?,?)",
+                (marker, int(time.time())),
             )
+            await self._conn.execute("RELEASE memory_document_order_migration")
+        except BaseException:
+            await self._conn.execute("ROLLBACK TO memory_document_order_migration")
+            await self._conn.execute("RELEASE memory_document_order_migration")
+            raise
 
     async def _pre_migrate_existing_web_schema(self) -> None:
         await self._add_column_if_missing(
@@ -184,6 +270,11 @@ class DB:
         await self._add_column_if_missing("web_conversations", "agent_model", "agent_model TEXT DEFAULT ''")
         await self._add_column_if_missing("web_conversations", "agent_think_level", "agent_think_level TEXT DEFAULT ''")
         await self._add_column_if_missing("web_conversations", "agent_fast_mode", "agent_fast_mode INTEGER DEFAULT -1")
+        await self._add_column_if_missing("web_conversations", "origin_kind", "origin_kind TEXT NOT NULL DEFAULT ''")
+        await self._add_column_if_missing("web_conversations", "origin_ref", "origin_ref TEXT NOT NULL DEFAULT ''")
+        await self._add_column_if_missing(
+            "web_conversations", "prompt_suggestions_json", "prompt_suggestions_json TEXT NOT NULL DEFAULT '{}'"
+        )
         await self._add_column_if_missing("web_login_requests", "nonce_hash", "nonce_hash TEXT DEFAULT ''")
         await self._add_column_if_missing("web_controller_context_snapshots", "session_uuid", "session_uuid TEXT NOT NULL DEFAULT ''")
         await self._add_column_if_missing("web_controller_context_snapshots", "known", "known INTEGER NOT NULL DEFAULT 1")
@@ -390,11 +481,18 @@ class DB:
         if self._conn is None:
             return
 
-        await self._pre_migrate_existing_rath_schema()
+        # Column compatibility already ran before schema/index installation.
         removed_tool_rows = await remove_removed_tools_from_agent_allowlists(self._conn)
         if removed_tool_rows:
             log.info("已清理 Agent 工具白名单中的废弃工具", 数量=removed_tool_rows)
-        await dedupe_active_rath_agent_sessions(self._conn)
+        async with self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='ux_rath_agent_sessions_active_openbear_agent'"
+        ) as cursor:
+            has_active_unique_index = await cursor.fetchone() is not None
+        # Once installed, the partial unique index itself prevents duplicates.
+        # Continuity migration drops the obsolete index before reaching here.
+        if not has_active_unique_index:
+            await dedupe_active_rath_agent_sessions(self._conn)
         await self._conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_rath_agent_sessions_active_openbear_agent ON rath_agent_sessions(openbear_session_uuid, workflow_uuid, agent_key) WHERE status='active' AND session_kind='legacy'"
         )
@@ -429,9 +527,17 @@ class DB:
 
     @asynccontextmanager
     async def write_transaction(self, *, label: str = "write",
-                                wait_timeout_s: float | None = None) -> AsyncIterator[aiosqlite.Connection]:
-        """Run one atomic mutation unit; optionally bound writer acquisition."""
-        async with self._router().transaction(label=label, wait_timeout_s=wait_timeout_s) as conn:
+                                wait_timeout_s: float | None = None,
+                                sqlite_busy_timeout_ms: int | None = None) -> AsyncIterator[aiosqlite.Connection]:
+        """Atomic write; optional application/native lock waits for maintenance.
+
+        A supplied native busy timeout disables BEGIN/COMMIT lock retries for
+        this transaction only. Use asyncio.timeout around the context to bound
+        statement execution too; cancellation interrupts SQL before rollback.
+        """
+        async with self._router().transaction(
+            label=label, wait_timeout_s=wait_timeout_s, sqlite_busy_timeout_ms=sqlite_busy_timeout_ms,
+        ) as conn:
             yield conn
 
     @asynccontextmanager
@@ -458,10 +564,28 @@ class DB:
         async with self._router().transaction(label="agent_plan") as conn:
             yield conn
 
+    async def interrupt(self) -> None:
+        """Emergency shutdown hook, before waiting for cancelled producers.
+
+        Interrupts both reader and writer; never use for ordinary request/lock
+        timeouts. Does not commit or roll back another task's transaction.
+        """
+        if self._connecting_reader is not None:
+            await self._connecting_reader.interrupt()
+        if self._conn is not None:
+            await self._conn.interrupt()
+
     async def close(self) -> None:
-        if self._conn:
-            await self._conn.close()
-            self._conn = None
+        try:
+            if self._connecting_reader is not None:
+                await self._connecting_reader.close()
+        finally:
+            self._connecting_reader = None
+            try:
+                if self._conn is not None:
+                    await self._conn.close()
+            finally:
+                self._conn = None
 
     @property
     def path(self) -> str:

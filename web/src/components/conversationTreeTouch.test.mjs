@@ -9,7 +9,9 @@ import { baseParse } from '@vue/compiler-dom';
 import postcss from 'postcss';
 import { treeItemId as rowId } from './conversationTreeInteractions.js';
 import { MOBILE_VIEWPORT_QUERY } from '../mobileViewport.js';
+import { isActivityWaiting } from '../conversationActivity.js';
 import { REFERENCE_MIME, referenceToken } from '../references/codec.js';
+import * as conversationGroupsTree from './conversationGroupsTree.js';
 const source = fs.readFileSync(new URL('./ConversationTree.vue', import.meta.url), 'utf8');
 const between = (start, end) => { const a = source.indexOf(start), b = source.indexOf(end, a + start.length); assert.ok(a >= 0 && b > a); return source.slice(a, b); };
 const walk = nodes => (nodes || []).flatMap(node => [node, ...walk(Array.isArray(node.children) ? node.children : [])]);
@@ -22,7 +24,7 @@ const saved = { kind: 'conversation', id: 'A', conversationUuid: 'A', title: '�
 const event = (extra = {}) => ({ prevented: 0, stopped: 0, preventDefault() { this.prevented++; }, stopPropagation() { this.stopped++; }, currentTarget: { getBoundingClientRect: () => ({ right: 280, top: 100, bottom: 144 }) }, ...extra });
 function harness({ mobile = true, row = saved } = {}) {
   const opened = [], moved = [], emitted = [];
-  const ctx = vm.createContext({ ref, nextTick, rowId, MOBILE_VIEWPORT_QUERY, REFERENCE_MIME, referenceToken,
+  const ctx = vm.createContext({...conversationGroupsTree, ref, nextTick, rowId, MOBILE_VIEWPORT_QUERY, REFERENCE_MIME, referenceToken, isActivityWaiting,
     ...Object.fromEntries(['Loading', 'MagicStick', 'ArrowDown', 'ArrowRight', 'Box', 'ChatLineRound', 'FolderOpened', 'Folder', 'Star', 'StarFilled', 'RefreshLeft'].map(name => [name, 'svg'])),
     menu: ref({ open: false, x: 0, y: 0, row: null }), drag: ref({ row: null, target: null, zone: '' }),
     isDirectoryView: ref(true), locatingConversation: ref(false), displayRows: ref([row]), moveInFlight: ref(false), query: ref(''), activeConversationRow: ref(null), selectedFolderId: ref(''),
@@ -30,7 +32,7 @@ function harness({ mobile = true, row = saved } = {}) {
     window: { innerWidth: 1200, innerHeight: 900, matchMedia: () => ({ matches: mobile }), visualViewport: { width: 390, height: 430, offsetLeft: 0, offsetTop: 35 } },
     document: { querySelector: () => ({ getBoundingClientRect: () => ({ width: 194, height: 330 }) }) },
     closeOverview() {}, enterOverview() {}, leaveOverview() {}, running: row => Boolean(row?.running), activityLabel: () => '', rowLoading: () => false,
-    liveConversationTitle: row => row.title || '新会话', hasConversationMessages: () => true, isTitleGenerating: () => false,
+    liveConversationTitle: row => row.title || '新会话', conversationOrigin: () => ({icon: 'svg'}), hasConversationMessages: () => true, isTitleGenerating: () => false,
     nodePath: row => row.path || '目录 F', recentLabel: () => '刚刚', rowLabel: row => row.title || row.name, indentation: () => '0px', isExpanded: () => false, toggleRow() {},
     activateRow: row => opened.push(row.id), locateAndOpen: row => opened.push(row.id), dragOver() {}, drop() {}, clearDrag() {},
     rootDropTarget: {kind: 'root', id: '__root'},

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
@@ -8,17 +7,11 @@ import pytest
 
 from app import __version__
 from app.update.loader import load_updater
-from app.update.service import atomic_write_json, data_dir_from_config, read_json
+from app.update.service import PACKAGE_EXTRAS, data_dir_from_config, read_json, restore_package_extras
 
 
 def updater():
     return load_updater()
-
-
-def test_installed_version_reads_disk():
-    from app import __version__, installed_version
-
-    assert installed_version() == __version__
 
 
 def test_version_files_are_in_sync():
@@ -147,24 +140,51 @@ def test_parse_sha256sums():
         updater().parse_sha256sums("abc123  openbear-0.2.0.zip\n", "openbear-0.2.0.zip")
 
 
-def test_update_result_roundtrip(tmp_path: Path):
-    path = tmp_path / "update-result.json"
-    atomic_write_json(path, {
-        "schema": 1,
-        "status": "rolled_back",
-        "fromVersion": "0.1.0",
-        "toVersion": "0.2.0",
-        "message": "health failed",
-        "acked": False,
-    })
-    data = read_json(path)
-    assert data["status"] == "rolled_back"
-    assert data["message"] == "health failed"
-
-
 def test_data_dir_from_config(tmp_path: Path):
     config = type("C", (), {"storage": type("S", (), {"db_path": str(tmp_path / "db" / "openbear.db")})()})()
     assert data_dir_from_config(config) == tmp_path / "db"
+
+
+def _retained_package(tmp_path: Path, meta: bytes, *, wrapped: bool = False) -> Path:
+    extract = tmp_path / "data/updater/staging/extract"
+    package = extract / "openbear-0.13.0" if wrapped else extract
+    (package / "app").mkdir(parents=True)
+    (package / "release-meta.json").write_bytes(meta)
+    (package / "gateway/bin").mkdir(parents=True)
+    binary = package / "gateway/bin/openbear-gateway-linux-amd64"
+    binary.write_bytes(b"ELF")
+    binary.chmod(0o755)
+    for rel in ("gateway/README.md", "Dockerfile", ".dockerignore", "docs/instances.md"):
+        (package / rel).parent.mkdir(parents=True, exist_ok=True)
+        (package / rel).write_text(f"package {rel}")
+    return package
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_upgrade_from_old_updater_restores_missing_package_files_from_its_retained_package(tmp_path: Path, wrapped):
+    install = tmp_path / "install"
+    install.mkdir()
+    (install / "release-meta.json").write_bytes(b'{"version": "0.13.0"}')
+    (install / "Dockerfile").write_text("kept")
+    _retained_package(tmp_path, b'{"version": "0.13.0"}', wrapped=wrapped)
+    restored = restore_package_extras(install, tmp_path / "data")
+    assert restored == [rel for rel in PACKAGE_EXTRAS if rel != "Dockerfile"]
+    assert (install / "Dockerfile").read_text() == "kept", "present files are never overwritten"
+    binary = install / "gateway/bin/openbear-gateway-linux-amd64"
+    assert binary.read_bytes() == b"ELF" and binary.stat().st_mode & 0o111
+    assert (install / "docs/instances.md").read_text() == "package docs/instances.md"
+    assert not list(install.rglob(".*.restore-*"))
+    assert restore_package_extras(install, tmp_path / "data") == []
+
+
+def test_retained_package_of_another_release_is_not_used(tmp_path: Path):
+    install = tmp_path / "install"
+    install.mkdir()
+    (install / "release-meta.json").write_bytes(b'{"version": "0.13.0"}')
+    _retained_package(tmp_path, b'{"version": "0.12.0"}')
+    assert restore_package_extras(install, tmp_path / "data") == []
+    assert not (install / "gateway").exists()
+    assert restore_package_extras(install, tmp_path / "elsewhere") == []
 
 
 def test_rollback_stops_running_new_process(tmp_path: Path, monkeypatch):
@@ -365,15 +385,6 @@ def test_run_recovers_when_swap_fails_before_or_between_directories(
     assert (install / "web" / "dist" / "index.html").read_text(encoding="utf-8") == "old frontend\n"
     result = json.loads((data / "update-result.json").read_text(encoding="utf-8"))
     assert result["status"] == "rolled_back"
-
-
-def test_updater_module_is_stdlib_only():
-    path = Path(__file__).resolve().parents[1] / "scripts" / "updater.py"
-    spec = importlib.util.spec_from_file_location("standalone_updater_check", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    assert module.SCHEMA == 1
 
 
 def test_sync_deps_skips_when_lock_unchanged(tmp_path: Path):

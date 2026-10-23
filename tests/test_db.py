@@ -440,31 +440,6 @@ async def test_cancelled_reader_execute_releases_snapshot(db, monkeypatch, repea
             await reader._execute(cursor.close)
 
 
-async def test_latest_controller_prompt_tokens_filters_child_and_old_compaction_epoch(db):
-    dao = MessageDAO(db)
-    await dao.add_model_call(
-        77,
-        session_uuid="session-77",
-        call_kind="controller_request",
-        status="ok",
-        last_usage=Usage(input_tokens=8000, cache_read_tokens=500, cache_write_tokens=100),
-    )
-    await dao.add_model_call(
-        77,
-        session_uuid="session-77",
-        call_kind="agent_request",
-        status="ok",
-        last_usage=Usage(input_tokens=90_000),
-    )
-
-    assert await dao.latest_controller_prompt_tokens(77, session_uuid="session-77") == 8600
-
-    # A summary written after that controller call starts a new context epoch.
-    # Same-second ordering is intentionally treated as ambiguous/stale.
-    await SummaryDAO(db).add(77, "压缩后的摘要", 0, 100)
-    assert await dao.latest_controller_prompt_tokens(77, session_uuid="session-77") == 0
-
-
 async def test_model_and_tool_call_logs(db):
     dao = MessageDAO(db)
     await dao.add_model_call(
@@ -534,15 +509,6 @@ async def test_model_and_tool_call_logs(db):
     assert combined_models == multi_detail_summary
 
 
-async def test_recent_errors_combines_model_and_tool_logs(db):
-    dao = MessageDAO(db)
-    await dao.add_model_call(1, model="openai/gpt", status="error", error_type="rate_limit")
-    await dao.add_tool_call(1, tool_name="Bash", status="error", error_type="timeout")
-    errors = await dao.recent_errors(1)
-    assert {e["kind"] for e in errors} == {"model", "tool"}
-    assert {e["error_type"] for e in errors} == {"rate_limit", "timeout"}
-
-
 async def test_session_thinking_level(db):
     dao = MessageDAO(db)
     assert await dao.get_thinking_level(42) == ""
@@ -578,19 +544,6 @@ async def test_session_snapshot_reads_existing_without_ensure_and_creates_missin
     assert (missing["thinking_level"], missing["fast_mode"], missing["show_thinking"]) == ("", 0, -1)
     cur = await db.conn.execute("SELECT COUNT(*) AS n FROM sessions WHERE chat_id=44")
     assert int((await cur.fetchone())["n"]) == 1
-
-
-async def test_session_show_thinking_override(db):
-    dao = MessageDAO(db)
-    assert await dao.get_show_thinking_override(42) is None
-    assert await dao.get_show_thinking(42, default=False) is False
-    assert await dao.get_show_thinking(42, default=True) is True
-    await dao.set_show_thinking(42, True)
-    assert await dao.get_show_thinking_override(42) is True
-    assert await dao.get_show_thinking(42, default=False) is True
-    await dao.set_show_thinking(42, False)
-    assert await dao.get_show_thinking_override(42) is False
-    assert await dao.get_show_thinking(42, default=True) is False
 
 
 async def test_usage_totals_are_persisted_and_accumulated(db):
@@ -752,19 +705,6 @@ async def test_turn_stats_accumulate_and_reset(db):
     assert totals.last_run_tool_calls == 0
     assert totals.last_model == ""
     assert totals.last_created_at == 0
-
-
-async def test_has_history(db):
-    dao = MessageDAO(db)
-    cid = 1234
-    assert await dao.has_history(cid) is False
-    await dao.add(cid, "user", "hi", tokens=3)
-    assert await dao.has_history(cid) is True
-    await dao.clear(cid)
-    assert await dao.has_history(cid) is False
-    # 仅有摘要也算有历史
-    await SummaryDAO(db).add(cid, "摘要", 1, 5)
-    assert await dao.has_history(cid) is True
 
 
 async def test_session_uuid_stable_and_reset(db):

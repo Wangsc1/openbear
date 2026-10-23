@@ -156,6 +156,19 @@ def test_runtime_and_private_paths_never_become_public_candidate(path):
     assert not candidate.valid_path(path)
 
 
+@pytest.mark.parametrize("path", ["Dockerfile", ".dockerignore", "scripts/container-entrypoint.sh"])
+def test_container_build_definitions_are_public_source(path):
+    assert candidate.valid_path(path)
+
+
+@pytest.mark.parametrize("path, public", [
+    ("mobile/src/app/index.tsx", True), ("mobile/package.json", True), ("mobile/app.config.ts", True),
+    ("mobile/node_modules/expo/index.js", False), ("mobile/src/__pycache__/x.pyc", False),
+])
+def test_native_client_source_is_public_but_not_its_dependencies(path, public):
+    assert candidate.valid_path(path) is public
+
+
 def _stage_local_only_removal(repo, name):
     target = repo / name
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -307,6 +320,20 @@ def test_matrix_collection_and_skip_contract():
     values = {**values, "py313": {"ok": True, "testCases": [{"id": "unexpected", "status": "skipped", "skipReason": "not installed"}]}}
     with pytest.raises(ReleaseError, match="Unexpected conditional skip"):
         runner.matrix_contract(values)
+    systemd = {"ok": True, "testCases": [{"id": "tests.test_systemd_watchdog_live::test_case", "status": "skipped",
+                                          "skipReason": "set OPENBEAR_SYSTEMD_TEST=1 to test disposable systemd services"}]}
+    assert runner.matrix_contract({name: systemd for name in runner.TEST_STAGES})["ok"]
+    live = {"ok": True, "testCases": [{"id": f"tests.{module}::test_case", "status": "skipped", "skipReason": "需 --run-live"}
+                                      for module in ("test_live_parrot", "test_live_read_images")]}
+    assert runner.matrix_contract({name: live for name in runner.TEST_STAGES})["ok"]
+    unlisted = {"ok": True, "testCases": [{"id": "tests.test_other::test_case", "status": "skipped", "skipReason": "需 --run-live"}]}
+    with pytest.raises(ReleaseError, match="Unexpected conditional skip"):
+        runner.matrix_contract({name: unlisted for name in runner.TEST_STAGES})
+    for case in ({"id": "tests.test_other::test_case", "skipReason": systemd["testCases"][0]["skipReason"]},
+                 {"id": "tests.test_systemd_watchdog_live::test_case", "skipReason": "not installed"}):
+        values = {name: {"ok": True, "testCases": [{**case, "status": "skipped"}]} for name in runner.TEST_STAGES}
+        with pytest.raises(ReleaseError, match="Unexpected conditional skip"):
+            runner.matrix_contract(values)
 
 
 class MemoryCommands:
@@ -422,6 +449,35 @@ def test_whole_pipeline_B_failure_resumes_without_repeating_tests_build_or_A(tmp
     assert calls["B"] == 2 and calls["publish"] == 1
     for stage in (*runner.TEST_STAGES, "build", "package", "smoke", "A"):
         assert calls[stage] == 1, (stage, calls)
+
+
+def test_upgrade_harness_changes_invalidate_acceptance_evidence(tmp_path):
+    support = tmp_path / "support"
+    helpers = support / "acceptance_helpers"
+    helpers.mkdir(parents=True)
+    (support / "acceptance.py").write_text("harness")
+    helper = helpers / "seed_upgrade.py"
+    helper.write_text("small-old-fixture")
+    state = State(tmp_path / "run", {"stages": {}})
+    calls = []
+
+    def check():
+        calls.append("verified")
+        return {"ok": True}
+
+    def run():
+        return state.execute("acceptance-B", {"assets": "same-zip", "harness": runner.acceptance_fingerprint(support)}, check)
+
+    run()
+    run()
+    assert calls == ["verified"]
+    helper.write_text("large-old-fixture-with-readiness-check")
+    run()
+    assert calls == ["verified", "verified"]
+    (helpers / "__pycache__").mkdir()
+    (helpers / "__pycache__/seed_upgrade.pyc").write_bytes(b"not an input")
+    run()
+    assert calls == ["verified", "verified"]
 
 
 def test_one_python_environment_correction_reuses_unaffected_stages(tmp_path):

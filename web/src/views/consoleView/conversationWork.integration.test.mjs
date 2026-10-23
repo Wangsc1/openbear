@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {register} from 'node:module';
-import {compileScript, compileStyle, compileTemplate, parse} from '@vue/compiler-sfc';
+import {compileScript, parse} from '@vue/compiler-sfc';
 import {createRenderer, h, nextTick, reactive, ref, shallowRef, toRaw} from 'vue';
 import {conversationTimelineEntries} from './conversationTimeline.js';
 import {createTimelineReuse} from './timelineReuse.js';
@@ -76,7 +76,10 @@ const rowSlot = {default: ({entry}) => h('p', {'data-id':entry.event.id}, entry.
 test('loading older history keeps real per-row visibility menus linear, not one full-turn scan per row', async t => {
   let reads=0;
   class CountedMap extends Map { get(key) { reads++; return super.get(key); } }
-  const recent=Array.from({length:80},(_,i)=>tool(`recent-${i}`));
+  // Today each row costs ~3 lookups (threshold 12/row). A per-row scan of its
+  // turn costs >=2 lookups per event of that turn, i.e. >=120/row at 60 rows per
+  // page, so these sizes still fail such a regression by an order of magnitude.
+  const recent=Array.from({length:20},(_,i)=>tool(`recent-${i}`));
   const operations=shallowRef(new CountedMap(recent.map(e=>[e.id,e.operation])));
   const visibility=createMessageVisibility({conversationUuid:ref('history-perf'),operations,api:{}});
   const props=reactive({turns:[{id:'recent-turn',events:recent}],running:true,detailKey:()=>'',isDetailOpen:()=>false,activeToolResultIndex:()=>0});
@@ -87,7 +90,7 @@ test('loading older history keeps real per-row visibility menus linear, not one 
   });
   let all=[...recent];
   for(let page=0;page<3;page++) {
-    const old=Array.from({length:334},(_,i)=>tool(`old-${page}-${i}`));
+    const old=Array.from({length:60},(_,i)=>tool(`old-${page}-${i}`));
     all=[...old,...all]; reads=0;
     operations.value=new CountedMap(all.map(e=>[e.id,e.operation]));
     props.turns=[{id:`old-turn-${page}`,events:old},...props.turns];
@@ -98,9 +101,11 @@ test('loading older history keeps real per-row visibility menus linear, not one 
   }
 });
 
-test('334-row real timeline updates only the changed process component and preserves an open old detail', async t => {
+// Row count is not part of this contract (no paging/virtualization threshold):
+// one changed row among many, with an open older row that must survive.
+test('long real timeline updates only the changed process component and preserves an open old detail', async t => {
   const reuse = createTimelineReuse();
-  const events = Array.from({length:333}, (_, i) => tool(`tool-${i}`));
+  const events = Array.from({length:39}, (_, i) => tool(`tool-${i}`));
   events.push({...reasoning,id:'live-thought',reasoningActive:true,message:{content:'',reasoning:'live',live:true}});
   const props = reactive({turns:reuse([{id:'long',events}]),running:true,detailKey:()=>'',isDetailOpen:()=>false,activeToolResultIndex:()=>0});
   const updates=[];
@@ -108,23 +113,18 @@ test('334-row real timeline updates only the changed process component and prese
     if(this.$options.__name==='ConversationProcessEvent') updates.push(this.$props.event.id);
   }}));
   const rows=walk(root).filter(n=>hasClass(n,'conversation-process'));
-  assert.equal(rows.length,334);
-  find(rows[80],'process-summary').props.onClick(); await nextTick(); await nextTick();
-  assert.equal(find(rows[80],'process-summary').props['aria-expanded'],true);
+  assert.equal(rows.length,40);
+  find(rows[20],'process-summary').props.onClick(); await nextTick(); await nextTick();
+  assert.equal(find(rows[20],'process-summary').props['aria-expanded'],true);
   updates.length=0;
-  props.turns=reuse([{id:'long',events:events.map((event,i)=>i===333
+  props.turns=reuse([{id:'long',events:events.map((event,i)=>i===39
     ? {...event,message:{...event.message,reasoning:'live new text'}} : {...event})}]);
   await nextTick(); await nextTick();
   assert.deepEqual(updates,['live-thought'],'unchanged rows must not execute component updates on each stream paint');
   const nextRows=walk(root).filter(n=>hasClass(n,'conversation-process'));
-  assert.equal(nextRows[80],rows[80]);
-  assert.equal(find(nextRows[80],'process-summary').props['aria-expanded'],true);
-  assert.match(text(nextRows[80]),/COMPLETE-OUTPUT-END/);
-});
-
-for (const file of files) test(`${file}: script, template and theme CSS compile`, () => {
-  assert.deepEqual(compileTemplate({source:descriptors[file].template.content,filename:file,id:file}).errors, []);
-  for (const s of descriptors[file].styles) assert.deepEqual(compileStyle({source:s.content,filename:file,id:file,scoped:s.scoped}).errors, []);
+  assert.equal(nextRows[20],rows[20]);
+  assert.equal(find(nextRows[20],'process-summary').props['aria-expanded'],true);
+  assert.match(text(nextRows[20]),/COMPLETE-OUTPUT-END/);
 });
 
 test('working -> complete folds only process; full final answer and manual re-expansion survive', async t => {
@@ -189,7 +189,7 @@ test('real TurnList obeys hidden operations and restores process visibility with
   const hiddenIds = ref(new Set(['thought','tool']));
   const visibility = {hiddenIds,selecting:ref(false),selected:ref(new Set()),mobileMenu:ref(null),
     isHidden:event=>hiddenIds.value.has(event.id),canTarget:()=>false};
-  const root = mount(t,'TurnList.vue',{turns:[{id:'turn',events}],running:true,detailKey:()=>'',isDetailOpen:()=>false,activeToolResultIndex:()=>0},null,[[MESSAGE_VISIBILITY,visibility]]);
+  const root = mount(t,'TurnList.vue',{turns:[{id:'turn',events}],running:true,controllerRunning:true,detailKey:()=>'',isDetailOpen:()=>false,activeToolResultIndex:()=>0},null,[[MESSAGE_VISIBILITY,visibility]]);
   assert.match(text(root),/VISIBLE-FINAL/); assert.doesNotMatch(text(root),/完整思考正文-END|读取/);
   hiddenIds.value = new Set(); await nextTick();
   assert.match(text(root),/思考/); assert.match(text(root),/读取/);

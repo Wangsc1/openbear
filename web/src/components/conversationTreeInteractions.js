@@ -13,6 +13,9 @@ export function compareTreeItems(a, b) {
   if (kind) return kind;
   const pin = Number(Boolean(b.pinned)) - Number(Boolean(a.pinned));
   if (pin) return pin;
+  // The server places a draft at the head of its unpinned group on first send.
+  const draft = Number(Boolean(b.local)) - Number(Boolean(a.local));
+  if (draft) return draft;
   const am = a.displayOrder == null, bm = b.displayOrder == null;
   if (am !== bm) return am ? 1 : -1;
   return Number(a.displayOrder || 0) - Number(b.displayOrder || 0)

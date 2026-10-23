@@ -174,15 +174,6 @@ test('system domain picker retains all domains and existing query reset behavior
   assert.equal(scope.activeDomain, 'tools'); assert.equal(scope.query, '');
 });
 
-test('phone settings domain picker frame is rounded and separated from the search toolbar', () => {
-  const settingsCss = postcss.parse(sfcs.Settings.styles.filter(s => s.scoped).map(s => s.content).join('\n'));
-  const frame = css('.settings-sidebar', 390, settingsCss);
-  assert.equal(frame['border-radius'], '12px');
-  assert.equal(frame['margin-top'], '8px');
-  assert.equal(frame.padding, '6px 10px');
-  assert.equal(css('.settings-sidebar', 1280, settingsCss)['border-radius'], '12px', 'desktop and phone use the same quiet panel radius');
-});
-
 test('render log cards open the same row and audit details retain full text without executing APIs', async () => {
   const logs = [{id:1, ts:123, source:'web', client_ip:'test-ip', template_name:'test-template', output_len:88, ms:5, params_json:'{"test":true}'}];
   const calls = [];

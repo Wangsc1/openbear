@@ -384,6 +384,29 @@ class BuiltinMemoryClient:
         ctx = await self._agent_template_context(params or {})
         return await self._render_template(template, ctx, source="agent_runtime", params=params or {})
 
+    async def _conversation_folder_prompt(self, conversation_uuid: str) -> str:
+        """Nearest non-empty folder prompt on the conversation's folder chain."""
+        if not conversation_uuid:
+            return ""
+        try:
+            cur = await self._db.conn.execute(
+                "SELECT folder_uuid FROM web_conversations WHERE conversation_uuid=?", (conversation_uuid,))
+            row = await cur.fetchone()
+            current, seen = str((row["folder_uuid"] if row else "") or ""), set()
+            while current and current not in seen:
+                seen.add(current)
+                cur = await self._db.conn.execute(
+                    "SELECT parent_uuid,prompt_markdown FROM web_conversation_folders WHERE folder_uuid=?", (current,))
+                folder = await cur.fetchone()
+                if folder is None:
+                    break
+                if str(folder["prompt_markdown"] or "").strip():
+                    return str(folder["prompt_markdown"])
+                current = str(folder["parent_uuid"] or "")
+        except Exception:
+            return ""
+        return ""
+
     async def _main_template_context(self, params: dict[str, Any]) -> dict[str, Any]:
         memory = await self._memory_object()
         ctx = dict(params or {})
@@ -428,6 +451,8 @@ class BuiltinMemoryClient:
         ctx["mcpToolSummaries"] = {name: tool_summaries.get(name, "") for name in mcp_names}
         ctx["mcpServerInstructions"] = list(ctx.get("mcpServerInstructions") or []) if mcp_names else []
         ctx["memory"] = memory
+        if "folderPrompt" not in ctx:
+            ctx["folderPrompt"] = await self._conversation_folder_prompt(str(ctx.get("conversationUuid") or ""))
         ctx["toolNames"] = tool_names
         ctx["toolSummaries"] = tool_summaries
         ctx["builtinToolNames"] = builtin_names

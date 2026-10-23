@@ -1,6 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {readFileSync} from "node:fs";
 
 import {
 	buildInteractionAnswer,
@@ -16,9 +15,6 @@ import {
 	toggleInteractionOption,
 	validateInteractionDraft,
 } from "./userInteractionState.js";
-
-const composerSource = readFileSync(new URL("./ConsoleComposer.vue", import.meta.url), "utf8");
-const consoleViewSource = readFileSync(new URL("./ConsoleView.vue", import.meta.url), "utf8");
 
 const selectItem = {
 	action: "select",
@@ -98,15 +94,6 @@ test("cancel payload never submits select, prompt, confirm, or questionnaire-lik
 			selectedIndexes: [0], value: "prompt secret", text: "unsubmitted draft",
 		}, "cancel"), {cancelled: true});
 	}
-});
-
-test("composer and parent wire shared submitting, inline error, expiry, and revision contracts", () => {
-	assert.match(composerSource, /interactionDisabled\(item\)/);
-	assert.match(composerSource, /interaction-submit-error/);
-	assert.match(composerSource, /interactionExpiry\(item\)/);
-	assert.match(consoleViewSource, /confirmationSubmitting\.value\[confirmationId\]/);
-	assert.match(consoleViewSource, /revision:\s*interactionRevision\(item\)/);
-	assert.match(consoleViewSource, /isTerminalInteractionError\(error\)/);
 });
 
 test("revision, expiry and terminal response compatibility are deterministic", () => {

@@ -38,12 +38,17 @@ MISSING_TOOL_RESULT_TEXT = (
     "[openbear] 该工具调用未返回结果(可能被中止或上游中断),已插入占位以修复对话结构。可能已发生副作用；不得视为未执行或自动重放。"
 )
 
-# Non-empty placeholder so strict providers (Anthropic-style alternation)
-# accept the sequence. Deliberately machine-marked: a natural phrase like
-# "(继续)" gets imitated by the model as a final answer after enough
-# repetitions in context (observed live, message 113539). A protocol marker
-# is never mistaken for the assistant's own words.
-ROLE_ALTERNATION_BRIDGE_TEXT = "[protocol: role-alternation bridge]"
+# Strict providers (Anthropic-style alternation) need a non-empty assistant
+# unit between user-role units. Both "(继续)" and a bare protocol marker were
+# imitated as final answers (message 113539). Explain the placeholder's purpose
+# instead; keep it constant, since a varying text would break the cached prefix.
+LEGACY_ROLE_ALTERNATION_BRIDGE_TEXT = "[protocol: role-alternation bridge]"
+ROLE_ALTERNATION_BRIDGE_TEXT = (
+    "[openbear internal role-alternation placeholder: not an assistant answer. "
+    "Do not repeat this placeholder; respond to the following message using the "
+    "preceding context, with substantive text or appropriate tool calls.]"
+)
+_ROLE_ALTERNATION_BRIDGE_TEXTS = (LEGACY_ROLE_ALTERNATION_BRIDGE_TEXT, ROLE_ALTERNATION_BRIDGE_TEXT)
 
 
 def is_role_alternation_bridge(text: Any) -> bool:
@@ -53,13 +58,13 @@ def is_role_alternation_bridge(text: Any) -> bool:
     echoes it as its whole answer, treat it like an empty response rather than
     a user-visible final answer.
     """
-    return isinstance(text, str) and text.strip() == ROLE_ALTERNATION_BRIDGE_TEXT
+    return isinstance(text, str) and text.strip() in _ROLE_ALTERNATION_BRIDGE_TEXTS
 
 
 def is_role_alternation_bridge_prefix(text: str) -> bool:
     """Hold a possible bridge echo until ordinary text or response end disambiguates it."""
     stripped = text.strip()
-    return bool(stripped) and ROLE_ALTERNATION_BRIDGE_TEXT.startswith(stripped)
+    return bool(stripped) and any(marker.startswith(stripped) for marker in _ROLE_ALTERNATION_BRIDGE_TEXTS)
 
 
 def _tool_calls_of(msg: Message) -> list[dict]:

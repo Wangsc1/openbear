@@ -83,6 +83,38 @@ async def test_completed_round_continues_same_instance_actual_context_new_tools_
     assert len(backend.calls) == 2
 
 
+@pytest.mark.parametrize("idle_s, usage_tokens, expected", [
+    (600, 200_000, (True, "cache_expired")),   # cache lapsed on a large context: compact first
+    (60, 200_000, (False, "")),                 # still warm: keep the full retained context
+    (600, 60_000, (False, "")),                 # already near the retained size: nothing to gain
+])
+async def test_continued_round_compacts_first_only_when_its_cache_expired(env, monkeypatch, idle_s, usage_tokens, expected):
+    import time
+    from app.context.runtime import WindowRuntime
+    dao, reg, backend, ctx, _ = env
+    first = await call(reg, "Agent", {"prompt": "调查", "tools": ["Read"]}, ctx)
+    a = first["agentSession"]["sessionUuid"]
+    await dao.db.conn.execute(
+        "UPDATE context_windows SET usage_known=1,usage_tokens=?,state_json=json_set(state_json,'$.lastRequestAt',?) "
+        "WHERE owner_kind='agent' AND agent_session_uuid=?", (usage_tokens, int(time.time()) - idle_s, a))
+    await dao.db.conn.commit()
+    calls = []
+    original = WindowRuntime.prepare
+
+    async def recording(self, messages, **kwargs):
+        if self.store.owner.kind == "agent":
+            calls.append((bool(kwargs.get("force")), kwargs.get("source", "")))
+        return await original(self, messages, **kwargs)
+
+    monkeypatch.setattr(WindowRuntime, "prepare", recording)
+    next_ctx = ToolRuntimeContext(chat_id=123, session_uuid=ctx.session_uuid, conversation_uuid=ctx.session_uuid,
+                                  source="web", turn_uuid="turn-2", run_root_turn_uuid="turn-2")
+    second = await call(reg, "AgentContinue", {"to": a, "prompt": "继续", "tools": ["Read"]}, next_ctx)
+    assert second["status"] == "completed", second
+    assert calls[0] == expected
+    assert all(call == (False, "") for call in calls[1:]), "only the round's first request is affected"
+
+
 async def test_same_preset_isolated_and_no_cross_scope_tools(env):
     dao, reg, backend, ctx, _ = env
     first = await call(reg, "Agent", {"prompt": "A-only", "tools": ["TaskMemory"]}, ctx)
@@ -146,6 +178,51 @@ async def test_legacy_adoption_preserves_only_selected_task_and_memory_uuid(env)
     item = await TaskMemoryDAO(dao.db).get(mem["memoryUuid"], conversation_uuid=ctx.session_uuid, scope_type="agent_session", task_uuid=adopted.session_uuid)
     assert item["body"] == "private"
     assert (await dao.agent_session(legacy.session_uuid)).status == "active"
+
+
+async def test_parallel_instance_creation_reads_own_write_with_busy_reader(env):
+    dao, _, _, ctx, _ = env
+    args = dict(openbear_session_uuid=ctx.session_uuid, chat_id=ctx.chat_id,
+                workflow_uuid="w", agent_key="same")
+    await dao.create_agent_instance(**args)
+    await dao.create_agent_instance(**args)
+    cursor = await dao.db.conn.execute("SELECT * FROM rath_agent_sessions")
+    try:
+        instances = await asyncio.gather(*(dao.create_agent_instance(**args) for _ in range(3)))
+        assert all(instance is not None for instance in instances)
+        assert len({instance.session_uuid for instance in instances}) == 3
+        for instance in instances:
+            frozen = await dao.freeze_agent_instance(instance.session_uuid, llmSessionId="frozen")
+            assert frozen.session_uuid == instance.session_uuid
+            assert frozen.metadata["llmSessionId"] == "frozen"
+            unchanged = await dao.freeze_agent_instance(instance.session_uuid, llmSessionId="replacement")
+            assert unchanged.metadata["llmSessionId"] == "frozen"
+    finally:
+        await cursor.close()
+    for instance in instances:
+        assert (await dao.agent_session(instance.session_uuid)).session_uuid == instance.session_uuid
+
+
+async def test_agent_launch_uses_frozen_instance_with_busy_reader(env, monkeypatch):
+    dao, reg, _, ctx, manager = env
+    args = dict(openbear_session_uuid=ctx.session_uuid, chat_id=ctx.chat_id,
+                workflow_uuid="w", agent_key="same")
+    await dao.create_agent_instance(**args)
+    await dao.create_agent_instance(**args)
+    cursor = await dao.db.conn.execute("SELECT * FROM rath_agent_sessions")
+    create_task = manager.create_task
+
+    async def release_reader_before_task(**kwargs):
+        await cursor.close()
+        return await create_task(**kwargs)
+
+    monkeypatch.setattr(manager, "create_task", release_reader_before_task)
+    try:
+        result = await call(reg, "Agent", {"prompt": "launch regression", "tools": []}, ctx)
+        assert result["status"] == "completed", result
+        assert result["task"]["taskUuid"]
+    finally:
+        await cursor.close()
 
 
 async def test_schema_reconnect_does_not_merge_independent_instances(tmp_path):

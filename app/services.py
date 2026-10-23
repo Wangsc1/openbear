@@ -24,6 +24,7 @@ from app.llm.client import HTTPClient
 from app.llm.factory import BackendFactory
 from app.logging import get_logger
 from app.mcp.manager import MCPManager
+from app.mcp.exposure import MCPExposureApprovals, MCPExposureNotAuthorized
 from app.memory.builtin import BuiltinMemoryClient
 from app.memory.client import MemoryClient
 from app.models.selection import ModelSelection
@@ -46,10 +47,11 @@ from app.tools.mcp import register_mcp_tools
 from app.tools.memory import register_memory_tools
 from app.tools.openbear_control import register_openbear_control_tool
 from app.tools.webhook import register_webhook_tool
+from app.tools.collab import register_collab_tools
+from app.collab.service import CollabService
+from app.collab.groups import GroupService
 from app.tools.cron import register_cron_tool
 from app.cron.service import CronService
-from app.recommendations.service import RecommendationService
-from app.tools.recommendation import register_recommendation_tool
 from app.webhooks.service import WebhookService
 from app.webhooks.runtime_bridge import RuntimeBridge
 from app.webhooks.worker import Worker
@@ -62,9 +64,17 @@ log = get_logger("services")
 
 
 class Services:
-    def __init__(self, config: Config, bot: Bot) -> None:
+    def __init__(self, config: Config, bot: Bot | None = None) -> None:
         self.config = config
-        self.config_store = ConfigStore(config_path())
+        self.startup_ready = asyncio.Event()
+        self._shutdown_task: asyncio.Task[None] | None = None
+        if config.managed.enabled and bot is not None:
+            raise ValueError("managed runtime cannot receive a Telegram Bot")
+        if config.managed.enabled:
+            from app.managed.configuration import ManagedConfigStore
+            self.config_store = ManagedConfigStore(config_path(), config)
+        else:
+            self.config_store = ConfigStore(config_path())
         # Public model metadata is a separate, recoverable cache.  Its contents
         # are never treated as an authoritative channel configuration.
         self.models_dev_catalog = ModelsDevCatalog(catalog_cache_dir(config_path()))
@@ -92,17 +102,25 @@ class Services:
         self.task_memories = TaskMemoryDAO(self.db)
         self.agents = AgentControlService(self.agent_dao, scheduler=self.runtime)
         # workspace: 默认为运行目录下的 workspace/，不存在则自动创建
-        self.workspace_dir = str(Path(os.getcwd(), "workspace").resolve())
+        self.workspace_dir = str(Path(config.managed.workspace_root if config.managed.enabled else os.getcwd(), "workspace").resolve())
+        if config.managed.enabled and not Path(self.workspace_dir).is_relative_to(Path(config.managed.workspace_root)):
+            raise ValueError("managed workspace path escapes the persistent volume")
         Path(self.workspace_dir).mkdir(parents=True, exist_ok=True)
+        self.managed_runtime = None
+        if config.managed.enabled:
+            from app.managed.runtime import ManagedRuntime
+            self.managed_runtime = ManagedRuntime(self)
         self.interactions = UserInteractionManager(bot)
         self.browser = BrowserService(config, self.workspace_dir)
         self._browser_validation_task: asyncio.Task[Any] | None = None
+        self.mcp_exposure_approvals = MCPExposureApprovals(self.db)
         self.mcp = MCPManager(
             config,
             interactions=self.interactions,
             db=self.db,
             approval_updater=self._update_mcp_server_approval,
             tools_changed_callback=self._on_mcp_tools_changed,
+            exposure_approvals=self.mcp_exposure_approvals,
         )
         self._mcp_reload_lock = asyncio.Lock()
         self._mcp_reload_generation = 0
@@ -126,17 +144,25 @@ class Services:
             mcp_agent_access_hook=self.apply_mcp_agent_access,
         )
         self.web_admin.mcp = self.mcp
-        self.update = UpdateService(self)
+        self.web_admin.managed_runtime = self.managed_runtime
+        self.update = None if config.managed.enabled else UpdateService(self)
         self.web_admin.update_service = self.update
+        pepper = self.managed_runtime.pepper if self.managed_runtime else ("openbear:webhooks:v1:" + config.telegram.bot_token).encode()
         self.webhooks = WebhookService(self.db, config=lambda: self.config.webhooks,
-            pepper=("openbear:webhooks:v1:" + config.telegram.bot_token).encode(), host=self.web_admin)
+            pepper=pepper, host=self.web_admin)
         self.web_admin.webhooks = self.webhooks
         self.webhook_bridge = RuntimeBridge(self.webhooks, self.web_admin)
         self.webhook_worker = Worker(self.webhooks)
         self.cron = CronService(self.db, self.web_admin)
         self.web_admin.cron = self.cron
-        self.recommendations = RecommendationService(self.db, self.web_admin)
-        self.web_admin.recommendations = self.recommendations
+        self.collab = CollabService(self.db, self.web_admin)
+        self.collab_groups = GroupService(self.db, self.web_admin, self.collab)
+        self.web_admin.interactions.validators['group_proposal'] = self.collab_groups.validate_answer
+        self.instances = None
+        if not config.managed.enabled:
+            from app.instances.service import InstanceService
+            self.instances = InstanceService(self.db, self.web_admin)
+        self.web_admin.instances = self.instances
 
         # 工具注册
         self.file_state = FileStateStore(config.tools.file_state_max_entries)
@@ -162,9 +188,12 @@ class Services:
         register_agent_history_tool(self.tools, self.db)
         register_user_interaction_tools(self.tools, self.interactions)
         register_openbear_control_tool(self.tools, self)
+        if self.instances is not None:
+            from app.tools.instances import register_instance_tools
+            register_instance_tools(self.tools, self.instances)
         register_webhook_tool(self.tools, self.webhooks)
         register_cron_tool(self.tools, self.cron)
-        register_recommendation_tool(self.tools, self.recommendations)
+        register_collab_tools(self.tools, self.collab, self.collab_groups)
         register_browser_tool(self.tools, self.browser)
         register_agent_tools(
             self.tools,
@@ -213,14 +242,27 @@ class Services:
         )
 
     async def startup(self) -> None:
+        try:
+            await self._startup()
+        except BaseException:
+            await self.shutdown()
+            raise
+
+    async def _startup(self) -> None:
+        self.startup_ready.clear()
+        for component in (self.web_admin, self.webhook_worker, self.cron,
+                          self.instances, self.web_admin.browser_push, self.web_admin.web_task_telegram,
+                          self.web_admin.interaction_telegram, self.web_admin.telegram_replies):
+            if component is not None:
+                component.startup_ready = self.startup_ready
         await self.db.connect()
+        await self.mcp_exposure_approvals.initialize(self.config)
+        if self.managed_runtime:
+            await self.managed_runtime.open()
         from app.runtime.store import RuntimeStore
         await RuntimeStore(self.db).interrupt_open_runs()
         if isinstance(self.mem, BuiltinMemoryClient):
             await self.mem._bootstrap()
-        # Starts an immediate background conditional GET.  Startup and model
-        # calls keep using the last-known-good local snapshot meanwhile.
-        await self.models_dev_catalog.start()
         await self._mark_interrupted_operations()
         # Rath/controller coroutines are process-local even when Rath is disabled
         # in the new config.  Always close durable leftovers from the old process.
@@ -235,25 +277,28 @@ class Services:
             log.warning("启动时同步终结未完成 Web 运行操作", 数量=reconciled_runtime)
         if self.config.agents.enabled:
             await ensure_builtin_workflows(self.agent_dao)
-        if self.config.browser.enabled:
-            result = await self.browser.validate_connection()
-            if not result["ok"]:
-                log.warning("浏览器连接未通过验证，浏览器工具保持停用", 原因=result.get("code", ""))
-            self._rebuild_tools_and_context(include_mcp=False, preserve_file_state=True)
         if self.config.mcp.enabled:
             try:
-                await self.mcp.start()
+                await self.mcp.start(defer_optional=True, startup_ready=self.startup_ready)
             except Exception:
                 await self.mcp.close()
                 raise
             self._rebuild_tools_and_context(include_mcp=True)
             registered_mcp_tools = len(self.mcp.available_tools())
             log.info("MCP 工具已注册", 数量=registered_mcp_tools)
+        if self.instances is not None:
+            await self.instances.start()
         await self.web_admin.start()
         await self.webhook_worker.start()
         await self.cron.start()
-        await self.recommendations.start()
-        await self.update.start()
+        await self.collab.start()
+        if self.update:
+            await self.update.start()
+        if self.managed_runtime:
+            await self.managed_runtime.start()
+        await self.models_dev_catalog.start()
+        self.startup_ready.set()
+        self._schedule_browser_validation()
         log.info("服务已启动", 工具数=len(self.tools.names()), skills=len(self.skills),
                  主力模型=self.selection.current)
 
@@ -694,9 +739,12 @@ class Services:
         register_agent_history_tool(self.tools, self.db)
         register_user_interaction_tools(self.tools, self.interactions)
         register_openbear_control_tool(self.tools, self)
+        if self.instances is not None:
+            from app.tools.instances import register_instance_tools
+            register_instance_tools(self.tools, self.instances)
         register_webhook_tool(self.tools, self.webhooks)
         register_cron_tool(self.tools, self.cron)
-        register_recommendation_tool(self.tools, self.recommendations)
+        register_collab_tools(self.tools, self.collab, self.collab_groups)
         register_browser_tool(self.tools, self.browser)
         register_agent_tools(
             self.tools,
@@ -770,6 +818,9 @@ class Services:
             "failedCount": int(status_counts.get("failed", 0)),
             "disabledCount": int(status_counts.get("disabled", 0)),
             "pendingCount": int(status_counts.get("pending", 0)),
+            "awaitingConfirmationCount": int(status_counts.get("awaiting_confirmation", 0)),
+            "enabledTools": sum(server.enabled_tool_count for server in snapshot.servers),
+            "definitionBytes": sum(server.definition_bytes for server in snapshot.servers),
             "totalTools": len(all_tools),
             "visibleTools": len(visible_tools),
             "filteredTools": len(filtered_tools),
@@ -813,7 +864,10 @@ class Services:
             raise RuntimeError(str(result.get("error") or "mcp_reload_failed"))
         return result
 
-    async def reload_mcp_from_disk(self) -> dict[str, Any]:
+    async def reload_mcp_with_confirmation(self, confirmation) -> dict[str, Any]:
+        return await self.reload_mcp_from_disk(exposure_confirmation=confirmation)
+
+    async def reload_mcp_from_disk(self, *, exposure_confirmation=None) -> dict[str, Any]:
         """Synchronously reload only MCP runtime state from current openbear.json.
 
         This is intentionally narrower than apply_config(): it reads the full config
@@ -846,7 +900,13 @@ class Services:
             if generation != self._mcp_reload_generation:
                 return self._mcp_status_summary(message="superseded", changed=effective_changed, reloaded=False)
             try:
-                commit, abort = await self.mcp.prepare_reload(runtime_config)
+                if exposure_confirmation is None:
+                    commit, abort = await self.mcp.prepare_reload(runtime_config)
+                else:
+                    commit, abort = await self.mcp.prepare_reload(runtime_config, exposure_confirmation=exposure_confirmation)
+            except MCPExposureNotAuthorized as exc:
+                return {"ok": False, "status": "amendments_required" if exc.confirmation.get("requiresAmendment") or exc.confirmation.get("decision") == "confirm_with_changes" else "cancelled",
+                        "confirmation": exc.confirmation, "effective": "not_applied"}
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -962,6 +1022,8 @@ class Services:
         MCP server/tool 变更会热重载：旧工具先保持可用（禁用时立即隐藏），新 server
         成功启动后再切换到新工具；失败时保留上一组已连接 MCP 工具，不要求重启。
         """
+        if config.managed.enabled != self.config.managed.enabled:
+            raise ValueError("runtime role is immutable")
         old_mem = self.mem
         # Compare against the actually active MCP manager config, not merely
         # self.config: a previous hot-reload attempt may have failed while other
@@ -1000,20 +1062,46 @@ class Services:
                  工具数=len(self.tools.names()), skills=len(self.skills), MCP热重载=mcp_changed)
 
     async def shutdown(self) -> None:
-        await self.recommendations.close()
-        await self.cron.close()
-        await self.webhook_worker.close()
-        if self._browser_validation_task:
-            self._browser_validation_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._browser_validation_task
-        await self.update.stop()
-        await self.web_admin.stop()
-        await self.models_dev_catalog.stop()
-        await self.browser.close()
-        await self.mcp.close()
-        await self.control_actions.shutdown()
-        await self.db.close()
-        await self.http.close()
-        await self.mem.close()
-        log.info("服务已关停")
+        from app.db.connection_router import drain_cleanup
+        if self._shutdown_task is None:
+            self._shutdown_task = asyncio.create_task(self._shutdown(), name="services-shutdown")
+        await drain_cleanup(self._shutdown_task)
+
+    async def _shutdown(self) -> None:
+        was_ready = self.startup_ready.is_set()
+        self.startup_ready.clear()
+        self.web_admin._web_stopping = True
+        failures = []
+
+        async def close(name, operation):
+            try:
+                await operation()
+            except (Exception, asyncio.CancelledError):
+                failures.append(name)
+                log.exception("服务组件关停失败，继续释放其他资源", 组件=name)
+
+        if not was_ready:
+            await close("database-interrupt", self.db.interrupt)
+        tasks = [task for task in (self._browser_validation_task, self._mcp_reload_task) if task]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await close("cron", self.cron.close)
+        await close("collab", self.collab.stop)
+        await close("webhooks", self.webhook_worker.close)
+        if self.update:
+            await close("update", self.update.stop)
+        await close("web", self.web_admin.stop)
+        if self.instances is not None:
+            await close("instances", self.instances.close)
+        if self.managed_runtime:
+            await close("managed-runtime", self.managed_runtime.close)
+        await close("models-catalog", self.models_dev_catalog.stop)
+        await close("browser", self.browser.close)
+        await close("mcp", self.mcp.close)
+        await close("control-actions", self.control_actions.shutdown)
+        await close("database", self.db.close)
+        await close("http", self.http.close)
+        await close("memory", self.mem.close)
+        log.info("服务已关停", 关停异常=failures)

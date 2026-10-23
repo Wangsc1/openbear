@@ -231,10 +231,12 @@ async def test_cancelled_script_preserves_captured_logs_and_reaps_process(cron_e
     job = await create(e, timeoutSeconds=.8 if mode == 'timeout' else None,
                        **{phase: {'enabled': True, 'code': code, 'timeoutSeconds': 30}})
     accepted = await e.cron.run(123, job['id'], {'requestId': 'run', 'expectedRevision': 1})
+    marker = e.tmp / 'logs-emitted'
     async with asyncio.timeout(5):
-        while not (e.tmp / 'logs-emitted').exists():
+        # write_text creates the file before writing it; wait for the pid itself.
+        while not (marker.exists() and marker.read_text().strip()):
             await asyncio.sleep(.01)
-    pid = int((e.tmp / 'logs-emitted').read_text())
+    pid = int(marker.read_text())
     if mode != 'timeout':
         await e.cron.stop(123, accepted['run']['id'], {'requestId': 'stop'})
     await asyncio.wait_for(asyncio.gather(*list(e.cron.tasks.values())), 5)

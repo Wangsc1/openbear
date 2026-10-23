@@ -201,7 +201,8 @@ def _nvm_node_bins() -> list[str]:
 
 def _shell_env() -> dict[str, str]:
     """Build a stable shell environment for Bash tool subprocesses."""
-    env = os.environ.copy()
+    from app.managed.settings import sanitized_env
+    env = sanitized_env()
     candidates: list[str] = []
     extra = env.get("OPENBEAR_BASH_EXTRA_PATH", "")
     if extra:

@@ -76,16 +76,6 @@ async def test_memory_identity_rejects_non_list_action():
     assert "only supports action=list" in out
 
 
-async def test_memory_old_tools_are_removed():
-    reg = ToolRegistry()
-    register_memory_tools(reg, _client(lambda req: httpx.Response(200, json={})))
-    assert "Memory" in reg.names()
-    for name in ("mem_identity", "mem_secret", "mem_entry", "mem_doc"):
-        assert name not in reg.names()
-        out = await reg.dispatch(name, json.dumps({"action": "list"}))
-        assert "未知工具" in out or "unknown tool" in out
-
-
 async def test_memory_http_error():
     def handler(req):
         return httpx.Response(500, text="boom")

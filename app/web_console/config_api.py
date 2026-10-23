@@ -78,13 +78,12 @@ class WebAdminSettingsChannelsMixin:
                 new_cfg = self.config
             else:
                 value = settings_admin.parse_setting_value(path, body.get("value"))
-                if path in {"models.compressionModels", "models.namingModels"}:
-                    existing = (
-                        self.config.models.compression_models
-                        if path == "models.compressionModels"
-                        else self.config.models.naming_models
-                    )
-                    label_name = "摘要模型" if path == "models.compressionModels" else "命名模型"
+                if path in {"models.compressionModels", "models.namingModels", "models.suggestionModels"}:
+                    existing, label_name = {
+                        "models.compressionModels": (self.config.models.compression_models, "摘要模型"),
+                        "models.namingModels": (self.config.models.naming_models, "命名模型"),
+                        "models.suggestionModels": (self.config.models.suggestion_models, "推荐模型"),
+                    }[path]
                     for label in value:
                         if not self.config.models.resolve(label) and label not in existing:
                             raise ValueError(f"{label_name}不可用：{label}")

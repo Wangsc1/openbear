@@ -5,9 +5,11 @@ import inspect
 
 from app.web_console.message_visibility import visibility_snapshot
 
+from app.agents import live_state as agent_live_state
 from app.interaction_data import normalize_questionnaire as _normalize_web_questionnaire
 from app.agents.controller_projection import project_history_message_for_controller
 from app.tools.base import current_tool_context
+from app.context.window import capped_trigger_tokens
 from app.web_console.core import *
 from app.web_console.live_stream import *
 
@@ -113,13 +115,17 @@ class WebAdminChatStateMixin:
         label = model_label or getattr(self.model_selection, "current", "") or self.config.models.primary
         resolved = self.config.models.resolve(label)
         policy = self.config.context_management
+        context_window = int(self.llm_factory.context_window(label) if hasattr(self.llm_factory, "context_window") else 0)
         return {
-            "context_window": int(self.llm_factory.context_window(label) if hasattr(self.llm_factory, "context_window") else 0),
-            "rollover_trigger_tokens": int(resolved[1].rollover_trigger_tokens or 0) if resolved else 0,
+            "context_window": context_window,
+            "rollover_trigger_tokens": capped_trigger_tokens(
+                int(resolved[1].rollover_trigger_tokens or 0) if resolved else 0, context_window,
+                self.config.agent.compact_ratio, int(getattr(self.config.agents, "context_trigger_tokens", 0) or 0)),
             "window_trigger_ratio": self.config.agent.compact_ratio,
             "context_config": self.config,
             "context_llm_factory": self.llm_factory,
-            "window_retain_ratio": policy.retain_ratio,
+            "window_retain_tokens": policy.retain_tokens,
+            "window_dialogue_tokens": policy.dialogue_tokens,
         }
 
     async def _effective_thinking_level(
@@ -517,7 +523,7 @@ class WebAdminChatStateMixin:
                 "displayName": f"{base_name}-{short_id}" if short_id else base_name,
                 "title": task.title,
                 "status": task.status,
-                "currentStatus": task.current_status,
+                "currentStatus": agent_live_state.current_status(task),
                 "agentSessionUuid": task.agent_session_uuid,
                 "startedAtMs": int((task.started_at or task.updated_at or 0) * 1000),
                 "updatedAtMs": int((task.updated_at or 0) * 1000),
@@ -602,6 +608,7 @@ class WebAdminChatStateMixin:
             "toolCalls": await self._chat_tool_calls(chat_id, session_uuid),
             "pendingConfirmations": self._pending_web_confirmations(conv_uuid),
             "pendingSteering": pending_steering,
+            "promptSuggestions": self._prompt_suggestions_public(conversation),
             "usage": usage_dict,
         }
 

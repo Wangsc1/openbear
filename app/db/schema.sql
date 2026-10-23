@@ -174,7 +174,14 @@ CREATE TABLE IF NOT EXISTS web_conversations (
   -- 只在可见 user/assistant 正文快照变化时递增，供引用目录按会话失效。
   reference_revision    INTEGER NOT NULL DEFAULT 0,
   -- 空值属于“临时会话”；归档只改变状态，不清除目录归属。
-  folder_uuid           TEXT NOT NULL DEFAULT ''
+  folder_uuid           TEXT NOT NULL DEFAULT '',
+  -- 创建来源：user|cron|webhook|collab|deployment|maintenance 等，创建后不变；origin_ref 指向对应业务记录。
+  -- 已下线功能写入的旧来源值原样保留，按非 user 来源处理。
+  -- 空值只出现在旧版本写入的行上，启动时按运行记录补齐。
+  origin_kind           TEXT NOT NULL DEFAULT '',
+  origin_ref            TEXT NOT NULL DEFAULT '',
+  -- 最近一轮结束后生成的下一句推荐 {turnUuid, items, createdAtMs}；新一轮开始或用户关闭时清空。
+  prompt_suggestions_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_web_conversations_owner_time
   ON web_conversations(owner_chat_id, archived_at, pinned_at DESC, updated_at DESC, id DESC);

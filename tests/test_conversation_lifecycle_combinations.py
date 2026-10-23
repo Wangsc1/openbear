@@ -496,7 +496,7 @@ async def test_agent_rotated_history_copy_restart_copy(web_env, monkeypatch, str
     forced = set()
     async def rotate(self, messages, **kwargs):
         if self.store.owner.kind == "agent" and self.active_run_root_turn_uuid in {"safe", "future"}:
-            self.policy = WindowPolicy(128000, trigger_tokens=16000)
+            self.policy = WindowPolicy(128000, trigger_tokens=16000, retain_tokens=2400, dialogue_tokens=0)
             if self not in forced:
                 forced.add(self)
                 kwargs["force"] = True

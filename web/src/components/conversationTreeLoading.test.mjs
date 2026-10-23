@@ -1,4 +1,5 @@
 import * as promptPolicy from './promptPolicy.js';
+import * as conversationActivity from '../conversationActivity.js';
 import test from 'node:test';
 import {useRecentConversationRows} from './conversationRecentRows.js';
 import assert from 'node:assert/strict';
@@ -6,6 +7,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { computed, nextTick, reactive, ref } from 'vue';
 import { treeItemId as rowId, treeItemParent, compareTreeItems, resolveTreeDrop } from './conversationTreeInteractions.js';
+import * as conversationGroupsTree from './conversationGroupsTree.js';
 
 const source = fs.readFileSync(new URL('./ConversationTree.vue', import.meta.url), 'utf8');
 const script = source.match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import[\s\S]*?;\n/gm, '');
@@ -15,7 +17,7 @@ function deferred() { let resolve, reject; const promise = new Promise((a, b) =>
 function harness(Api = {}) {
   const errors = [], notifications = [];
   let closedNotices = 0;
-  const context = vm.createContext({...promptPolicy, useRecentConversationRows, computed, nextTick, reactive, ref, rowId, treeItemParent, compareTreeItems, resolveTreeDrop, Api, apiError: String, referenceCatalog: { connected: false, ready: false },
+  const context = vm.createContext({...conversationGroupsTree,...promptPolicy,...conversationActivity, useRecentConversationRows, computed, nextTick, reactive, ref, rowId, treeItemParent, compareTreeItems, resolveTreeDrop, Api, apiError: String, referenceCatalog: { connected: false, ready: false },
     // Imports are seams in this loader-only fixture; lazy UI rendering is exercised in lazyView.test.mjs.
     defineLazyView: () => ({}),
     defineProps: () => ({ activeConversationUuid: '', draftConversation: null }), defineEmits: () => () => {}, defineExpose() {},
@@ -176,7 +178,7 @@ test('search loading belongs to search control rather than all result row icons'
 test('both node icon types use the same fixed icon slot; loading rows are absent and pagination remains guarded', () => {
   assert.match(source, /class="node-icon" :class="\{ 'is-spinning': rowLoading\(row\) \}"/);
   assert.match(source, /'is-spinning': rowLoading\(row\) \|\| isTitleGenerating\(row\)/);
-  assert.match(source, /'is-working': running\(row\) && !rowLoading\(row\) && !isTitleGenerating\(row\)/);
+  assert.match(source, /'is-working': running\(row\) && !isActivityWaiting\(row\) && !rowLoading\(row\) && !isTitleGenerating\(row\)/);
   assert.doesNotMatch(source, /kind: "loading"|row\.kind === 'loading'/);
   assert.match(source, /:aria-busy="rowLoading\(row\) \|\| isTitleGenerating\(row\)"/);
   assert.match(source, /class="title-generating-state" role="status" aria-live="polite">命名中/);

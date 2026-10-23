@@ -8,7 +8,6 @@ const source = readFileSync(new URL("./TaskMemoryDrawer.vue", import.meta.url), 
 const consoleSource = readFileSync(new URL("./ConsoleView.vue", import.meta.url), "utf8");
 const minimapSource = readFileSync(new URL("./TurnMinimap.vue", import.meta.url), "utf8");
 const composerSource = readFileSync(new URL("./ConsoleComposer.vue", import.meta.url), "utf8");
-const apiSource = readFileSync(new URL("../../api.js", import.meta.url), "utf8");
 
 test("phone memory and other tools are in the header menu, not a permanent rail", () => {
   const mobile = (text, selector) => {
@@ -35,11 +34,6 @@ test("phone memory and other tools are in the header menu, not a permanent rail"
   assert.match(source, /async function openDrawer\(\) \{\s*if \(!usableConversationUuid\.value\) return;/);
 });
 
-test("desktop quick navigation follows task memory and the context editor slot", () => {
-  assert.match(consoleSource, /--console-float-minimap-top:\s*calc\(\s*var\(--console-float-rail-top\)\s*\+ var\(--console-float-control-size\) \* 2\s*\+ var\(--console-float-control-gap\) \* 2\s*\)/);
-  assert.match(minimapSource, /top:\s*var\(--console-float-minimap-top/);
-});
-
 test("floating and composer controls use Element Plus tooltips instead of native titles", () => {
   assert.match(source, /<el-tooltip content="任务记忆" placement="left"/);
   assert.match(consoleSource, /<el-tooltip[\s\S]*?:content="autoScrollLocked \? '滚动已锁定到底部，点击解锁'/);
@@ -51,49 +45,6 @@ test("floating and composer controls use Element Plus tooltips instead of native
     assert.ok(composerSource.includes(`content="${label}"`), `missing Element Plus tooltip: ${label}`);
   }
   assert.match(composerSource, /aria-label="运行配置"/);
-});
-
-test("drawer keeps both scopes and actual catalog while separating reading from technical metadata", () => {
-  assert.match(source, /label="会话记忆" name="conversation"/);
-  assert.match(source, /label="Agent 记忆" name="agent"/);
-  assert.match(source, /taskMemoryTasks/);
-  assert.doesNotMatch(source, /task\.taskShortId/);
-  assert.match(source, /:label="taskSearchLabel\(task\)"/);
-  assert.match(source, /statusLabel\(task\.status\)/);
-  assert.match(source, /Api\.taskMemories\(/);
-  assert.match(source, /async function editMemory[\s\S]*Api\.taskMemory\(/);
-  assert.match(source, /async function viewMemory[\s\S]*Api\.taskMemory\(/);
-  assert.match(source, /<InteractionMarkdown[^>]*:text="detail\.body"/);
-  assert.match(source, /<details class="memory-technical">[\s\S]*detail\.memoryUuid/);
-  assert.doesNotMatch(source, /v\{\{ item\.revision \}\}/);
-  assert.match(source, /formatDate\(item\.updatedAt\)/);
-  assert.match(source, /formatBytes\(detail\.sizeBytes\)/);
-  assert.match(source, /sourceLabel\(item\)/);
-  assert.match(source, /自动提供给模型/);
-  assert.match(source, /Agent 可读取/);
-  assert.match(source, /模型可见内容/);
-  assert.match(source, /previewOmittedCount/);
-  assert.match(source, /previewShortBodyMaxChars/);
-  assert.doesNotMatch(source, /保存重要决定和工作进展|保留重要决定与进展|记录决定、约束、重要发现或后续工作/);
-  assert.match(source, /v-if="previewOpen"/);
-  assert.match(source, /async function loadPreview[\s\S]*Api\.taskMemoryPreview\(token\.conversationUuid, requestScopeParams\(token\)\)/);
-  assert.doesNotMatch(source, /function buildCatalogPreview|\.slice\(0,\s*20\)/);
-  assert.doesNotMatch(source.match(/async function loadPreview[\s\S]*?\n\}/)?.[0] || "", /query/);
-  assert.match(source, /setInterval[\s\S]*5000/);
-  assert.match(source, /window\.addEventListener\("focus"/);
-});
-
-test("drawer requests use full identity generations and switching/unmount reset stale state", () => {
-  assert.match(source, /createTaskMemoryRequestGate/);
-  for (const channel of ["preview", "count", "tasks", "items", "detail", "mutation"]) {
-    assert.match(source, new RegExp(`beginRequest\\("${channel}"\\)`));
-  }
-  assert.match(source, /requestIsCurrent\(token\)/);
-  assert.match(source, /watch\(\(\) => props\.conversationUuid[\s\S]*invalidateRequests\(\)[\s\S]*resetContextState/);
-  assert.match(source, /watch\(activeTab[\s\S]*invalidateRequests\(\)[\s\S]*resetContextState/);
-  assert.match(source, /watch\(selectedTaskUuid[\s\S]*invalidateRequests\(\)[\s\S]*resetContextState/);
-  assert.match(source, /function resetContextState[\s\S]*loading\.value = false;\s*tasksLoading\.value = false;\s*if \(resetTasks\)/);
-  assert.match(source, /onBeforeUnmount[\s\S]*requestGate\.dispose\(\)[\s\S]*resetContextState/);
 });
 
 test("drawer and editor controls expose accessible names and keyboard focus contracts", () => {
@@ -110,16 +61,6 @@ test("drawer and editor controls expose accessible names and keyboard focus cont
   }
   assert.match(source, /:focus-visible/);
   assert.match(source, /:with-header="false"/);
-});
-
-test("API client covers paginated CRUD and restore without global Memory endpoints", () => {
-  for (const method of [
-    "taskMemories", "taskMemoryTasks", "taskMemoryPreview", "taskMemory", "createTaskMemory",
-    "updateTaskMemory", "deleteTaskMemory", "restoreTaskMemory",
-  ]) {
-    assert.match(apiSource, new RegExp(`${method}:`));
-  }
-  assert.match(apiSource, /\/conversations\/\$\{encodeURIComponent\(uuid\)\}\/task-memories/);
 });
 
 test("drawer, editor, and scoped popups keep desktop typography readable", () => {

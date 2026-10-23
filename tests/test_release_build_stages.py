@@ -86,6 +86,7 @@ class FakeDocker:
         self.created = []
         self.interrupt = None
         self.error_text = ""
+        self.smoke_lifecycle = {"fullStartup": True, "ready": True, "cleanShutdown": True}
         self.test_returncode = 0
         self.junit = '<testsuites><testsuite tests="2" errors="0" failures="0" skipped="1"><testcase classname="tests.test_real" name="test_pass"/><testcase classname="tests.test_real" name="test_skip"><skipped message="live credentials absent"/></testcase></testsuite></testsuites>'
         self.tap = '# tests 3\n# pass 2\n# fail 0\n# cancelled 0\n# skipped 1\n# todo 0\n'
@@ -160,7 +161,7 @@ class FakeDocker:
                 assert "/inputs/source" not in mounts
                 with zipfile.ZipFile(mounts["/inputs/release.zip"]) as archive:
                     assert "scripts/smoke_release_login.py" in archive.namelist()
-                put(out / "smoke.json", json.dumps({"ok": True, "version": self.config["version"], "transport": "http-websocket"}))
+                put(out / "smoke.json", json.dumps({"ok": True, "version": self.config["version"], "transport": "http-websocket", "serviceLifecycle": self.smoke_lifecycle}))
             return self.response(args, kwargs, stdout=self.error_text)
         raise AssertionError(args)
 
@@ -379,6 +380,17 @@ def test_package_actual_candidate_classifier_validator_unique_zip_and_smoke(conf
     refused = stage(config, "package")
     assert not refused["ok"]
     assert build.sha256(assets / "openbear-1.2.4.zip") == result["zipSha256"]
+
+
+@pytest.mark.parametrize("missing", ["fullStartup", "ready", "cleanShutdown"])
+def test_smoke_rejects_http_success_without_full_lifecycle(config, docker, missing):
+    prepare(config, docker)
+    assert stage(config, "build")["ok"]
+    assert stage(config, "package")["ok"]
+    docker.smoke_lifecycle.pop(missing)
+    result = stage(config, "smoke")
+    assert not result["ok"]
+    assert "full service startup" in result["error"]
 
 
 def test_package_refuses_tampering_and_previous_asset_mismatch(config, docker):

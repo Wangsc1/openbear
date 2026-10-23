@@ -207,9 +207,12 @@ async def test_sync_http_authenticated_singleflight_and_waiting_save(env, monkey
 
 async def test_real_json_transport_handles_404_empty_and_invalid_body(tmp_path):
     app = web.Application()
-    app.router.add_get('/good', lambda r: web.json_response(annual()))
-    app.router.add_get('/empty', lambda r: web.json_response({'year': 2027, 'papers': [], 'days': []}))
-    app.router.add_get('/bad', lambda r: web.Response(text='<html>failed</html>'))
+    def respond(response):
+        async def handler(request): return response()
+        return handler
+    app.router.add_get('/good', respond(lambda: web.json_response(annual())))
+    app.router.add_get('/empty', respond(lambda: web.json_response({'year': 2027, 'papers': [], 'days': []})))
+    app.router.add_get('/bad', respond(lambda: web.Response(text='<html>failed</html>')))
     async with TestServer(app) as server, aiohttp.ClientSession() as session:
         store = HolidayStore(tmp_path / 'calendar.json', lambda: 0)
         good = await store.fetch(session, str(server.make_url('/good')))

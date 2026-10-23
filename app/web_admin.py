@@ -23,8 +23,10 @@ from app.user_interactions import InteractionService
 from app.web_console.artifacts_api import WebAdminArtifactsMixin
 from app.web_console.auth_api import WebAdminAuthMixin
 from app.web_console.chat_api import WebAdminChatHandlersMixin
+from app.web_console.collab_api import WebAdminCollabMixin
 from app.web_console.chat_runtime import WebAdminChatRunMixin
 from app.web_console.chat_state import WebAdminChatStateMixin
+from app.web_console.prompt_suggestions import WebAdminPromptSuggestionsMixin
 from app.web_console.config_api import WebAdminSettingsChannelsMixin
 from app.web_console.conversation_overview import WebAdminConversationOverviewMixin
 from app.web_console.conversation_prompt import WebAdminConversationPromptMixin
@@ -84,6 +86,7 @@ from app.web_telegram_replies import WebTelegramReplies
 
 
 class WebAdminServer(
+    WebAdminCollabMixin,
     PromptPolicyMixin,
     WebhookPropertiesMixin,
     WebAdminPushMixin,
@@ -107,6 +110,7 @@ class WebAdminServer(
     WebAdminUploadsMixin,
     WebAdminChatStateMixin,
     WebAdminChatRunMixin,
+    WebAdminPromptSuggestionsMixin,
     WebAdminChatHandlersMixin,
     WebAdminTaskMemoryMixin,
     WebAdminMemoryMixin,
@@ -115,7 +119,7 @@ class WebAdminServer(
         self,
         config: Config,
         db: DB,
-        bot: Bot,
+        bot: Bot | None,
         *,
         operation_locks: ChatOperationLocks | None = None,
         control_actions: Any = None,
@@ -186,6 +190,7 @@ class WebAdminServer(
         self._web_task_notification_deferred: dict[str, list[dict[str, Any]]] = {}
         self._web_task_notification_workers: set[str] = set()
         self._web_conversation_title_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._web_prompt_suggestion_tasks: dict[str, asyncio.Task[Any]] = {}
         self._web_frame_prune_task: asyncio.Task[Any] | None = None
         self._web_notification_recovery_task: asyncio.Task[Any] | None = None
         # One event/queue per Web conversation keeps the original controller run
@@ -197,16 +202,20 @@ class WebAdminServer(
         self._web_stopped_task_uuids: dict[str, set[str]] = {}
         self.interactions = InteractionService(db)
         self.interactions.add_listener(self._interaction_changed)
-        self.browser_push = BrowserPush(db)
+        self.browser_push = BrowserPush(db, managed=config.managed)
         self.interactions.add_listener(self.browser_push.on_interaction)
         # Compatibility aliases; all mutations go through the shared service.
         self._web_confirmations = self.interactions.pending
         self._web_confirm_by_conversation = self.interactions.by_conversation
         self._channel_test_jobs: dict[str, _ChannelTestJob] = {}
-        self.web_task_telegram = WebTaskTelegramNotifier(config, db, bot)
-        self.telegram_replies = WebTelegramReplies(config, db, bot, self._submit_telegram_reply)
-        self.interaction_telegram = InteractionTelegram(config, db, bot, self.interactions)
-        self.interactions.add_listener(self.interaction_telegram.on_interaction)
+        self.web_task_telegram = None
+        self.telegram_replies = None
+        self.interaction_telegram = None
+        if not config.managed.enabled:
+            self.web_task_telegram = WebTaskTelegramNotifier(config, db, bot)
+            self.telegram_replies = WebTelegramReplies(config, db, bot, self._submit_telegram_reply)
+            self.interaction_telegram = InteractionTelegram(config, db, bot, self.interactions)
+            self.interactions.add_listener(self.interaction_telegram.on_interaction)
         self.update_service = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -215,24 +224,24 @@ class WebAdminServer(
         if not self.config.web.enabled:
             return
         self._web_stopping = False
-        await self.ensure_secret_key()
+        if not self.config.managed.enabled:
+            await self.ensure_secret_key()
         app = self.make_app()
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self.config.web.host, self.config.web.port)
-        await self.interaction_telegram.start()
-        await self.web_task_telegram.start()
-        try:
-            await self._site.start()
-        except Exception:
-            await self.interaction_telegram.stop()
-            await self.web_task_telegram.stop()
-            await self.interactions.stop()
-            raise
+        if self.interaction_telegram:
+            await self.interaction_telegram.start()
+        if self.web_task_telegram:
+            await self.web_task_telegram.start()
+        await self._site.start()
         await self._recover_web_task_notifications(reset_processing=True)
-        await self.telegram_replies.start()
+        if self.telegram_replies:
+            await self.telegram_replies.start()
 
         async def _notification_recovery_loop() -> None:
+            from app.lifecycle import wait_for_startup
+            await wait_for_startup(self)
             while True:
                 await asyncio.sleep(60)
                 try:
@@ -248,12 +257,25 @@ class WebAdminServer(
         )
 
         async def _frame_retention_loop() -> None:
+            from app.lifecycle import wait_for_startup
+            await wait_for_startup(self)
+            # Retention must not compete with startup recovery on every restart.
+            delay = 86_400
+            frames_done = False
+            deleted = 0
             while True:
+                await asyncio.sleep(delay)
                 try:
+                    if not frames_done:
+                        deleted += await self._prune_web_event_frames()
+                        if getattr(self, "_web_event_frame_retention_pending", False):
+                            delay = 1
+                            continue
+                        frames_done = True
+                    delay = 86_400
                     await self.interactions.prune()
-                    deleted = await self._prune_web_event_frames()
                     notification_deleted = await self._prune_web_task_notification_history()
-                    tg_runs_deleted, tg_deliveries_deleted = await self.web_task_telegram.prune()
+                    tg_runs_deleted, tg_deliveries_deleted = await self.web_task_telegram.prune() if self.web_task_telegram else (0, 0)
                     push_runs_deleted, push_deliveries_deleted = await self.browser_push.prune()
                     if deleted or notification_deleted or tg_runs_deleted or tg_deliveries_deleted or push_runs_deleted or push_deliveries_deleted:
                         log.info(
@@ -265,11 +287,18 @@ class WebAdminServer(
                             browser_push_runs=push_runs_deleted,
                             browser_push_deliveries=push_deliveries_deleted,
                         )
+                    deleted = 0
+                    if any(getattr(owner, "_maintenance_cursors", None) for owner in (
+                        self, self.interactions, self.web_task_telegram, self.browser_push,
+                    )):
+                        delay = 1
+                    else:
+                        frames_done = False
                 except asyncio.CancelledError:
                     raise
                 except Exception:
+                    delay = 300
                     log.exception("清理 Web Event Frames 失败")
-                await asyncio.sleep(86_400)
 
         self._web_frame_prune_task = asyncio.create_task(
             _frame_retention_loop(),
@@ -281,6 +310,13 @@ class WebAdminServer(
         # Close admission before any await: controller done callbacks can run
         # throughout shutdown, including after the runner registry is drained.
         self._web_stopping = True
+
+        async def close(name, operation):
+            try:
+                await operation()
+            except (Exception, asyncio.CancelledError):
+                log.exception("Web 组件关停失败，继续释放其他资源", 组件=name)
+
         if self._web_notification_recovery_task is not None:
             self._web_notification_recovery_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -299,10 +335,11 @@ class WebAdminServer(
             # cleanup() stops all sites and drains already-accepted HTTP/WS
             # handlers. Do this before snapshotting ControllerRuns so an in-flight
             # composer POST cannot register a new controller after cancellation.
-            await self._runner.cleanup()
+            await close("http-runner", self._runner.cleanup)
             self._runner = None
             self._site = None
-        await self.telegram_replies.stop()
+        if self.telegram_replies:
+            await close("telegram-replies", self.telegram_replies.stop)
         # Handoffs are not controller runners yet. Stop them first so none can
         # register a new controller after cancel_all_and_wait takes its snapshot.
         handoffs = list(self._web_steering_handoffs)
@@ -312,10 +349,12 @@ class WebAdminServer(
             await asyncio.gather(*handoffs, return_exceptions=True)
         self._web_steering_handoffs.clear()
         if self.runs is not None:
-            await self.runs.cancel_all_and_wait()
-        await self.interactions.stop()
-        await self.interaction_telegram.stop()
-        await self.web_task_telegram.stop()
+            await close("controller-runs", self.runs.cancel_all_and_wait)
+        await close("interactions", self.interactions.stop)
+        if self.interaction_telegram:
+            await close("interaction-telegram", self.interaction_telegram.stop)
+        if self.web_task_telegram:
+            await close("web-task-telegram", self.web_task_telegram.stop)
         title_tasks = [task for task in self._web_conversation_title_tasks.values() if not task.done()]
         for task in title_tasks:
             task.cancel()
@@ -339,9 +378,12 @@ class WebAdminServer(
         old_web = (self.config.web.enabled, self.config.web.host, self.config.web.port)
         new_web = (config.web.enabled, config.web.host, config.web.port)
         self.config = config
-        self.web_task_telegram.apply_config(config)
-        self.telegram_replies.apply_config(config)
-        self.interaction_telegram.apply_config(config)
+        if self.web_task_telegram:
+            self.web_task_telegram.apply_config(config)
+        if self.telegram_replies:
+            self.telegram_replies.apply_config(config)
+        if self.interaction_telegram:
+            self.interaction_telegram.apply_config(config)
         self.llm_factory = llm_factory
         self.model_selection = model_selection
         if tools is not None:

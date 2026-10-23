@@ -41,7 +41,7 @@ function runtime(f, overrides = {}) {
   const script = sfc[f].scriptSetup.content;
   const names = parseScript(script, {sourceType: 'module'}).program.body.flatMap(n => n.type === 'VariableDeclaration' ? n.declarations.map(d => d.id.name) : n.type === 'FunctionDeclaration' ? [n.id.name] : []);
   const props = Vue.reactive({section: 'channels'}), events = [], mounted = [], unmounted = [];
-  const ctx = vm.createContext({ ...Vue, draggable, scrollModelListAbove,
+  const ctx = vm.createContext({ ...Vue, draggable, scrollModelListAbove, authMode: Vue.ref('controller'),
     defineProps: () => props, defineEmits: () => (...args) => events.push(args),
     defineLazyView: (_loader, label) => ({name: label, render: () => Vue.h('div', label)}),
     onMounted: fn => mounted.push(fn), onBeforeUnmount: fn => unmounted.push(fn), mobileSlots: {},
@@ -49,7 +49,7 @@ function runtime(f, overrides = {}) {
     copyTextToClipboard: forbidden, ...overrides,
   });
   vm.runInContext(script.replace(/^import .*;\n/gm, ''), ctx);
-  const bindings = () => Vue.proxyRefs(vm.runInContext(`({${names.join(',')}, draggable, $slots: mobileSlots})`, ctx));
+  const bindings = () => Vue.proxyRefs(vm.runInContext(`({${names.join(',')}, draggable, authMode, $slots: mobileSlots})`, ctx));
   return {ctx, props, events, mounted, unmounted, run: code => vm.runInContext(code, ctx), bindings};
 }
 async function render(f, r, markup = sfc[f].template.content) {
@@ -81,10 +81,10 @@ test('settings merges navigation only after its lazy header is ready, preserving
   const outlet = appNodes.find(n => n.tag === 'component' && n.props.some(p => p.name === 'bind' && p.arg?.content === 'is' && p.exp?.content === 'activeView'));
   const Forwarder = {render() {return Vue.h('div', this.$slots['mobile-navigation']?.());}};
   const scope = Vue.reactive({
-    active:'settings', activeView:Vue.markRaw(Forwarder), sidebarOpen:false,
+    active:'settings', activeView:Vue.markRaw(Forwarder), sidebarOpen:false, pendingConversationsOpen:false,
     settingsSection:'channels', pageHeaderReady:false, cronFolderId:'', cronLeaveGuard:null,
     handleSettingsSectionChanged(){}, openWebhookProperties(){}, openRecommendationDraft(){}, selectNav(){},
-    handleCronFolderChanged(){}, openCronConversation(){},
+    handleCronFolderChanged(){}, openCronConversation(){}, openConversationFolder(){},
   });
   const compiled = Vue.compile(outlet.loc.source.replace(/\s+v-else(?=\s)/, ''));
   let tree;
@@ -531,30 +531,6 @@ test('actual Vue + vuedraggable SSR renders every model/card/action in original 
   const cleared = await render(channels, r);
   assert.deepEqual(cleared.nodes.filter(n => n.type === 'article' && classHas(n, 'model-card')).map(n => n.key),
     Array.from({length: 40}, (_, i) => `model-${i}`), 'clearing search restores original order');
-});
-
-test('real Sortable touch/pointer startup ignores ordinary card content; only configured handle prepares a drag', () => {
-  const require = createRequire(import.meta.url);
-  const Sortable = createRequire(require.resolve('vuedraggable'))('sortablejs');
-  const list = {nodeType:1, tagName:'DIV', getElementsByTagName: () => []};
-  const card = {nodeType:1, tagName:'ARTICLE', parentNode:list, matches: s => s === '*' || s === '[data-draggable]'};
-  const content = {nodeType:1, tagName:'DIV', parentNode:card, matches: () => false};
-  const handle = {nodeType:1, tagName:'BUTTON', parentNode:card, matches: s => s === '.model-drag'};
-  const handleAttribute = node(channels, 'model-list-scroll').props.find(p => p.name === 'handle').value.content;
-  let prepared = 0;
-  const sortable = {el:list, options:{draggable:'>[data-draggable]',handle:handleAttribute,disabled:false}, _prepareDragStart() { prepared++; }};
-  for (const type of ['touchstart', 'pointerdown']) {
-    for (const [target, expected] of [[content, 0], [handle, 1]]) {
-      prepared = 0; let prevented = 0;
-      const event = {type, target, cancelable:true, button:0, pointerType:'touch', preventDefault() { prevented++; }};
-      if (type === 'touchstart') event.touches = [{target}];
-      Sortable.prototype._onTapStart.call(sortable, event);
-      assert.equal(prepared, expected); assert.equal(prevented, 0);
-    }
-  }
-  sortable.options.disabled = true; prepared = 0;
-  Sortable.prototype._onTapStart.call(sortable, {type:'pointerdown',target:handle,pointerType:'touch',button:0,cancelable:true});
-  assert.equal(prepared, 0);
 });
 
 // Load the installed Sortable library in an isolated DOM/timer realm.

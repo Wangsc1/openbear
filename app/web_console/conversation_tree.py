@@ -55,10 +55,8 @@ class WebAdminConversationTreeMixin:
             CASE WHEN TRIM(COALESCE(workspace_dir,''))<>'' THEN 1 ELSE 0 END AS has_local_workspace,
             CASE WHEN TRIM(COALESCE(prompt_markdown,''))<>'' THEN 1 ELSE 0 END AS has_local_prompt
         """
-        # rec_managed marks the folder owned by the recommendation feature (read-only flag).
         cur = await self.db.conn.execute(
-            f"""SELECT {columns}, EXISTS(SELECT 1 FROM rec_settings rs WHERE rs.owner_chat_id=web_conversation_folders.owner_chat_id
-                   AND rs.folder_id=web_conversation_folders.folder_uuid) AS rec_managed
+            f"""SELECT {columns}
                 FROM web_conversation_folders WHERE owner_chat_id=?""",
             (int(owner_chat_id),),
         )
@@ -261,17 +259,30 @@ class WebAdminConversationTreeMixin:
         if task is None:
             async def backfill() -> None:
                 async with self.db.conn.transaction(label="conversation-tree-interaction-projection") as conn:
-                    # Older Cron messages were stored as ordinary user/reply
-                    # rows. Recompute only this derived timestamp; keep message
-                    # originals and any genuine later human interaction intact.
+                    # Older Cron messages were stored as ordinary
+                    # user/reply rows. Recompute only this derived timestamp; keep
+                    # message originals and any genuine later human interaction intact.
+                    # Archived rows are included: every restore path must surface
+                    # an already corrected value.
                     await conn.execute(
                         """UPDATE web_conversations SET last_interaction_at_ms=NULL
-                           WHERE owner_chat_id=? AND COALESCE(archived_at,0)=0
-                             AND last_interaction_at_ms>0 AND EXISTS (
+                           WHERE owner_chat_id=?
+                             AND last_interaction_at_ms>0 AND (EXISTS (
                                  SELECT 1 FROM cron_runs cr
                                  WHERE cr.conversation_uuid=web_conversations.conversation_uuid
-                             )""", (owner,),
+                             ) OR origin_kind IN ('deployment','maintenance'))""", (owner,),
                     )
+                    # Controller-started deployment/maintenance turns; the table
+                    # exists only on a controller with instance management.
+                    has_instances = await (await conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='instance_operations'")).fetchone()
+                    instance_filter = """
+                          AND NOT EXISTS (
+                              SELECT 1 FROM instance_operations io WHERE io.conversation_uuid=o.conversation_uuid
+                                AND io.root=COALESCE(NULLIF(o.run_root_turn_uuid,''),o.turn_uuid)
+                                AND (o.op_type='assistant_message' OR o.op_id='msg:'||io.id)
+                          )
+""" if has_instances else ""
                     cur = await conn.execute(
                         """
                         SELECT o.conversation_uuid,
@@ -280,7 +291,7 @@ class WebAdminConversationTreeMixin:
                                             o.created_at_ms)
                                END) AS value
                         FROM web_conversations c JOIN web_operations o ON o.conversation_uuid=c.conversation_uuid
-                        WHERE c.owner_chat_id=? AND COALESCE(c.archived_at,0)=0
+                        WHERE c.owner_chat_id=?
                           AND c.last_interaction_at_ms IS NULL
                           AND o.op_type IN ('user_message','assistant_message')
                           AND COALESCE(o.internal,0)=0
@@ -292,14 +303,14 @@ class WebAdminConversationTreeMixin:
                                 AND cr.root_turn_uuid=COALESCE(NULLIF(o.run_root_turn_uuid,''),o.turn_uuid)
                                 AND (o.op_type='assistant_message' OR o.op_id='msg:'||cr.run_id)
                           )
-                          AND ((o.op_type='user_message' AND
+{instance_filter}                          AND ((o.op_type='user_message' AND
                                 (LENGTH(TRIM(COALESCE(json_extract(o.payload_json,'$.text'),'')))>0
                                  OR COALESCE(json_array_length(o.payload_json,'$.attachments'),0)>0))
                                OR (o.op_type='assistant_message' AND o.lifecycle='terminal' AND o.status='completed'
                                    AND COALESCE(json_extract(o.payload_json,'$.error'),0)=0
                                    AND LENGTH(TRIM(COALESCE(json_extract(o.payload_json,'$.text'),'')))>0))
                         GROUP BY o.conversation_uuid
-                        """,
+                        """.replace("{instance_filter}", instance_filter),
                         (owner,),
                     )
                     interaction_values = [(int(row["value"] or 0), str(row["conversation_uuid"])) for row in await cur.fetchall()]
@@ -318,7 +329,7 @@ class WebAdminConversationTreeMixin:
                     message_values = [(int(row["value"] or 0), str(row["conversation_uuid"])) for row in await cur.fetchall()]
                     await conn.execute(
                         """UPDATE web_conversations SET last_interaction_at_ms=0
-                           WHERE owner_chat_id=? AND COALESCE(archived_at,0)=0 AND last_interaction_at_ms IS NULL""",
+                           WHERE owner_chat_id=? AND last_interaction_at_ms IS NULL""",
                         (owner,),
                     )
                     if interaction_values:
@@ -393,17 +404,16 @@ class WebAdminConversationTreeMixin:
             """
             SELECT conversation_uuid, internal_chat_id, folder_uuid, title, pinned_at,
                    display_order, created_at, updated_at, status, current_status, last_error,
-                   activity_version, activity_read_version, activity_result_json
+                   activity_version, activity_read_version, activity_result_json, origin_kind,
+                   last_interaction_at_ms
             FROM web_conversations
             WHERE owner_chat_id=? AND COALESCE(archived_at,0)=0
             """,
             (int(owner_chat_id),),
         )
         rows = [dict(row) for row in await cur.fetchall()]
-        # Background recommendation runs live in their own folder; they are not
-        # the user's recent conversations or activity (the folder tree keeps them).
-        recommendations = getattr(self, "recommendations", None)
-        background_folder = str(await recommendations.rec_folder(int(owner_chat_id)) or "") if recommendations else ""
+        # Recency counts only human interaction, whatever created the
+        # conversation; automatic run turns never set last_interaction_at_ms.
         # The one-time legacy backfill above preserves the exact historical
         # definition; steady-state selection is now an indexed fifteen-row lookup.
         cur = await self.db.conn.execute(
@@ -412,11 +422,10 @@ class WebAdminConversationTreeMixin:
             FROM web_conversations
             WHERE owner_chat_id=? AND COALESCE(archived_at,0)=0
               AND last_interaction_at_ms>0
-              AND (?='' OR COALESCE(folder_uuid,'')<>?)
             ORDER BY last_interaction_at_ms DESC,conversation_uuid ASC
             LIMIT 15
             """,
-            (int(owner_chat_id), background_folder, background_folder),
+            (int(owner_chat_id),),
         )
         recent_times = {
             str(row["conversation_uuid"]): int(row["last_interaction_at_ms"])
@@ -496,9 +505,11 @@ class WebAdminConversationTreeMixin:
         folder_counts: dict[str, int] = {}
         direct_conversation_counts: dict[str, int] = {}
         folders = await self._tree_folders(owner_chat_id)
+        member_uuids = {str(r["conversation_uuid"]) for r in await (await self.db.conn.execute("SELECT conversation_uuid FROM collab_members")).fetchall()}
         for row in rows:
             folder_id = str(row.get("folder_uuid") or "")
-            direct_conversation_counts[folder_id] = direct_conversation_counts.get(folder_id, 0) + 1
+            if str(row.get("conversation_uuid") or "") not in member_uuids:
+                direct_conversation_counts[folder_id] = direct_conversation_counts.get(folder_id, 0) + 1
             conv_uuid = str(row.get("conversation_uuid") or "")
             chat_id = int(row.get("internal_chat_id") or 0)
             facts = operation_facts.get(conv_uuid) or {}
@@ -522,6 +533,7 @@ class WebAdminConversationTreeMixin:
                 or int(facts.get("pendingInteractionCount") or 0)
                 or int(facts.get("pausedCount") or 0) or rath_waiting.get(chat_id, 0)
             )
+            folder_path = self._tree_folder_path(str(row.get("folder_uuid") or ""), folders)
             current = str(live_snapshot.get("currentStatus") or row.get("current_status") or ("运行中" if running or activity["activityUnread"] else "就绪"))
             if rath_counts.get(chat_id, 0) and not live_snapshot.get("running"):
                 current = "Agent 后台执行中"
@@ -536,7 +548,10 @@ class WebAdminConversationTreeMixin:
                 "conversationUuid": conv_uuid,
                 "folderId": str(row.get("folder_uuid") or ""),
                 "parentId": str(row.get("folder_uuid") or ""),
+                # Root-to-leaf folder IDs, so the tree can summarize collapsed, unloaded ancestors.
+                "folderPath": folder_path,
                 "title": str(row.get("title") or "新会话"),
+                "origin": str(row.get("origin_kind") or "user"),
                 "pinned": int(row.get("pinned_at") or 0) > 0,
                 "pinnedAt": int(row.get("pinned_at") or 0),
                 "displayOrder": float(row["display_order"]) if row.get("display_order") is not None else None,
@@ -547,19 +562,29 @@ class WebAdminConversationTreeMixin:
             }
             if conv_uuid in recent_times:
                 recent_items[conv_uuid] = {**item, "lastInteractionAtMs": recent_times[conv_uuid]}
-            if (running or activity["activityUnread"]) and not (background_folder and folder_id == background_folder):
+            # Automatic conversations stay out of recent navigation until the
+            # user participates; runtime and pending-action views still keep them.
+            background_run = str(row.get("origin_kind") or "user") != "user" and not int(row.get("last_interaction_at_ms") or 0)
+            if (running or activity["activityUnread"]) and not background_run:
                 activity_items.append(item)
             if not running:
                 continue
             running_items.append(item)
-            for ancestor in self._tree_folder_path(str(row.get("folder_uuid") or ""), folders):
+            for ancestor in folder_path:
                 folder_counts[ancestor] = folder_counts.get(ancestor, 0) + 1
+        collab_groups = await self.collab_groups.tree_for_owner(int(owner_chat_id)) if getattr(self, "collab_groups", None) is not None else {}
+        running_ids = {item["conversationUuid"] for item in running_items}
+        for groups in collab_groups.values():
+            for group in groups:
+                group["runningCount"] = sum(1 for m in group["members"] if not m["removed"] and m["conversationUuid"] in running_ids)
+                group["memberCount"] = sum(1 for m in group["members"] if not m["removed"])
         return {
             "items": running_items,
             "activityItems": activity_items,
             "recentItems": [recent_items[key] for key in recent_times if key in recent_items],
             "folderRunningCounts": folder_counts,
             "folderConversationCounts": self._tree_subtree_counts(direct_conversation_counts, folders),
+            "collabGroups": collab_groups,
             "revision": int(time.time() * 1000),
         }
 
@@ -627,7 +652,9 @@ class WebAdminConversationTreeMixin:
             SELECT folder_uuid,
                    SUM(CASE WHEN COALESCE(archived_at,0)=0 THEN 1 ELSE 0 END) AS active_count,
                    SUM(CASE WHEN COALESCE(archived_at,0)>0 THEN 1 ELSE 0 END) AS archived_count
-            FROM web_conversations WHERE owner_chat_id=? GROUP BY folder_uuid
+            FROM web_conversations WHERE owner_chat_id=?
+              AND conversation_uuid NOT IN (SELECT conversation_uuid FROM collab_members WHERE status='active')
+            GROUP BY folder_uuid
             """,
             (int(owner_chat_id),),
         )
@@ -667,7 +694,6 @@ class WebAdminConversationTreeMixin:
             "runningDescendantCount": int(running_counts.get(folder_id, 0)),
             "hasLocalWorkspace": bool(int(row.get("has_local_workspace") or 0)) if "has_local_workspace" in row else bool(str(row.get("workspace_dir") or "").strip()),
             "hasLocalPrompt": bool(int(row.get("has_local_prompt") or 0)) if "has_local_prompt" in row else bool(str(row.get("prompt_markdown") or "").strip()),
-            "managedBy": "recommendations" if int(row.get("rec_managed") or 0) else "",
         }
 
     def _tree_conversation_json(
@@ -688,6 +714,7 @@ class WebAdminConversationTreeMixin:
             "folderId": str(row.get("folder_uuid") or ""),
             "parentId": str(row.get("folder_uuid") or ""),
             "title": str(row.get("title") or "新会话"),
+            "origin": str(row.get("origin_kind") or "user"),
             "pinned": int(row.get("pinned_at") or 0) > 0,
             "pinnedAt": int(row.get("pinned_at") or 0),
             "displayOrder": float(row["display_order"]) if row.get("display_order") is not None else None,
@@ -788,20 +815,18 @@ class WebAdminConversationTreeMixin:
             owner, explicit_uuid, folders=folders, status=status
         ) if explicit_uuid else None
         if selected is None and not explicit_uuid:
-            # Never land the user in a background recommendation run by default.
-            recommendations = getattr(self, "recommendations", None)
-            background_folder = str(await recommendations.rec_folder(owner) or "") if recommendations else ""
+            # Never land the user in a system-created run by default.
             cur = await self.db.conn.execute(
                 """
                 SELECT wc.conversation_uuid
                 FROM web_conversations wc
                 WHERE wc.owner_chat_id=? AND COALESCE(wc.archived_at,0)=0
-                  AND (?='' OR COALESCE(wc.folder_uuid,'')<>?)
+                  AND wc.origin_kind IN ('','user')
                 ORDER BY wc.last_conversation_at DESC,
                          COALESCE(wc.created_at,0) DESC, wc.id DESC
                 LIMIT 1
                 """,
-                (owner, background_folder, background_folder),
+                (owner,),
             )
             row = await cur.fetchone()
             if row is not None:
@@ -842,7 +867,8 @@ class WebAdminConversationTreeMixin:
             "activeCount": int((count_row or {}).get("active_count") or 0),
             "archivedCount": int((count_row or {}).get("archived_count") or 0),
             "temporaryCount": int(await self._tree_scalar(
-                "SELECT COUNT(*) FROM web_conversations WHERE owner_chat_id=? AND COALESCE(archived_at,0)=0 AND COALESCE(folder_uuid,'')=''",
+                "SELECT COUNT(*) FROM web_conversations WHERE owner_chat_id=? AND COALESCE(archived_at,0)=0 AND COALESCE(folder_uuid,'')=''"
+                " AND conversation_uuid NOT IN (SELECT conversation_uuid FROM collab_members)",
                 (owner,),
             )),
         })
@@ -891,7 +917,9 @@ class WebAdminConversationTreeMixin:
         archive_clause = "COALESCE(wc.archived_at,0)>0" if system_node == "archive" else "COALESCE(wc.archived_at,0)=0"
         folder_clause = "" if system_node == "archive" else "AND COALESCE(wc.folder_uuid,'')=?"
         params: tuple[Any, ...] = (owner,) if system_node == "archive" else (owner, parent)
-        conv_where = f"wc.owner_chat_id=? AND {archive_clause} {folder_clause}"
+        # Group members are listed under their lead's group, not as siblings.
+        member_clause = "" if system_node == "archive" else "AND wc.conversation_uuid NOT IN (SELECT conversation_uuid FROM collab_members)"
+        conv_where = f"wc.owner_chat_id=? AND {archive_clause} {folder_clause} {member_clause}"
         conv_order = """
                      ORDER BY CASE WHEN COALESCE(wc.pinned_at,0)>0 THEN 0 ELSE 1 END,
                               CASE WHEN wc.display_order IS NULL THEN 1 ELSE 0 END,
@@ -991,7 +1019,6 @@ class WebAdminConversationTreeMixin:
                     "folderId": str(row.get("folder_uuid") or ""),
                     "parentId": str(row.get("parent_uuid") or ""),
                     "name": str(row.get("name") or ""),
-                    "managedBy": "recommendations" if int(row.get("rec_managed") or 0) else "",
                     "path": self._tree_folder_path_text(str(row.get("folder_uuid") or ""), folders),
                     "pinned": int(row.get("pinned_at") or 0) > 0,
                     "conversationCount": int(active_counts.get(str(row.get("folder_uuid") or ""), 0)),
@@ -1639,6 +1666,9 @@ class WebAdminConversationTreeMixin:
                 mutate=mutate,
             )
         result["unarchived"] = unarchive
+        if kind == "conversation" and getattr(self, "collab_groups", None) is not None:
+            # Members inherit the lead's directory context, so they move with it.
+            await self.collab_groups.follow_lead(item_id, folder_uuid=target, archived_at=0 if unarchive else None)
         organization = await self._tree_move_organization(
             owner, kind=kind, item_id=item_id, target_folder=target,
             old_folder_path=old_folder_path,
@@ -1655,9 +1685,6 @@ class WebAdminConversationTreeMixin:
         body = await self._json_body(request)
         target = str(body.get("targetFolderId") or "").strip()
         row, _folder_metadata = await self._tree_validate_move_target(owner, "folder", folder_id, target)
-        recommendations = getattr(self, "recommendations", None)
-        if recommendations is not None and await recommendations.protects_folder(owner, folder_id):
-            return web.json_response({"ok": False, "error": "folder_managed", "message": "这个目录由推荐功能管理。先在推荐设置里关闭推荐，再删除它。"}, status=409)
         folders = await self._tree_context_folders(owner)
         if target == folder_id or target in self._tree_descendants(folder_id, folders):
             return web.json_response({"ok": False, "error": "folder_cycle"}, status=409)
@@ -1716,8 +1743,6 @@ class WebAdminConversationTreeMixin:
                     "DELETE FROM web_conversation_folders WHERE owner_chat_id=? AND folder_uuid=?",
                     (owner, folder_id),
                 )
-                if recommendations is not None:
-                    await recommendations.forget_folder(conn, owner, folder_id)
             result = await self._tree_apply_snapshot_updates_locked(
                 impact, update_snapshots=body.get("updateSnapshots") is True, mutate=mutate
             )

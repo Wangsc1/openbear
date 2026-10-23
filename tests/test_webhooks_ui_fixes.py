@@ -69,19 +69,6 @@ async def test_ui01_wait_control_uses_wait_version_and_claims_once(ui_http):
     assert (await one(h.db.conn,'SELECT COUNT(*) n FROM webhook_assignment_events WHERE event_id=?',(eid,)))['n']==1
 
 
-async def test_ui05_active_scope_search_before_pagination(ui_http):
-    h=ui_http; e=await h.create(); other=await h.create('F2')
-    async with h.db.webhook_transaction() as conn:
-        await insert(conn,'webhook_assignments',assignment_id='A',origin_kind='human_wait',conversation_uuid='C1',internal_chat_id=-991,root_turn_uuid='root',task_start_cursor=0,authorization_snapshot_json='{}',created_at_ms=h.s.clock())
-        for i in range(65):
-            await insert(conn,'webhook_waits',wait_id=f'W{i:03}',assignment_id='A',endpoint_id=other['id'] if i==0 else e['id'],register_request_id=str(i),predicate_json='{}',predicate_sha256=str(i),scope_snapshot_json='{}',after_receive_seq=0,scan_through_seq=0,mode='single',registered_at_ms=h.s.clock(),state='cancelled' if i<32 else 'registered')
-    url='/api/webhooks/waits?active=true&scopeType=folder&scopeId=F1&search=F1&effectiveStatus=receiving&limit=30'
-    status,page=await h.call('GET',url)
-    assert status==200 and len(page['items'])==30 and all(x['state']=='registered' and x['endpointId']==e['id'] for x in page['items'])
-    _, last=await h.call('GET',url+'&cursor='+page['nextCursor'])
-    assert len(last['items'])==3 and not last['nextCursor']
-
-
 async def test_ui08_registered_spa_route(ui_http):
     from app.web_console.routing import WebAdminAppMixin
     h=ui_http

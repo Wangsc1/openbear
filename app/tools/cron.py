@@ -4,22 +4,18 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from app.cron.contracts import CronError, JobConfig
-from app.runtime.budget import current_budget
 from app.runtime.tool_result import ToolOutcome
 from app.tools.base import current_tool_context
 from app.webhooks.contracts import WebhookError, dumps
 from app.webhooks.repository import one
 
 ACTIONS = ('describe', 'list', 'get', 'create', 'update', 'delete', 'set_enabled', 'run', 'stop', 'runs', 'statistics', 'preview')
-READ = {'describe', 'list', 'get', 'runs', 'statistics', 'preview'}
 GUIDANCE = (Path(__file__).resolve().parents[2] / 'prompts' / 'guides' / 'cron.md').read_text(encoding='utf-8')
 
 
 async def dispatch(s, action, params, ctx):
     if action not in ACTIONS or not isinstance(params, dict): raise CronError('invalid_action')
     if ctx.agent_session_uuid: raise CronError('main_controller_only', status=403)
-    if (ctx.source == 'cron' or ctx.webhook_automatic or current_budget() is not None) and action not in READ:
-        raise CronError('automatic_configuration_forbidden', status=403)
     if any(k in params for k in ('owner', 'ownerId', 'ownerChatId', 'trusted', 'confirmed', 'confirmationToken')):
         raise CronError('host_identity_not_a_parameter', status=403)
     conversation = await one(s.db.conn, 'SELECT owner_chat_id FROM web_conversations WHERE conversation_uuid=? AND internal_chat_id=?', (ctx.conversation_uuid, ctx.chat_id))

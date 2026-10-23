@@ -18,6 +18,8 @@ from app.context.configuration import RETIRED_AGENT_CONTEXT_KEYS, migrate_contex
 _BACKUP_KEEP = 3
 _CONFIG_FILE_MODE = 0o600
 _MISSING = object()
+# Sections of removed features; loading drops them from the stored file.
+_RETIRED_ROOT_KEYS = ("resourceMonitoring", "resource_monitoring")
 
 
 class ConfigConflictError(RuntimeError):
@@ -169,6 +171,10 @@ class ConfigStore:
 def _migrate_runtime_config(raw: dict[str, Any]) -> bool:
     """Canonicalize retired keys without materializing evolvable prompt defaults."""
     changed = migrate_context_config(raw)
+    for retired in _RETIRED_ROOT_KEYS:
+        if retired in raw:
+            del raw[retired]
+            changed = True
     agents = raw.get("rath")
     if not isinstance(agents, dict):
         return changed

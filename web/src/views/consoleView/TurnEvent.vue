@@ -195,7 +195,8 @@ function isFailureAnswer(event = {}) {
 	     :class="{ 'process-live': props.event.active !== false && !props.event.queued, 'agent-notice-event': props.event.agentNotice, 'thinking-only-event': props.event.persistentRunIndicator }">
 		<div class="live-process-summary" :class="{ 'thinking-only-summary': props.event.persistentRunIndicator }">
 			<template v-if="props.event.persistentRunIndicator">
-				<span class="thinking-dots" aria-label="正在思考">
+				<span v-if="props.event.waitingLabel" class="run-waiting-label work-status-sweep" role="status">{{ props.event.waitingLabel }}</span>
+				<span class="thinking-dots" :aria-label="props.event.waitingLabel || '正在思考'">
 					<span></span><span></span><span></span>
 				</span>
 			</template>
@@ -477,8 +478,15 @@ details[open] > summary > .disclosure-icon {
 	overflow: visible;
 }
 
+.run-waiting-label {
+	margin-right: .45rem;
+	font-size: 14px;
+	line-height: 1.65;
+}
+
 .live-process-summary.thinking-only-summary {
 	display: inline-flex;
+	align-items: center;
 	grid-template-columns: none;
 	width: auto;
 	min-height: 1.15rem;

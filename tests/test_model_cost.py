@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import ast
 import math
-from pathlib import Path
 
 import pytest
 
@@ -12,40 +10,6 @@ from app.model_cost import (
     resolved_usage_cost_usd,
     usage_cost_usd,
 )
-
-_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _imports_shared_calculator(relative_path: str, name: str, alias_name: str) -> bool:
-    module = ast.parse((_ROOT / relative_path).read_text(encoding="utf-8"))
-    return any(
-        isinstance(node, ast.ImportFrom)
-        and node.module == "app.model_cost"
-        and any(alias.name == name and alias.asname == alias_name for alias in node.names)
-        for node in ast.walk(module)
-    )
-
-
-def test_legacy_cost_and_private_callers_remain_compatible() -> None:
-    # Keep this unit test independent of the optional async database package that
-    # importing the full Agent/Web runtime requires.  Syntax compilation covers
-    # import execution; this asserts both callers retain the single calculator.
-    assert _imports_shared_calculator(
-        "app/agents/execution.py", "resolved_usage_cost_usd", "_resolved_usage_cost_usd",
-    )
-    assert _imports_shared_calculator(
-        "app/web_console/core.py", "usage_cost_usd", "_usage_cost_usd",
-    )
-
-    cost = {"input": 2, "output": 10, "cacheRead": 0.5, "cacheWrite": 3}
-    usage = Usage(
-        input_tokens=100_000,
-        output_tokens=20_000,
-        cache_read_tokens=50_000,
-        cache_write_tokens=10_000,
-    )
-
-    assert usage_cost_usd(cost, usage) == pytest.approx(0.455)
 
 
 def test_provider_ticks_and_actual_service_tier_choose_the_final_charge() -> None:

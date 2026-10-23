@@ -245,6 +245,51 @@ async def reconcile_web_operation_snapshot_frames(conn: aiosqlite.Connection) ->
     return inserted
 
 
+async def backfill_conversation_origins(conn: aiosqlite.Connection) -> int:
+    """Attribute conversations written without an origin to their creating run.
+
+    Runs on every startup: rows created by an older binary after a rollback are
+    still recognised. Only exact run-record matches are labelled; an unmatched
+    row stays empty and reads as a user conversation.
+    """
+    import uuid
+
+    changed = 0
+    cur = await conn.execute(
+        """UPDATE web_conversations
+           SET origin_kind='cron', origin_ref=(
+             SELECT r.run_id FROM cron_runs r WHERE r.conversation_uuid=web_conversations.conversation_uuid
+             ORDER BY r.started_at_ms, r.run_id LIMIT 1)
+           WHERE origin_kind='' AND conversation_uuid IN (SELECT conversation_uuid FROM cron_runs WHERE conversation_uuid<>'')"""
+    )
+    changed += max(0, cur.rowcount or 0)
+    cur = await conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='webhook_assignments' LIMIT 1"
+    )
+    if await cur.fetchone() is None:
+        return changed
+    # Events delivered into an existing conversation leave it the user's; only
+    # the conversation derived from the initial batch was created by the trigger.
+    cur = await conn.execute(
+        """SELECT a.assignment_id, a.initial_batch_id, a.conversation_uuid
+           FROM webhook_assignments a JOIN web_conversations c ON c.conversation_uuid=a.conversation_uuid
+           WHERE c.origin_kind='' AND a.origin_kind='webhook' AND COALESCE(a.initial_batch_id,'')<>''
+           ORDER BY a.created_at_ms, a.assignment_id"""
+    )
+    matches: dict[str, str] = {}
+    for row in await cur.fetchall():
+        expected = str(uuid.uuid5(uuid.NAMESPACE_URL, "openbear:webhook:batch:" + str(row["initial_batch_id"])))
+        if expected == str(row["conversation_uuid"]):
+            matches.setdefault(expected, str(row["assignment_id"]))
+    for conversation_uuid, assignment_id in matches.items():
+        cur = await conn.execute(
+            "UPDATE web_conversations SET origin_kind='webhook', origin_ref=? WHERE conversation_uuid=? AND origin_kind=''",
+            (assignment_id, conversation_uuid),
+        )
+        changed += max(0, cur.rowcount or 0)
+    return changed
+
+
 async def dedupe_active_rath_agent_sessions(conn: aiosqlite.Connection) -> int:
     """Close duplicate active Rath Agent Sessions before creating a partial unique index.
 

@@ -1,4 +1,5 @@
 import {shallowReactive} from "vue";
+import { contextFetch, contextResourceUrl, onSessionEnd } from '../sessionBoundary.js';
 import MarkdownIt from "markdown-it";
 import cjkFriendly from "markdown-it-cjk-friendly";
 
@@ -23,7 +24,7 @@ const SAFE_IMAGES = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp",
 const SAFE_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "image/bmp", "image/x-icon", "image/vnd.microsoft.icon"]);
 
 export function artifactFromUrl(value, origin = globalThis.location?.origin) {
-	if (!origin || typeof value !== "string") return null;
+	if (!origin || typeof value !== "string" || !contextResourceUrl(value)) return null;
 	try {
 		const url = new URL(value, origin);
 		if (url.origin !== origin || url.username || url.password || !["http:", "https:"].includes(url.protocol)) return null;
@@ -31,7 +32,7 @@ export function artifactFromUrl(value, origin = globalThis.location?.origin) {
 		if (!match) return null;
 		const [, conversationUuid, artifactUuid] = match;
 		const contentUrl = `/api/conversations/${conversationUuid}/artifacts/${artifactUuid}/content`;
-		return {conversationUuid, artifactUuid, key: `${conversationUuid}:${artifactUuid}`, contentUrl, metadataUrl: contentUrl.slice(0, -8), downloadUrl: `${contentUrl}?download=1`, download: ["1", "true", "yes", "on"].includes((url.searchParams.get("download") || "").toLowerCase())};
+		return {conversationUuid, artifactUuid, key: `${conversationUuid}:${artifactUuid}`, contentUrl: contextResourceUrl(contentUrl), metadataUrl: contentUrl.slice(0, -8), downloadUrl: contextResourceUrl(`${contentUrl}?download=1`), download: ["1", "true", "yes", "on"].includes((url.searchParams.get("download") || "").toLowerCase())};
 	} catch { return null; }
 }
 
@@ -96,6 +97,7 @@ export function readingState(key, initialMode = "preview") {
 	return touch(readingStates, key, readingStates.get(key) || {mode: initialMode, previewTop: 0, sourceTop: 0, wrap: true});
 }
 export function clearArtifactCache() { cacheGeneration++; records.clear(); texts.clear(); readingStates.clear(); cachedBytes = 0; }
+onSessionEnd(clearArtifactCache);
 
 export function artifactErrorMessage(error) {
 	if (error?.name === "AbortError") return "读取超时，请重试或下载原文件。";
@@ -110,7 +112,7 @@ async function request(url, consume) {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), 30000);
 	try {
-		const response = await fetch(url, {credentials: "same-origin", signal: controller.signal, redirect: "error"});
+		const response = await contextFetch(url, {credentials: "same-origin", signal: controller.signal, redirect: "error"});
 		if (!response.ok) throw responseError(response.status);
 		return await consume(response);
 	} finally { clearTimeout(timer); }

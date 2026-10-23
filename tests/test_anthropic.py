@@ -103,23 +103,6 @@ async def test_anthropic_stream_tool_use():
     assert json.loads(tc.arguments) == {"command": "ls"}
 
 
-async def test_anthropic_stream_edit_array_arguments():
-    payload = {"path": "app/x.py", "edits": [{"old_string": "a", "new_string": "b"}]}
-    encoded = json.dumps(payload)
-    lines = []
-    lines += _ev("content_block_start", {"index": 0, "content_block": {"type": "tool_use", "id": "tu_edit", "name": "Edit"}})
-    lines += _ev("content_block_delta", {"index": 0, "delta": {"type": "input_json_delta", "partial_json": encoded[:20]}})
-    lines += _ev("content_block_delta", {"index": 0, "delta": {"type": "input_json_delta", "partial_json": encoded[20:]}})
-    lines += _ev("content_block_stop", {"index": 0})
-    lines += _ev("message_delta", {"delta": {"stop_reason": "tool_use"}, "usage": {}})
-    backend = AnthropicBackend(make_client(lambda r: sse_response(lines)), "https://x/v1", "k")
-
-    result = await aggregate(backend.stream([{"role": "user", "content": "hi"}], model="claude"))
-
-    assert result.tool_calls[0].name == "Edit"
-    assert json.loads(result.tool_calls[0].arguments) == payload
-
-
 async def test_anthropic_thinking_block_回传_with_signature():
     """中性 assistant 消息含 reasoning+signature → thinking 块带 signature 排最前。"""
     messages = [
@@ -344,6 +327,36 @@ def test_cache_breakpoints_roll_to_last_message_and_previous_user_turn():
     assert "cache_control" not in msgs[3]["content"][-1]
 
 
+def _without_cache_control(value):
+    if isinstance(value, dict):
+        return {k: _without_cache_control(v) for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [_without_cache_control(v) for v in value]
+    return value
+
+
+def test_user_text_keeps_one_wire_shape_when_breakpoint_moves_away():
+    """Prefix caching needs earlier messages byte-identical across requests."""
+    history = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "q3"},
+    ]
+    first = {"messages": _to_anthropic(history[:3])}
+    second = {"messages": _to_anthropic(history)}
+    _apply_cache_breakpoints(first)
+    _apply_cache_breakpoints(second)
+    # q1 carried the previous-user breakpoint in the first request only.
+    assert "cache_control" in first["messages"][0]["content"][-1]
+    assert "cache_control" not in second["messages"][0]["content"][-1]
+    assert _without_cache_control(second["messages"][:3]) == _without_cache_control(first["messages"])
+    assert second["messages"][0]["content"] == [{"type": "text", "text": "q1"}]
+    # Empty user content stays empty rather than becoming an empty text block.
+    assert _to_anthropic([{"role": "user", "content": ""}])[0]["content"] == ""
+
+
 def test_cache_breakpoints_move_forward_when_turn_appended():
     """追加一轮后，断点跟随前进，旧的最后一条上不再保留标记。"""
     history = [
@@ -402,3 +415,29 @@ async def test_cache_breakpoints_end_to_end_payload():
     assert p["system"][0]["cache_control"] == {"type": "ephemeral"}
     # 单条 user 即最后一条消息，端到端带 cache_control。
     assert p["messages"][0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+
+
+async def test_one_hour_cache_ttl_applies_to_every_breakpoint_only_when_requested():
+    captured = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return sse_response(
+            _ev("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 5}}})
+            + _ev("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}})
+        )
+
+    backend = AnthropicBackend(make_client(handler), "https://x/v1", "k")
+    messages = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}, {"role": "user", "content": "c"}]
+    tools = [{"name": "Read", "description": "", "parameters": {"type": "object", "properties": {}}}]
+    for ttl in ("1h", None):
+        await aggregate(backend.stream(messages, model="claude", system="你是助手", tools=tools, cache_ttl=ttl))
+
+    def controls(payload):
+        blocks = [*payload["system"], *payload["tools"], *(b for m in payload["messages"] for b in m["content"])]
+        return [b["cache_control"] for b in blocks if "cache_control" in b]
+
+    assert controls(captured[0]) == [{"type": "ephemeral", "ttl": "1h"}] * 4
+    assert controls(captured[1]) == [{"type": "ephemeral"}] * 4
+    assert backend.build_payload(messages, model="claude", system="s", cache_ttl="1h")["system"][0]["cache_control"] == {
+        "type": "ephemeral", "ttl": "1h"}

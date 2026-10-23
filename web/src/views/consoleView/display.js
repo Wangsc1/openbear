@@ -807,9 +807,12 @@ export function agentRows(event) {
 	} else {
 		const items = Array.isArray(args.items) ? args.items : Object.keys(args).length ? [args] : [];
 		const status = agentOverallStatus(event);
+		const outputFallback = status === "failed" ? String(payload?.resultText || payload?.error || "") : "";
 		value = items.map((item) => ({
 			...agentItemFromArgs(item),
 			status,
+			outputFallback,
+			hasOutput: Boolean(outputFallback.trim()),
 			current: status === "completed" ? "任务完成"
 				: status === "failed" ? "启动失败"
 					: status === "cancelled" ? "已取消"

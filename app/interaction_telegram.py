@@ -21,6 +21,7 @@ from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from app.lifecycle import wait_for_startup
 from app.logging import get_logger
 from app.telegram_ui import edit_rich, send_rich
 
@@ -337,6 +338,7 @@ class InteractionTelegram:
                 )
 
     async def _worker_loop(self) -> None:
+        await wait_for_startup(self)
         while True:
             try:
                 delivery = await self._claim_due()
@@ -602,6 +604,7 @@ class InteractionTelegram:
             "select": "需要选择",
             "prompt": "需要输入",
             "questionnaire": "需要填写问卷",
+            "group_proposal": "小组方案待确认",
         }
         title = _trim(item.get("title") or labels.get(action) or "待处理交互", 200)
         body = _trim(item.get("body") or "", 1600)
@@ -692,7 +695,8 @@ class InteractionTelegram:
         if existing:
             return int(existing["telegram_message_id"] or 0)
         draft: dict[str, Any] | None = None
-        if allow_reply and not bool(item.get("sensitive")):
+        # A group proposal is a structured editor; Telegram only points to Web.
+        if allow_reply and not bool(item.get("sensitive")) and str(item.get("action") or "") != "group_proposal":
             draft = await self._ensure_draft(item)
         message = await send_rich(
             self.bot,

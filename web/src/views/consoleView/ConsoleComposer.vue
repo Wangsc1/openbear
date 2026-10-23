@@ -1,13 +1,15 @@
 <script setup>
-import {computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch} from "vue";
+import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from "vue";
 import ReferenceEditor from "../../references/ReferenceEditor.vue";
 import ReferencePlainText from "../../references/ReferencePlainText.vue";
 import InteractionMarkdown from "./InteractionMarkdown.vue";
+import GroupProposalCard from "./GroupProposalCard.vue";
 import ContextCompactionIcon from "./legacy/ContextCompactionIcon.vue";
 import ModelFeatureIcon from "./ModelFeatureIcon.vue";
 import ContextUsageMeter from './ContextUsageMeter.vue';
-import {Coins, Layers, Clock3} from "@lucide/vue";
+import {Coins, Layers, Clock3, CornerDownLeft, Sparkles, X} from "@lucide/vue";
 import {ElMessage} from "element-plus";
+import { userStorage } from '../../sessionBoundary.js';
 import {
 	ArrowDown,
 	CircleCheck,
@@ -59,6 +61,7 @@ const props = defineProps({
 	confirmationSubmitting: {type: Object, default: () => ({})},
 	confirmationErrors: {type: Object, default: () => ({})},
 	pendingSteering: {type: Array, default: () => []},
+	promptSuggestions: {type: Array, default: () => []},
 	modelMenuOpen: {type: Boolean, default: false},
 	modelGroups: {type: Array, default: () => []},
 	currentModel: {type: String, default: ""},
@@ -117,9 +120,37 @@ const emit = defineEmits([
 	"send",
 	"stop",
 	"answer-confirmation",
+	"pick-suggestion",
+	"dismiss-suggestions",
 	"close-menus",
 	"height-change",
 ]);
+
+// Once the user starts typing, the card stays away until the editor is empty and
+// unfocused again; clearing a typo must not make it bounce back mid-edit.
+const composerFocused = ref(false);
+const promptSuggestionsSuppressed = ref(false);
+watch(() => `${props.conversationUuid}\n${props.promptSuggestions.join("\n")}`, () => {
+	promptSuggestionsSuppressed.value = false;
+});
+watch(() => Boolean(String(props.draft || "").trim()), (typed) => {
+	if (typed) promptSuggestionsSuppressed.value = true;
+	else if (!composerFocused.value) promptSuggestionsSuppressed.value = false;
+});
+
+// Pending interactions and queued messages own the space above the editor.
+const showPromptSuggestions = computed(() => Boolean(
+	props.promptSuggestions.length && !props.running && !String(props.draft || "").trim()
+	&& !promptSuggestionsSuppressed.value
+	&& !props.pendingConfirmations.length && !props.pendingSteering.length
+));
+
+function onComposerFocusOut(event) {
+	scheduleRunConfigPosition();
+	if (event?.currentTarget?.contains?.(event.relatedTarget)) return;
+	composerFocused.value = false;
+	if (!String(props.draft || "").trim()) promptSuggestionsSuppressed.value = false;
+}
 
 const fileInput = ref(null);
 const composerShell = ref(null);
@@ -141,29 +172,11 @@ const interactionNowMs = ref(Date.now());
 let interactionClockTimer = null;
 const runConfigTab = ref("main"); // main | agent
 const DEFAULT_WINDOW_TRIGGER_RATIO = 0.7;
-const modelDetailId = `model-detail-${useId()}`;
-const activeModelDetail = ref(null);
-
-function clearModelDetail() {
-	activeModelDetail.value = null;
-}
-
-function showModelFeature(model, feature, event) {
-	if (!props.modelMenuOpen || (event.pointerType === 'touch' && event.type !== 'click')) return;
-	if (event.type === 'focus' && !event.currentTarget.matches(':focus-visible')) return;
-	// The hint occupies a fixed footer slot, never a layer over model rows.
-	activeModelDetail.value = {modelKey: model.key, feature};
-}
-
-watch([() => props.modelMenuOpen, runConfigTab, () => props.modelQuery, () => props.modelGroups, () => props.conversationUuid], clearModelDetail, {flush: 'sync'});
 const runConfigPopoverVisible = computed({
 	get: () => props.modelMenuOpen,
 	set: (value) => {
 		if (value && !props.modelMenuOpen) emit("toggle-model-menu");
-		else if (!value && props.modelMenuOpen) {
-			clearModelDetail();
-			emit("close-menus");
-		}
+		else if (!value && props.modelMenuOpen) emit("close-menus");
 	},
 });
 const runConfigModelText = computed(() => props.currentModelInfo ? modelShortLabel(props.currentModelInfo) : "模型");
@@ -203,7 +216,6 @@ function compactThinkingLabel(level) {
 }
 
 function selectMenuModel(model) {
-	clearModelDetail();
 	if (isAgentTab.value) emit('select-agent-model', model.key);
 	else emit('select-model', model);
 }
@@ -235,9 +247,6 @@ function finishRunConfigSearch() {
 
 function modelTags(model) {
 	const tags = [];
-	if (model?.contextWindow) {
-		tags.push({id: 'context', type: 'number', label: `${fmtTokens(model.contextWindow)} 上下文`});
-	}
 	const trigger = rolloverTriggerForModel(model);
 	if (trigger > 0) {
 		tags.push({id: 'compression', type: 'number', label: `${fmtTokens(trigger)} 压缩`});
@@ -254,16 +263,6 @@ function modelTags(model) {
 	return tags;
 }
 
-function modelFeatures(model) {
-	const features = [{id: 'protocol', icon: 'protocol', label: '接口协议', value: model.protocol || '未声明'}];
-	const trigger = rolloverTriggerForModel(model);
-	if (trigger > 0) features.push({id: 'compression', icon: 'compression', label: '压缩阈值', value: `${fmtTokens(trigger)} tokens`});
-	if (model.contextWindow) features.push({id: 'context', icon: 'context', label: '上下文窗口', value: `${fmtTokens(model.contextWindow)} tokens`});
-	if (model.maxTokens) features.push({id: 'output', icon: 'output', label: '输出上限', value: `${fmtTokens(model.maxTokens)} tokens`});
-	if (model.reasoning) features.push({id: 'reasoning', icon: 'brain', label: '思考能力', value: '支持推理'});
-	if (model.supportsFast) features.push({id: 'fast', icon: 'zap', label: 'Fast 模式', value: '支持加速'});
-	return features;
-}
 const contextPercentNumber = computed(() => {
 	const value = Number(String(props.contextPercentDisplay || "").replace("%", ""));
 	return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
@@ -460,7 +459,12 @@ function interactionError(item) {
 }
 
 function interactionActionName(item) {
-	return {confirm: "确认", select: "选择", prompt: "输入", questionnaire: "问卷"}[interactionAction(item)] || "确认";
+	return {confirm: "确认", select: "选择", prompt: "输入", questionnaire: "问卷", group_proposal: "小组方案"}[interactionAction(item)] || "确认";
+}
+
+function answerGroupProposal(item, answer) {
+	if (interactionDisabled(item)) return;
+	emit("answer-confirmation", item, answer);
 }
 
 function interactionRiskLabel(item) {
@@ -728,7 +732,7 @@ onBeforeUnmount(() => {
 
 const STOP_BUTTON_SHAPE_KEY = 'openbear.console.stopButtonShape.v1';
 function readStopButtonShape() {
-	try { return window.localStorage.getItem(STOP_BUTTON_SHAPE_KEY) === 'circle' ? 'circle' : 'square'; }
+	try { return userStorage(window.localStorage).getItem(STOP_BUTTON_SHAPE_KEY) === 'circle' ? 'circle' : 'square'; }
 	catch { return 'square'; }
 }
 // Read before the first render; send and stop share the same persisted shape,
@@ -739,7 +743,7 @@ let stopShapeTimer = null;
 let suppressStopClick = false;
 function toggleStopButtonShape() {
 	stopButtonShape.value = stopButtonShape.value === 'circle' ? 'square' : 'circle';
-	try { window.localStorage.setItem(STOP_BUTTON_SHAPE_KEY, stopButtonShape.value); } catch { /* Private-mode storage can be unavailable. */ }
+	try { userStorage(window.localStorage).setItem(STOP_BUTTON_SHAPE_KEY, stopButtonShape.value); } catch { /* Private-mode storage can be unavailable. */ }
 }
 function cancelStopShapePress() {
 	if (stopShapeTimer !== null) window.clearTimeout(stopShapeTimer);
@@ -838,7 +842,7 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 
 			<div v-if="props.pendingConfirmations.length" class="web-confirm-stack" :class="{'has-multiple': props.pendingConfirmations.length > 1}">
 				<div v-for="item in props.pendingConfirmations" :key="item.confirmationId" class="web-confirm-card"
-				     :class="{'questionnaire-card': interactionAction(item) === 'questionnaire', 'is-expired': interactionExpired(item)}"
+				     :class="{'questionnaire-card': interactionAction(item) === 'questionnaire', 'group-proposal-card': interactionAction(item) === 'group_proposal', 'is-expired': interactionExpired(item)}"
 				     :data-questionnaire-id="interactionAction(item) === 'questionnaire' ? item.confirmationId : undefined"
 				     :data-interaction-id="item.confirmationId" tabindex="-1" role="region" :aria-label="item.title || '待处理交互'">
 					<div class="web-confirm-title" :class="{'questionnaire-title': interactionAction(item) === 'questionnaire'}">
@@ -855,7 +859,11 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 					</div>
 					<div v-if="interactionExpired(item)" class="interaction-expired-notice" role="status">此交互已过期，等待同步最新状态。</div>
 
-					<template v-if="interactionAction(item) === 'questionnaire'">
+					<GroupProposalCard v-if="interactionAction(item) === 'group_proposal'" :item="item"
+					                   :disabled="interactionDisabled(item)" :submitting="Boolean(props.confirmationSubmitting[item.confirmationId])"
+					                   :error="interactionError(item)" @answer="answerGroupProposal(item, $event)"/>
+
+					<template v-else-if="interactionAction(item) === 'questionnaire'">
 						<div v-if="item.body" class="web-interaction-content" tabindex="0" role="region" :aria-label="`${item.title || '问卷'}内容`">
 							<InteractionMarkdown class="questionnaire-intro" :text="item.body"/>
 						</div>
@@ -987,6 +995,25 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 				</div>
 			</div>
 
+			<Transition name="prompt-suggestions">
+				<section v-if="showPromptSuggestions" class="prompt-suggestions-card" aria-label="推荐的下一句">
+					<header class="prompt-suggestions-head">
+						<Sparkles class="prompt-suggestions-icon" aria-hidden="true"/>
+						<span>猜你想说</span>
+						<button type="button" class="prompt-suggestions-close" aria-label="关闭推荐" @click="emit('dismiss-suggestions')">
+							<X aria-hidden="true"/>
+						</button>
+					</header>
+					<div class="prompt-suggestions-list">
+						<button v-for="(text, index) in props.promptSuggestions" :key="`${index}:${text}`" type="button"
+						        class="prompt-suggestion" :aria-label="`填入：${text}`" @click="emit('pick-suggestion', text)">
+							<span class="prompt-suggestion-text">{{ text }}</span>
+							<CornerDownLeft class="prompt-suggestion-fill" aria-hidden="true"/>
+						</button>
+					</div>
+				</section>
+			</Transition>
+
 			<div class="composer-box">
 				<input ref="fileInput" type="file" multiple class="hidden" @change="onAttachmentChange"/>
 				<div v-if="props.pendingAttachments.length" class="attachment-strip">
@@ -1026,7 +1053,8 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 					@update:model-value="emit('update:draft', $event)"
 					@send="props.canSend && emit('send')"
 					@keydown.capture="onComposerKeydownCapture"
-					@focusout="scheduleRunConfigPosition"
+					@focusin="composerFocused = true"
+					@focusout="onComposerFocusOut"
 					@paste="onPaste"
 				/>
 				<div class="composer-toolbar">
@@ -1078,12 +1106,12 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 									<ArrowDown class="chip-caret"/>
 								</button>
 							</template>
-							<div ref="runConfigContent" class="popover-menu-content run-config-popover" :class="{'is-compact': runConfigCompact}" @mouseleave="clearModelDetail" @scroll.capture="clearModelDetail" @keydown.esc="clearModelDetail">
+							<div ref="runConfigContent" class="popover-menu-content run-config-popover" :class="{'is-compact': runConfigCompact}">
 								<div class="run-config-tabs" role="tablist" aria-label="运行配置切换">
 									<button type="button" role="tab" :aria-selected="runConfigTab === 'main'" :class="runConfigTab === 'main' ? 'is-active' : ''" @click="runConfigTab = 'main'">主会话</button>
 									<button type="button" role="tab" :aria-selected="runConfigTab === 'agent'" :class="runConfigTab === 'agent' ? 'is-active' : ''" @click="runConfigTab = 'agent'">Agent</button>
 								</div>
-								<p v-if="props.running" v-show="!runConfigCompact" class="run-config-notice">{{ isAgentTab ? '模型与执行设置用于新 Agent' : '模型与执行设置在下一次调用生效' }}</p>
+								<p v-if="props.running" v-show="!runConfigCompact" class="run-config-notice">{{ isAgentTab ? '模型与执行设置用于新 Agent' : '主模型在下一轮运行生效' }}</p>
 								<label v-show="!runConfigCompact || !runConfigSettingsOpen" class="model-search run-config-search">
 									<Search/>
 									<input ref="runConfigSearchInput" :value="props.modelQuery" type="search" :placeholder="isAgentTab ? '搜索 Agent 模型' : '搜索模型'" :aria-label="isAgentTab ? '搜索 Agent 模型' : '搜索模型'" @input="emit('update:modelQuery', $event.target.value)"/>
@@ -1258,11 +1286,19 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 
 .steering-queue-items {
 	display: grid;
+	grid-auto-rows: max-content;
 	gap: 0.42rem;
+	min-width: 0;
+	max-height: min(32vh, 16rem);
+	max-height: min(32dvh, 16rem);
+	overflow-y: auto;
+	overscroll-behavior: contain;
 }
 
 .steering-queue-item {
+	min-width: 0;
 	white-space: pre-wrap;
+	overflow-wrap: anywhere;
 	border: 1px solid rgb(var(--ob-blue-rgb) / 0.16);
 	border-radius: 0.78rem;
 	background: rgb(var(--ob-surface-rgb) / 0.82);
@@ -1276,6 +1312,138 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 	display: grid;
 	gap: 0.6rem;
 	margin-bottom: 0.75rem;
+}
+
+.prompt-suggestions-card {
+	display: grid;
+	gap: 0.3rem;
+	margin-bottom: 0.6rem;
+	border: 1px solid var(--ob-border);
+	border-radius: 1rem;
+	background: var(--ob-surface);
+	box-shadow: var(--ob-shadow-panel);
+	padding: 0.45rem 0.45rem 0.4rem;
+}
+
+.prompt-suggestions-head {
+	display: flex;
+	align-items: center;
+	gap: 0.38rem;
+	min-height: 1.6rem;
+	padding-left: 0.4rem;
+	font-size: 0.74rem;
+	font-weight: 600;
+	color: var(--ob-text-subtle);
+}
+
+.prompt-suggestions-icon {
+	width: 0.85rem;
+	height: 0.85rem;
+	color: var(--ob-violet);
+}
+
+.prompt-suggestions-close {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.6rem;
+	height: 1.6rem;
+	margin-left: auto;
+	border-radius: 0.5rem;
+	color: var(--ob-text-muted);
+	transition: background-color 0.15s, color 0.15s;
+}
+
+.prompt-suggestions-close svg {
+	width: 0.9rem;
+	height: 0.9rem;
+}
+
+.prompt-suggestions-close:hover {
+	background: var(--ob-hover);
+	color: var(--ob-text);
+}
+
+.prompt-suggestions-list {
+	display: grid;
+	gap: 0.12rem;
+	min-width: 0;
+}
+
+.prompt-suggestion {
+	display: flex;
+	align-items: center;
+	gap: 0.6rem;
+	min-width: 0;
+	width: 100%;
+	border-radius: 0.7rem;
+	padding: 0.42rem 0.55rem;
+	text-align: left;
+	font-size: 0.84rem;
+	line-height: 1.45;
+	color: var(--ob-text);
+	transition: background-color 0.15s;
+}
+
+.prompt-suggestion-text {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.prompt-suggestion-fill {
+	flex: 0 0 auto;
+	width: 0.85rem;
+	height: 0.85rem;
+	color: var(--ob-text-muted);
+	opacity: 0;
+	transition: opacity 0.15s;
+}
+
+.prompt-suggestion:hover {
+	background: var(--ob-hover);
+}
+
+.prompt-suggestion:active {
+	background: var(--ob-selected);
+}
+
+.prompt-suggestion:hover .prompt-suggestion-fill,
+.prompt-suggestion:focus-visible .prompt-suggestion-fill {
+	opacity: 1;
+}
+
+.prompt-suggestion:focus-visible,
+.prompt-suggestions-close:focus-visible {
+	outline: 2px solid var(--ob-focus);
+	outline-offset: -2px;
+}
+
+@media (hover: none) and (pointer: coarse) {
+	.prompt-suggestion {
+		min-height: 2.5rem;
+	}
+
+	.prompt-suggestion-fill {
+		opacity: 0.7;
+	}
+
+	.prompt-suggestions-close {
+		width: 2.25rem;
+		height: 2.25rem;
+		margin-block: -0.3rem;
+	}
+}
+
+.prompt-suggestions-enter-active,
+.prompt-suggestions-leave-active {
+	transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.prompt-suggestions-enter-from,
+.prompt-suggestions-leave-to {
+	opacity: 0;
+	transform: translateY(4px);
 }
 
 /* A single card owns its content scroll; only stacked cards need an outer rail. */
@@ -1327,6 +1495,15 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 .web-confirm-card.is-expired {
 	box-shadow: none;
 	opacity: 0.82;
+}
+
+/* A proposal can be long; it scrolls inside the card, above the composer. */
+.web-confirm-card.group-proposal-card {
+	max-height: min(58vh, 36rem);
+	max-height: min(58dvh, 36rem);
+	overflow: auto;
+	overscroll-behavior: contain;
+	scrollbar-width: thin;
 }
 
 .web-confirm-title {

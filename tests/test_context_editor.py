@@ -61,6 +61,8 @@ def test_anthropic_thinking_only_is_not_a_second_body_and_prefix_change_is_block
 
 class Backend(FakeStreamBackend):
     protocol = 'chat'
+    # The production serializer uses the endpoint when applying request options.
+    _base = 'https://isolated.invalid'
     build_payload = OpenAIChatBackend.build_payload
 
 

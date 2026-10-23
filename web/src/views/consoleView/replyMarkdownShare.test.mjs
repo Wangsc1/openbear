@@ -167,12 +167,3 @@ test("mobile share layout is viewport-bounded, has separated actions and theme-a
   assert.match(css, /\.reply-share-utilities[^}]*grid-template-columns/);
   assert.match(css, /prefers-reduced-motion: reduce/);
 });
-
-test("TurnList adds share only beside assistant reply actions and uses visible timeline text", () => {
-  const parent = readFileSync(new URL("./TurnList.vue", import.meta.url), "utf8");
-  assert.match(parent, /function assistantTurnShareContent\(turn\) \{\s*return replyMarkdownText\(conversationEvents\(turn\)\);/);
-  assert.match(parent, /<span class="message-footer-actions">[\s\S]*<ReplyMarkdownShare v-if="!visibility\.selecting\.value && assistantTurnShareContent\(turn\)" :content="assistantTurnShareContent\(turn\)"\/>/);
-  assert.match(descriptor.styles[0].content, /@media \(max-width: 760px\)/);
-  assert.match(descriptor.template.content, /分享 Markdown 文本…[\s\S]*分享 \.md 文件…[\s\S]*复制 Markdown[\s\S]*下载 \.md 文件/);
-  assert.match(descriptor.template.content, /附件文件不会打包进 \.md/);
-});

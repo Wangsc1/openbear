@@ -6,6 +6,7 @@ import contextlib
 import json
 import logging
 
+from app.lifecycle import wait_for_startup
 from app.webhooks import routing
 from app.webhooks.contracts import dumps
 from app.webhooks.receipts import receipt
@@ -66,6 +67,8 @@ class Worker:
             await conn.execute("UPDATE web_task_notifications SET state='paused',last_error='interrupted delivery; verify channel state',claim_token='' WHERE kind='webhook-result' AND state='processing'")
 
     async def run(self):
+        await wait_for_startup(self)
+        self.last_prune = self.s.clock()
         while not self.closing:
             self.s.wake.clear()
             try: await self.tick()

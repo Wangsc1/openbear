@@ -10,11 +10,11 @@ import {parse} from '@vue/compiler-sfc';
 import {baseParse} from '@vue/compiler-dom';
 import * as icons from '@element-plus/icons-vue';
 import {treeItemId as rowId, treeItemParent, compareTreeItems, resolveTreeDrop} from './conversationTreeInteractions.js';
-import {activityLabel, activityState, activityReadRequests, applyActivityReadVersions, groupActivityItems} from '../conversationActivity.js';
+import {activityLabel, activityState, activityReadRequests, applyActivityReadVersions, isActivityWaiting, pendingConversationRows, pendingFolderCounts, folderActivityCounts} from '../conversationActivity.js';
+import * as conversationGroupsTree from './conversationGroupsTree.js';
 
 const read = file => fs.readFileSync(new URL(file, import.meta.url), 'utf8');
 const treeSource = parse(read('./ConversationTree.vue')).descriptor;
-const folderSource = parse(read('./ConversationActivityFolder.vue')).descriptor;
 const strip = descriptor => descriptor.scriptSetup.content.replace(/^import[\s\S]*?;\n/gm, '');
 const walk = nodes => (nodes || []).flatMap(node => node && typeof node === 'object' ? [node, ...walk(Array.isArray(node.children) ? node.children : [])] : []);
 const hasClass = (node, value) => String(node.props?.class || '').split(/\s+/).includes(value);
@@ -26,8 +26,8 @@ function treeHarness(t) {
   const props = reactive({activeConversationUuid: '', draftConversation: null});
   const catalog = reactive({connected: false, ready: false, activityReadVersions: new Map()});
   const emitted = [], timers = new Map(); let time = 0, serial = 0;
-  const ctx = vm.createContext({...promptPolicy,...icons, referenceItem: () => null, useRecentConversationRows, computed, nextTick, reactive, ref, watch, rowId, treeItemParent, compareTreeItems, resolveTreeDrop,
-    activityLabel, activityState, activityReadRequests, referenceCatalog: catalog,
+  const ctx = vm.createContext({...conversationGroupsTree,...promptPolicy,...icons, referenceItem: () => null, useRecentConversationRows, computed, nextTick, reactive, ref, watch, rowId, treeItemParent, compareTreeItems, resolveTreeDrop,
+    activityLabel, activityState, activityReadRequests, isActivityWaiting, pendingConversationRows, pendingFolderCounts, folderActivityCounts, referenceCatalog: catalog,
     defineLazyView: () => ({}), defineProps: () => props, defineEmits: () => (...args) => emitted.push(args), defineExpose() {}, onMounted() {}, onBeforeUnmount() {},
     Api: {}, apiError: String, ElMessage: {error(value) {assert.fail(String(value));}},
     window: {matchMedia: query => ({matches: query === '(hover: hover)'})}, document: {querySelector: () => null}, CSS: {escape: value => value},
@@ -36,7 +36,7 @@ function treeHarness(t) {
   scope.run(() => vm.runInContext(strip(treeSource) + `
     globalThis.tree={props,activityItems,recentItems,activityReadBusy,titleGenerating,referenceCatalog,applyStatus,knownConversationRows,forgetConversation,withDraft,rootFolders,stateFor,expanded,selectedFolderId,openActivityConversation,markActivityRead,overview,enterOverview,leaveOverview,closeOverview,keepOverview,menu,openMoreMenu,
       activeConversationRow,sidebarView,isDirectoryView,switchSidebarView,recentClock,recentConversationRows,recentUnreadCount,recentWaitingCount,recentLabel,displayRows,query,initialized,loading,listRef,
-      activateRow,toggleRow,dragStart,dragOver,drop,clearDrag,rootDropTarget,drag,moveInFlight,rowId,rowLabel,rowLoading,nodePath,indentation,isExpanded,running,isTitleGenerating,liveConversationTitle,
+      activateRow,toggleRow,dragStart,dragOver,drop,clearDrag,rootDropTarget,drag,moveInFlight,rowId,rowLabel,rowLoading,nodePath,indentation,isExpanded,running,isTitleGenerating,liveConversationTitle,conversationOrigin,
       loadChildren,searchHasMore,searchRows,searchLoading,runSearch,locateAndOpen,openMenu,openRootMenu,rowKeydown,moreMenuKeydown,clearDropTarget};
     initialized.value=true;`, ctx));
   const tree = ctx.tree;
@@ -44,7 +44,7 @@ function treeHarness(t) {
     tick(ms) {time += ms; for (const [id, timer] of [...timers]) if (timer.at <= time) {timers.delete(id); timer.fn();}},
     async render() {
       let vnode;
-      const bindings = proxyRefs({...icons, ...tree, activityLabel, activeConversationUuid: props.activeConversationUuid});
+      const bindings = proxyRefs({...icons, ...tree, activityLabel, isActivityWaiting, activeConversationUuid: props.activeConversationUuid});
       const renderer = compile(treeTemplate);
       const app = createSSRApp({render() {vnode = renderer.call(this, bindings, []); return vnode;}});
       for (const [name, icon] of Object.entries(icons)) app.component(name, icon);
@@ -56,117 +56,19 @@ function treeHarness(t) {
   };
 }
 
-function folderHarness(t, props, dispatch = () => {}) {
-  const scope = effectScope(); t.after(() => scope.stop());
-  const emitted = [], mounted = [], unmounted = [], intervals = new Map(); let serial = 0;
-  const ctx = vm.createContext({useRecentConversationRows, computed, ref, watch, activityLabel, activityState, groupActivityItems,
-    referenceItem: () => null,
-    defineProps: () => props, defineEmits: () => (...args) => {emitted.push(args); dispatch(...args);},
-    onMounted: fn => mounted.push(fn), onBeforeUnmount: fn => unmounted.push(fn),
-    setInterval: fn => {intervals.set(++serial, fn); return serial;}, clearInterval: id => intervals.delete(id),
+for (const origin of ['webhook', 'cron', 'recommendation', 'deployment', 'maintenance']) {
+  test(`automatic ${origin} remains available in pending work without appearing in recent rows`, async t => {
+    const h = treeHarness(t);
+    const pending = row(`automatic-${origin}`, 0, {origin, running: true, activityState: 'waiting',
+      activityPending: [{interactionId: 'pending-1', action: 'confirm'}]});
+    h.tree.applyStatus({items: [pending], activityItems: [], recentItems: []});
+    await nextTick();
+    assert.equal(h.tree.recentConversationRows.value.length, 0);
+    assert.equal(h.tree.recentWaitingCount.value, 1);
+    assert.equal(h.tree.recentUnreadCount.value, 0);
+    assert.doesNotMatch((await h.render()).html, /automatic-/);
   });
-  scope.run(() => vm.runInContext(strip(folderSource), ctx));
-  for (const icon of ['ArrowRight', 'Folder', 'FolderOpened', 'Check', 'MoreFilled']) ctx[icon] = {render: () => h('svg')};
-  ctx.AnimatedConversationTitle = {props: ['text'], render() {return h('span', this.text);}};
-  t.after(() => unmounted.forEach(fn => fn()));
-  const renderer = compile(folderSource.template.content);
-  return {emitted, mounted, unmounted, intervals, run: text => vm.runInContext(text, ctx), async render() {
-    let vnode;
-    const bindings = proxyRefs(vm.runInContext('({...props,props,emit,expanded,rows,unreadCount,waitingCount,rowState,rowLabel,rowTitle,liveTitle,isTitleGenerating,ArrowRight,Folder,FolderOpened,Check,MoreFilled,AnimatedConversationTitle})', ctx));
-    const app = createSSRApp({components: {ArrowRight: ctx.ArrowRight, Check: ctx.Check, MoreFilled: ctx.MoreFilled, AnimatedConversationTitle: ctx.AnimatedConversationTitle}, render() {vnode = renderer.call(this, bindings, []); return vnode;}});
-    const html = await renderToString(app);
-    return {html, vnode, nodes: walk([vnode])};
-  }};
 }
-
-const recentGroup = view => view.nodes.find(node => Object.hasOwn(node.props || {}, 'data-recent-conversations'));
-const groupRows = group => walk([group]).filter(node => hasClass(node, 'activity-row'));
-
-test('one recent list keeps newest fifteen plus outstanding work, excludes archives/drafts, and remains after switching', async t => {
-  const items = Array.from({length: 16}, (_, i) => row(`c${i}`, (i + 1) * 1000));
-  const props = reactive({items: [row('working', 19000, {running: true}), row('unread', 18000, {activityUnread: true})], recentItems: [...items, {...items[0]}, row('archived', 99000, {archived: true}), row('draft', 99001, {local: true}), row('empty', 0)], activeConversationUuid: '', readVersions: new Map(), busy: false});
-  const folder = folderHarness(t, props);
-  let view = await folder.render();
-  assert.match(view.html, /最近会话/);
-  assert.deepEqual(groupRows(recentGroup(view)).map(node => node.props['data-activity-id']), ['working', 'unread', ...Array.from({length: 15}, (_, i) => `c${15 - i}`)]);
-  assert.equal(walk([recentGroup(view)]).filter(node => hasClass(node, 'activity-row-read')).length, 1);
-  assert.doesNotMatch(view.html, /运行与未读|<h5|data-activity-group/);
-  props.items = []; props.activeConversationUuid = 'different'; await nextTick();
-  view = await folder.render(); assert.equal(groupRows(recentGroup(view)).length, 15);
-  props.recentItems = items.filter(item => item.conversationUuid !== 'c15'); await nextTick();
-  view = await folder.render();
-  assert.deepEqual(groupRows(recentGroup(view)).map(node => node.props['data-activity-id']), Array.from({length: 15}, (_, i) => `c${14 - i}`));
-  assert.doesNotMatch(view.html, /暂无运行/);
-});
-
-test('running and unread recents merge into one row with one read action, live status and one count', async t => {
-  const working = row('working', 3000, {running: true, activityState: 'running'});
-  const unread = row('done', 2000, {activityReadVersion: 0, activityUnread: true});
-  const recent = [row('working', 3000), unread, row('idle', 1000)];
-  const props = reactive({items: [working, unread, working], recentItems: recent, activeConversationUuid: '', readVersions: new Map(), busy: false});
-  const folder = folderHarness(t, props);
-  const view = await folder.render();
-  assert.deepEqual(groupRows(recentGroup(view)).map(node => node.props['data-activity-id']), ['working', 'done', 'idle']);
-  assert.equal(view.nodes.filter(node => hasClass(node, 'activity-row-read')).length, 1);
-  assert.equal(view.nodes.find(node => hasClass(node, 'activity-total')).children, '3');
-  for (const node of groupRows(recentGroup(view))) {
-    assert.ok(walk([node]).every(child => !Object.hasOwn(child.props || {}, 'title')), 'row descendants must not trigger native tooltips over the overview');
-  }
-  const workingRow = groupRows(recentGroup(view))[0];
-  assert.equal(walk([workingRow]).find(node => hasClass(node, 'activity-row-open')).props['aria-label'], 'working · 目录 F · 运行中');
-  assert.equal(walk([workingRow]).find(node => hasClass(node, 'activity-row-status-desktop')).children, '运行中');
-  view.nodes.find(node => hasClass(node, 'activity-row-read')).props.onClick();
-  assert.equal(folder.emitted.at(-1)[0], 'read');
-  assert.equal(folder.emitted.at(-1)[1].conversationUuid, 'done');
-  view.nodes.find(node => hasClass(node, 'activity-read-all')).props.onClick();
-  assert.equal(folder.emitted.at(-1)[0], 'read-all');
-});
-
-test('pending, running, unread and failure labels take priority over time on both desktop and touch', async t => {
-  const cases = [
-    [{running: true, activityState: 'waiting', activityPending: [{action: 'confirm'}]}, '待确认'],
-    [{running: true, activityState: 'waiting', activityPending: [{action: 'select'}]}, '待选择'],
-    [{running: true, activityState: 'waiting', activityPending: [{action: 'prompt'}]}, '待填写'],
-    [{running: true, activityState: 'waiting', activityPending: [{action: 'questionnaire'}]}, '待填写问卷'],
-    [{activityPending: [{action: 'confirm'}]}, '待确认'],
-    [{running: true, activityState: 'running', activityResult: {status: 'failed'}}, '运行中'],
-    [{activityUnread: true, activityReadVersion: 0}, '完成待查看'],
-    [{activityState: 'failed', activityUnread: true, activityReadVersion: 0}, '失败待查看'],
-    [{activityState: 'failed'}, '失败'],
-    [{activityState: 'error', readWhileSelected: true}, '失败'],
-    [{activityState: 'partial'}, '部分完成'],
-    [{activityState: 'interrupted'}, '已中断'],
-    [{activityState: 'cancelled'}, '已取消'],
-    [{}, '3 分钟前'],
-  ];
-  for (const [state, label] of cases) {
-    const item = row('one', Date.now() - 180000, state);
-    const folder = folderHarness(t, reactive({items: [], recentItems: [item], activeConversationUuid: '', readVersions: new Map(), busy: false}));
-    const view = await folder.render();
-    const statuses = view.nodes.filter(node => hasClass(node, 'activity-row-status'));
-    assert.deepEqual(statuses.map(node => node.children), [label, label], JSON.stringify(state));
-    assert.ok(statuses.every(node => node.props.title === undefined));
-    if (label !== '3 分钟前') assert.ok(statuses.every(node => node.props['aria-label'] === label));
-  }
-});
-
-test('marking a failed recent read keeps failure, while newer live and completed states replace the retained snapshot', async t => {
-  const failed = row('failed', Date.now() - 180000, {activityState: 'failed', activityReadVersion: 0, activityUnread: true});
-  const props = reactive({items: [failed], recentItems: [failed], activeConversationUuid: 'failed', readVersions: new Map(), busy: false});
-  const folder = folderHarness(t, props);
-  const label = async () => (await folder.render()).nodes.find(node => hasClass(node, 'activity-row-status-desktop')).children;
-  assert.equal(await label(), '失败待查看');
-  props.readVersions = new Map([['failed', 1]]);
-  props.items = []; props.recentItems = [{...failed, activityUnread: false, activityReadVersion: 1}]; await nextTick();
-  assert.equal(await label(), '失败');
-  assert.equal((await folder.render()).nodes.filter(node => hasClass(node, 'activity-row')).length, 1);
-  props.recentItems = [{...props.recentItems[0], running: true, activityState: 'running'}]; await nextTick();
-  assert.equal(await label(), '运行中');
-  props.recentItems = [{...props.recentItems[0], running: false, activityState: 'completed', activityResult: {status: 'completed'}, activityUnread: true, activityVersion: 2}]; await nextTick();
-  assert.equal(await label(), '完成待查看');
-  props.recentItems = [{...props.recentItems[0], activityUnread: false, activityReadVersion: 2}]; await nextTick();
-  assert.equal(await label(), '3 分钟前');
-});
 
 test('read receipts clear badges without removing recent aliases or changing their order', () => {
   const unread = row('done', 2000, {activityReadVersion: 0, activityUnread: true});
@@ -264,7 +166,7 @@ test('status refresh does not close an alias overview merely because its origina
   assert.equal(h.tree.overview.value.open, false);
 });
 
-test('local draft uses normal folder/pin/manual ordering without mutating loaded rows or duplicating after send', t => {
+test('local draft heads the unpinned conversations without mutating loaded rows or moving after send', t => {
   const h = treeHarness(t);
   const rows = [
     {kind: 'folder', folderId: 'child', parentId: 'F', name: '子文件夹', createdAt: 1},
@@ -275,20 +177,12 @@ test('local draft uses normal folder/pin/manual ordering without mutating loaded
   const snapshot = JSON.stringify(rows);
   h.props.draftConversation = {local: true, conversationUuid: 'local:new', folderId: 'F', createdAt: 100};
   let merged = h.tree.withDraft(rows, 'F');
-  assert.deepEqual(Array.from(merged, rowId), ['child', 'pinned', 'manual', 'local:new', 'older']);
+  assert.deepEqual(Array.from(merged, rowId), ['child', 'pinned', 'local:new', 'manual', 'older']);
   assert.equal(JSON.stringify(rows), snapshot);
   assert.equal(h.tree.withDraft(rows, 'other').length, rows.length);
   assert.equal(h.tree.withDraft(merged, 'F').length, merged.length);
-  const persisted = merged.map(item => item.local ? {...item, local: false, id: 'sent', conversationUuid: 'sent'} : item).sort(compareTreeItems);
+  // First send persists the draft below the group's smallest displayOrder.
+  const persisted = merged.map(item => item.local ? {...item, local: false, id: 'sent', conversationUuid: 'sent', displayOrder: 1 - 1024} : item).sort(compareTreeItems);
   h.props.draftConversation = null;
-  assert.deepEqual(Array.from(h.tree.withDraft(persisted, 'F'), rowId), ['child', 'pinned', 'manual', 'sent', 'older']);
-});
-
-test('relative interaction labels update locally and their clock is disposed with the component', t => {
-  const folder = folderHarness(t, reactive({items: [], recentItems: [], activeConversationUuid: '', readVersions: new Map()}));
-  folder.mounted.forEach(fn => fn()); assert.equal(folder.intervals.size, 1);
-  assert.equal(folder.run('recentInteractionTime(1000, 301000)'), '5 分钟前');
-  assert.equal(folder.run('recentInteractionTime(1000, 7201000)'), '2 小时前');
-  assert.equal(folder.run('recentInteractionTime(1000, 172801000)'), '2 天前');
-  folder.unmounted.forEach(fn => fn()); assert.equal(folder.intervals.size, 0);
+  assert.deepEqual(Array.from(h.tree.withDraft(persisted, 'F'), rowId), ['child', 'pinned', 'sent', 'manual', 'older']);
 });

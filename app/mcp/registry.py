@@ -1,6 +1,7 @@
 """MCP ToolRegistry adapter."""
 from __future__ import annotations
 
+from app.mcp.exposure import tool_description
 from app.mcp.manager import MCPManager
 from app.tools.base import ToolRegistry, current_tool_context
 
@@ -16,16 +17,7 @@ def register_mcp_tools(registry: ToolRegistry, manager: MCPManager) -> int:
     for meta in manager.available_tools():
         identity = (meta.server_key, meta.original_tool_name)
         registry.mcp_tool_identities[meta.public_name] = identity
-        server = manager.mcp_config.servers[meta.server_key]
-        timeout_s = server.tool_call_timeout_s or manager.mcp_config.tool_call_timeout_s
-        description = (
-            f"{meta.description}\nOpenBear MCP transport deadline: {timeout_s:g} seconds per call. "
-            "Tool timeout arguments cannot extend this limit; allow time for transport overhead. "
-            "A transport timeout does not confirm remote cancellation; check the outcome before retrying. "
-            "Amended approval receipts bind all business arguments exactly: after satisfying the user's full conditions, "
-            "reuse only for identical arguments. If conditions require parameter changes, preserve them and call with "
-            "the revised arguments without the receipt for a fresh tool-owned confirmation; never revert to conflicting old arguments."
-        )
+        description = tool_description(meta, manager.mcp_config)
         registry.add(
             meta.public_name,
             description,

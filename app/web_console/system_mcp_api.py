@@ -1,8 +1,11 @@
 # ruff: noqa: F401,F403,F405
 from __future__ import annotations
 
+import copy
+
 from app.config import MCPAgentAccessConfig
 from app.config_store import ConfigConflictError
+from app.mcp.exposure import warning_text
 from app.mcp.manager import MCPManager
 from app.mcp.permissions import agent_access_reason
 from app.web_console.core import *
@@ -276,6 +279,10 @@ class WebAdminSystemMcpMixin:
                 "approval": server.approval,
                 "approvalSource": "server" if cfg is not None and getattr(cfg, "approval", None) else "default",
                 "toolCount": int(server.tool_count or counts.get("visible") or 0),
+                "enabledTools": server.enabled_tool_count,
+                "definitionBytes": server.definition_bytes,
+                "exposureFingerprint": server.exposure_fingerprint,
+                "disabledTools": cfg.disabled_tools if cfg else [],
                 "visibleTools": int(counts.get("visible") or server.tool_count or 0),
                 "filteredTools": int(counts.get("filtered") or 0),
                 "totalTools": int(counts.get("total") or 0),
@@ -302,6 +309,8 @@ class WebAdminSystemMcpMixin:
                 "annotations": self._safe_mcp_annotations(meta.annotations),
                 "risk": meta.risk,
                 "approval": meta.approval,
+                "enabled": meta.enabled,
+                "definitionBytes": meta.definition_bytes,
                 "visible": not meta.filtered,
                 "filtered": meta.filtered,
                 "filterReason": meta.filter_reason,
@@ -346,8 +355,109 @@ class WebAdminSystemMcpMixin:
             "sensitiveConfigHidden": True,
             "settingsAvailable": self._config_writer_available(),
             "agentAccessAvailable": self._config_writer_available() and self._mcp_agent_access_hook is not None,
+            "toolSelectionAvailable": self._config_writer_available() and self._mcp_reload_hook is not None,
+            "exposureWarnings": manager.exposure_warnings(),
+            "thresholds": {"toolCount": saved_config.mcp.tool_count_threshold, "definitionBytes": saved_config.mcp.definition_size_threshold_kb * 1024},
             "note": "MCP 管理只返回安全摘要；command/env/headers/token/apiKey 不会从 Web API 返回。卸载只移除 OpenBear 注册，不操作外部软件。",
         })
+
+    async def _mcp_preview(self, config: Config) -> MCPManager:
+        live = getattr(self, "mcp", None)
+        preview = MCPManager(config, exposure_approvals=getattr(live, "exposure_approvals", None))
+        try:
+            await preview.start()
+            return preview
+        except BaseException:
+            await preview.close()
+            raise
+
+    async def _mcp_check_exposure(self, config: Config, body: dict[str, Any], *, server: str = "") -> web.Response | None:
+        preview = await self._mcp_preview(config)
+        try:
+            rows = [row for row in preview.exposure_warnings() if not server or row["server"] == server]
+            expected = [{"server": row["server"], "fingerprint": row["fingerprint"]} for row in rows]
+            if rows and body.get("exposureConfirmations") != expected:
+                return web.json_response({"ok": False, "error": "mcp_exposure_confirmation_required",
+                                          "exposureWarnings": rows, "confirmationText": warning_text(rows),
+                                          "exposureConfirmations": expected}, status=409)
+            if rows:
+                await preview.exposure_approvals.approve(rows)
+        finally:
+            await preview.close()
+        return None
+
+    async def _mcp_checked_mutation(self, request: web.Request, body: dict[str, Any], mutator) -> web.Response | None:
+        before = await self.config_store.load_raw()
+        after = copy.deepcopy(before)
+        mutator(after)
+        candidate = Config.model_validate(after)
+        server = str(request.match_info.get("server") or "")
+        # Disabling never increases exposure; approval remains tied to the exact set.
+        if body.get("enabled") is not False:
+            response = await self._mcp_check_exposure(candidate, body, server=server)
+            if response is not None:
+                return response
+        def checked(raw):
+            if raw != before:
+                raise ConfigConflictError("mcp_config_changed_during_discovery")
+            mutator(raw)
+        await self.config_store.mutate(checked)
+        return None
+
+    async def handle_api_mcp_server_discover_tools(self, request: web.Request) -> web.Response:
+        server = str(request.match_info.get("server") or "")
+        config = Config.model_validate(await self.config_store.load_raw())
+        if server not in config.mcp.servers:
+            return web.json_response({"ok": False, "error": "mcp_server_not_found"}, status=404)
+        # Explicit inspection connects this server only; it never publishes tools.
+        config.mcp.enabled = True
+        config.mcp.servers = {server: config.mcp.servers[server]}
+        config.mcp.servers[server].enabled = True
+        preview = await self._mcp_preview(config)
+        try:
+            return web.json_response({"ok": True, "tools": [
+                {"serverKey": meta.server_key, "publicName": meta.public_name, "originalToolName": meta.original_tool_name,
+                 "description": self._safe_mcp_text(meta.description, max_chars=2000), "definitionBytes": meta.definition_bytes,
+                 "enabled": meta.enabled, "filtered": meta.filtered, "filterReason": meta.filter_reason}
+                for meta in preview.all_tools_snapshot()]})
+        finally:
+            await preview.close()
+
+    async def handle_api_mcp_server_tools(self, request: web.Request) -> web.Response:
+        if not self._config_writer_available() or self._mcp_reload_hook is None:
+            return web.json_response({"ok": False, "error": "mcp_tools_unavailable"}, status=503)
+        server = str(request.match_info.get("server") or "")
+        body = await self._json_body(request)
+        disabled = body.get("disabledTools")
+        if not isinstance(disabled, list) or any(not isinstance(name, str) or not name for name in disabled):
+            return web.json_response({"ok": False, "error": "disabled_tools_invalid"}, status=400)
+        def mutator(raw):
+            servers = (raw.get("mcp") or {}).get("servers") or {}
+            if server not in servers:
+                raise _MCPServerNotFoundError(server)
+            servers[server]["disabledTools"] = list(dict.fromkeys(disabled))
+        try:
+            response = await self._mcp_checked_mutation(request, body, mutator)
+            if response is not None:
+                return response
+        except _MCPServerNotFoundError:
+            return web.json_response({"ok": False, "error": "mcp_server_not_found"}, status=404)
+        except Exception as exc:
+            return web.json_response(self._safe_mcp_update_error(exc), status=400)
+        return await self._mcp_reload_response_after_config_write(request, audit_kind="web.mcp.tools.update", detail={"server": server, "disabledTools": len(disabled)})
+
+    async def handle_api_mcp_server_confirm_exposure(self, request: web.Request) -> web.Response:
+        if not self._config_writer_available() or self._mcp_reload_hook is None:
+            return web.json_response({"ok": False, "error": "mcp_tools_unavailable"}, status=503)
+        server = str(request.match_info.get("server") or "")
+        body = await self._json_body(request)
+        config = Config.model_validate(await self.config_store.load_raw())
+        if server not in config.mcp.servers:
+            return web.json_response({"ok": False, "error": "mcp_server_not_found"}, status=404)
+        response = await self._mcp_check_exposure(config, body, server=server)
+        if response is not None:
+            return response
+        return await self._mcp_reload_response_after_config_write(request, audit_kind="web.mcp.exposure.confirm", detail={"server": server})
 
     @staticmethod
     def _mcp_enabled_value(body: dict[str, Any]) -> bool:
@@ -431,7 +541,9 @@ class WebAdminSystemMcpMixin:
         body = await self._json_body(request)
         try:
             enabled = self._mcp_enabled_value(body)
-            await self.config_store.update_path("mcp.enabled", enabled)
+            response = await self._mcp_checked_mutation(request, body, lambda raw: raw.setdefault("mcp", {}).update(enabled=enabled))
+            if response is not None:
+                return response
         except Exception as exc:
             log.warning("Web MCP enabled update failed", 错误类型=type(exc).__name__)
             return web.json_response(self._safe_mcp_update_error(exc), status=400)
@@ -463,7 +575,9 @@ class WebAdminSystemMcpMixin:
                     raise ValueError("mcp_server_config_invalid")
                 server_config["enabled"] = enabled
 
-            await self.config_store.mutate(mutator)
+            response = await self._mcp_checked_mutation(request, body, mutator)
+            if response is not None:
+                return response
         except _MCPServerNotFoundError:
             return web.json_response({"ok": False, "error": "mcp_server_not_found", "server": server}, status=404)
         except Exception as exc:
@@ -685,6 +799,12 @@ class WebAdminSystemMcpMixin:
             return web.json_response({"ok": False, "error": "mcp_reload_unavailable"}, status=503)
         session: WebSession = request[_WEB_SESSION_KEY]
         try:
+            body = await self._json_body(request)
+            if self._config_writer_available():
+                config = Config.model_validate(await self.config_store.load_raw())
+                response = await self._mcp_check_exposure(config, body)
+                if response is not None:
+                    return response
             result = await self._mcp_reload_hook()
         except Exception as exc:
             log.warning("Web MCP reload hook failed", 错误类型=type(exc).__name__)

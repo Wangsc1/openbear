@@ -22,7 +22,7 @@ const snippets = [
   between('function finishPendingOutboundSend(', 'function handleWsMessage('),
   between('async function ensureServerConversationForSend(', 'function applyLoadedConversationState('),
   between('async function connectWs(', 'function checkConnectionOnResume('),
-  between('async function send()', 'async function newSession()'),
+  between('async function send(', 'async function newSession()'),
   between('async function switchConversation(', 'watch(() => props.conversationUuid,'),
 ];
 const deferred = () => {let resolve, reject; const promise = new Promise((a,b) => {resolve=a; reject=b;}); return {promise,resolve,reject};};
@@ -48,7 +48,7 @@ function harness() {
     crypto:{randomUUID:()=> 'request-A'},
     composer:{value:{getReferenceOrder:()=> []}}, referencesInText:()=>[],referenceCatalog:{ready:true,connected:true},
     localAttachmentPayload:()=>[], noteVisibleOutput:noop, clearActiveRun:noop, lockAutoScroll:noop, closeComposerMenus:noop, adjustComposerHeight:noop,
-    scrollBottom:async()=>{}, ensureLocalRunDefaults:async()=>{throw Error('persisted conversation must not create new one');},
+    scrollBottom:async()=>{}, ensureLocalRunDefaults:async()=>{throw Error('persisted conversation must not create new one');}, forgetLocalDraftChoices:noop, updatePromptSuggestions:noop,
     Api:{uploadConversationFiles:(uuid, files, options)=>{uploads.push({uuid,files,options}); return upload.promise;}},
     attachmentDrafts:{removeItems:async()=>true}, emit:noop,
     closeWs:noop, clearUiCaches:noop, resetOperationStore:noop, resetAgentAutoOpenBoundary:noop, resetTransientThinking:noop,
@@ -82,7 +82,7 @@ function harness() {
   context.restoreReleasedAttachments = (uuid, items)=>{ if(uuid==='A') context.attachmentsByConversation.set('A',{attachments:items,previews:{}}); };
   context.releaseSentAttachments = (uuid,ids)=>{assert.equal(uuid,'A');assert.deepEqual([...ids],['fileA']);context.attachmentsByConversation.delete('A');};
   context.clearDraftForConversation = uuid=>context.setDraftForConversation(uuid,'');
-  vm.createContext(context);
+  context.contextWebSocket = (...args) => new context.WebSocket(...args); context.pageSession = {blocked:false}; vm.createContext(context);
   for(const snippet of snippets) vm.runInContext(snippet,context);
   // The real switch and send use the real scoping methods, not a fixture-only reducer.
   return {context,props,uploads,upload,sockets,file};

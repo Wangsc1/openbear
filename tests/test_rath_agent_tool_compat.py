@@ -37,17 +37,6 @@ def test_edit_batch_is_a_real_agent_visible_contract_under_edit_permission():
     assert set(schemas["EditBatch"]["parameters"]["properties"]) == {"path", "edits"}
 
 
-def test_full_properties_required_compiler_cannot_mix_real_edit_contracts():
-    schemas = _by_name(_file_registry().schemas(scope="agent"))
-    single_keys = set(schemas["Edit"]["parameters"]["properties"])
-    batch_keys = set(schemas["EditBatch"]["parameters"]["properties"])
-
-    assert single_keys == {"path", "old_string", "new_string", "replace_all"}
-    assert batch_keys == {"path", "edits"}
-    assert "edits" not in single_keys
-    assert not ({"old_string", "new_string", "replace_all"} & batch_keys)
-
-
 async def test_runner_allowlist_derives_edit_batch_from_edit_permission():
     registry = _file_registry()
 

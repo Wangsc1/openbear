@@ -1,0 +1,30 @@
+# Markdown 还原度：应用内入口打开 mdlab，逐例截图（11 例），再测一例流式
+appId: dev.openbear.app
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible:
+      id: "open-mdlab"
+    timeout: 20000
+- tapOn:
+    id: "open-mdlab"
+- extendedWaitUntil:
+    visible:
+      id: "mdlab-label"
+    timeout: 20000
+- repeat:
+    times: 11
+    commands:
+      - waitForAnimationToEnd
+      - takeScreenshot: md-case
+      - tapOn:
+          id: "mdlab-next"
+- tapOn:
+    id: "mdlab-stream"
+- takeScreenshot: md-stream-early
+- waitForAnimationToEnd:
+    timeout: 1500
+- takeScreenshot: md-stream-mid
+- tapOn:
+    id: "mdlab-back"

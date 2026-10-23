@@ -1,0 +1,49 @@
+# A 阶段验收（iOS）：首次启动 → 主控 Secret Key 登录（开发审批端点代替 Telegram）→ 会话列表 → 打开会话
+# → 设置 → 登录设备 → 代码编辑器（@mem/ 补全）。
+# 变量：SECRET（测试主控 Secret Key），由调用方 -e SECRET=... 传入；审批由宿主机脚本在等待页出现后完成。
+appId: dev.openbear.app
+---
+- runFlow:
+    when:
+      visible: Continue
+    commands:
+      - tapOn: Continue
+      - tapOn:
+          point: 90%,47%
+- extendedWaitUntil:
+    visible:
+      id: server-url
+    timeout: 60000
+- tapOn:
+    id: server-name
+- inputText: Main
+- tapOn:
+    id: server-detect
+- extendedWaitUntil:
+    visible:
+      id: login-secret
+    timeout: 20000
+- takeScreenshot: ios-02-login
+- tapOn:
+    id: login-secret
+- inputText: ${SECRET}
+- tapOn:
+    id: login-submit
+- extendedWaitUntil:
+    visible:
+      id: approval-waiting
+    timeout: 20000
+- takeScreenshot: ios-03-waiting
+- extendedWaitUntil:
+    visible:
+      id: conversation-list
+    timeout: 120000
+- takeScreenshot: ios-04-list
+- tapOn:
+    id: conv-8f53cd22
+- extendedWaitUntil:
+    visible:
+      id: composer-input
+    timeout: 30000
+- waitForAnimationToEnd
+- takeScreenshot: ios-05-conversation

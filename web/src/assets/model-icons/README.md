@@ -8,15 +8,12 @@ Unmodified SVGs from [Lucide](https://lucide.dev/icons/), official repository
 | --- | --- | --- |
 | Reasoning | `brain.svg` | Thinking / intellect |
 | Fast support | `zap.svg` | Quick / accelerated |
-| Context capacity | `messages-square.svg` | Conversation context |
-| Compression threshold | `file-archive.svg` | Compressed content |
-| Maximum output | `file-output.svg` | Outgoing document / text |
-| API protocol | `webhook.svg` | API interface |
+| Context compression | `file-archive.svg` | Compressed content |
 
 Source URLs: `https://raw.githubusercontent.com/lucide-icons/lucide/5d592a96aaeb4a3a09ffd8134f8f5ed878c9a0c5/icons/<filename>`.
 
-The explicit property label and value accompany each icon in its hover/focus
-hint; icons do not substitute for numeric limits or infer unreported capabilities.
+Each icon is shown beside its text label; icons do not substitute for numeric
+limits or infer unreported capabilities.
 Only local assets are used at runtime. A CSS mask preserves the SVG outlines
 while inheriting the surrounding light/dark theme color.
 

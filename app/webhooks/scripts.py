@@ -22,6 +22,9 @@ def resolve_environment(script,system):
     return str(Path(path).resolve()),str(Path(cwd).resolve())
 
 
+_VERSION_PROBE_TIMEOUT_S = 5
+
+
 async def environment(system):
     result=[]
     for runtime,path in [('python',system.python_path or sys.executable),('node',system.node_path or shutil.which('node'))]:
@@ -30,7 +33,7 @@ async def environment(system):
             p=None; readers=[]; finished=False
             try:
                 try:
-                    async with asyncio.timeout(5):
+                    async with asyncio.timeout(_VERSION_PROBE_TIMEOUT_S):
                         p=await _spawn_owned_process(path,'--version',stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.STDOUT)
                         communication=asyncio.create_task(p.communicate())
                         readers.append(communication)

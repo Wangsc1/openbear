@@ -100,14 +100,17 @@ async def test_capability_A_B_A_compares_latest_real_schema_and_keeps_prefix(age
     schemas = await runner._allowed_tool_schemas()
     runner._append_capability_state(messages, schemas)
     original = copy.deepcopy(messages)
+    # A pending control keeps the schema list (and its cached prefix) unchanged.
     runner._pending_control_acks.add("control-1")
-    runner._append_capability_state(messages, await runner._allowed_tool_schemas())
-    assert "AgentControlAck" in json.loads(messages[-1]["_openbear_runtime"]["capabilitySignature"])["effectiveTools"]
+    assert await runner._allowed_tool_schemas() == schemas
     runner._pending_control_acks.clear()
-    schemas = await runner._allowed_tool_schemas()
+    runner.agent.tool_allowlist = ["Read", "Write"]
+    runner._append_capability_state(messages, await runner._allowed_tool_schemas())
+    assert "Write" in json.loads(messages[-1]["_openbear_runtime"]["capabilitySignature"])["effectiveTools"]
+    runner.agent.tool_allowlist = ["Read"]
     runner._append_capability_state(messages, schemas)
     assert len(messages) == 3
-    assert "AgentControlAck" not in json.loads(messages[-1]["_openbear_runtime"]["capabilitySignature"])["effectiveTools"]
+    assert "Write" not in json.loads(messages[-1]["_openbear_runtime"]["capabilitySignature"])["effectiveTools"]
     runner._append_capability_state(messages, schemas)
     assert len(messages) == 3
     assert messages[:1] == original

@@ -12,6 +12,7 @@ from app.context.window import (
     RequiredContextTooLarge,
     UnsafeWindowBoundary,
     WindowPolicy,
+    capped_trigger_tokens,
     estimate_payload,
     estimate_request,
     mark_source,
@@ -133,6 +134,46 @@ def test_media_base64_is_not_tokenized_as_text():
     assert large.media_unknown
 
 
+def test_image_estimate_follows_pixel_size_for_inline_and_path_images(tmp_path):
+    import base64
+    import io
+
+    from PIL import Image
+
+    def png(size):
+        buffer = io.BytesIO()
+        Image.new("RGB", size).save(buffer, format="PNG")
+        return base64.b64encode(buffer.getvalue()).decode()
+
+    def anthropic(size):
+        return {"content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png(size)}}]}
+
+    def responses(size):
+        return {"content": [{"type": "input_image", "image_url": "data:image/png;base64," + png(size)}]}
+
+    def neutral(size):
+        path = tmp_path / f"{size[0]}x{size[1]}.png"
+        Image.new("RGB", size).save(path)
+        return {"content": [{"type": "image", "path": str(path), "mime_type": "image/png"}]}
+
+    for shape in (anthropic, responses, neutral):
+        icon, screen = estimate_payload(shape((100, 100))), estimate_payload(shape((1440, 900)))
+        # 100x100 is 13 tokens; 1440x900 is capped at ~1.15MP, 1533 tokens.
+        assert screen.tokens - icon.tokens == 1520
+        assert screen.media_unknown and icon.media_unknown
+
+
+def test_estimate_marks_requests_that_replay_thinking():
+    plain = {"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                          {"role": "assistant", "content": [{"type": "text", "text": "answer"}]}]}
+    anthropic = {"messages": [{"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "private", "signature": "sig"}, {"type": "text", "text": "answer"}]}]}
+    responses = {"input": [{"type": "reasoning", "encrypted_content": "opaque"}]}
+    neutral_view = {"messages": [{"role": "assistant", "content": "answer", "reasoning": "private", "signature": "sig"}]}
+    assert not estimate_payload(plain).reasoning
+    assert all(estimate_payload(p).reasoning for p in (anthropic, responses, neutral_view))
+
+
 def test_system_and_tools_count_inside_total_budget():
     messages = [human()]
     small = estimate_request(messages, system="s", tools=[])
@@ -168,7 +209,9 @@ def test_estimation_accepts_union_type_tool_schemas_without_misreading_them_as_m
 def test_policy_uses_explicit_trigger_without_output_or_metadata_cap():
     policy = WindowPolicy(100_000, trigger_tokens=300_000, max_output_tokens=10_000)
     assert policy.threshold == 300_000
-    assert policy.target() == 45_000
+    # Retention is an absolute message budget, independent of the trigger.
+    assert policy.target() == 40_000 == WindowPolicy(1_000_000, trigger_tokens=850_000).target()
+    assert policy.dialogue_target() == 10_000
     assert policy.target(attempt=1) < policy.target()
 
 
@@ -234,6 +277,45 @@ async def test_late_usage_cannot_repopulate_a_rotated_window(db):
     fresh = await store.begin_request(route="test-route")
     assert await store.observe_usage(fresh, tokens=30_000)
     assert (await store.load())["usage_tokens"] == 30_000
+
+
+def test_agent_trigger_cap_only_lowers_the_model_threshold():
+    assert capped_trigger_tokens(850_000, 1_000_000, 0.7, 300_000) == 300_000
+    assert capped_trigger_tokens(200_000, 1_000_000, 0.7, 300_000) == 200_000
+    assert capped_trigger_tokens(0, 1_000_000, 0.7, 300_000) == 300_000, "the ratio threshold is capped too"
+    assert capped_trigger_tokens(850_000, 1_000_000, 0.7, 0) == 850_000
+    assert capped_trigger_tokens(0, 0, 0.7, 300_000) == 300_000
+
+
+@pytest.mark.asyncio
+async def test_last_request_time_is_recorded_and_survives_saves_and_rotation(db):
+    store = agent_store(db)
+    messages = [human(), *batch(1)]
+    await save(store, messages)
+    await store.begin_request(route="test-route")
+    recorded = (await store.load())["state"]["lastRequestAt"]
+    assert recorded > 0
+    await save(store, [*messages, *batch(2)])
+    assert (await store.load())["state"]["lastRequestAt"] == recorded
+    await save(store, messages, rotated=True)
+    assert (await store.load())["state"]["lastRequestAt"] == recorded
+
+
+@pytest.mark.asyncio
+async def test_request_without_reported_usage_keeps_last_measurement(db):
+    store = agent_store(db)
+    await save(store, [human()])
+    measured = await store.begin_request(route="test-route")
+    assert await store.observe_usage(measured, tokens=20_000)
+    calibration = (await store.load())["state"]["calibration"]
+    rejected = await store.begin_request(route="test-route")
+    assert not await store.observe_usage(rejected, tokens=None)
+    saved = await store.load()
+    assert (saved["usage_known"], saved["usage_tokens"]) == (1, 20_000)
+    assert saved["state"]["calibration"] == calibration
+    later = await store.begin_request(route="test-route")
+    assert await store.observe_usage(later, tokens=21_000)
+    assert (await store.load())["usage_tokens"] == 21_000
 
 
 @pytest.mark.asyncio

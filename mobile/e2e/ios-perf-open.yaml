@@ -1,0 +1,23 @@
+# 性能：打开最长对话 3 次（取 [perf] 打点）
+appId: dev.openbear.app
+---
+- launchApp:
+    stopApp: false
+- tapOn:
+    id: "back"
+    optional: true
+- tapOn:
+    id: "${IMPL}"
+- repeat:
+    times: 3
+    commands:
+      - tapOn:
+          id: "conv-a6a877ad"
+      - extendedWaitUntil:
+          visible:
+            id: "row-answer"
+          timeout: 30000
+      - waitForAnimationToEnd
+      - tapOn:
+          id: "back"
+      - waitForAnimationToEnd

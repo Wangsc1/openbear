@@ -3,7 +3,7 @@
 
 Usage: .venv/bin/python scripts/smoke_release_login.py --root /path/to/unpacked/release
 Uses the release's real backend, a disposable DB and a fake Bot. No browser,
-production configuration, external login approval, updater or service lifecycle.
+production configuration, external login approval, updater or system service changes.
 Frontend interaction state machines are covered separately by `npm test`.
 """
 from __future__ import annotations
@@ -16,8 +16,9 @@ import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
-from aiohttp.test_utils import TestClient, TestServer
+from aiohttp import ClientSession, CookieJar
 
 
 class FakeBot:
@@ -37,44 +38,60 @@ async def verify(args):
     # Import from the unpacked release, never silently from the caller's checkout.
     import app.web_console.auth_api as auth_module
     from app import installed_version
-    from app.admin.skills_web import SkillsWebAdminServer
     from app.config import Config
-    from app.db.engine import DB
+    from app.services import Services
     from scripts.release_validation import index_references, probe_deployment
 
     assert Path(auth_module.__file__).resolve().is_relative_to(root), "Wrong backend imported"
     report = {"transport": "http-websocket", "version": installed_version()}
     with tempfile.TemporaryDirectory(prefix="openbear-release-smoke-") as temp_dir:
         temp = Path(temp_dir)
-        old_artifacts = os.environ.get("OPENBEAR_WEB_ARTIFACT_DIR")
-        os.environ["OPENBEAR_WEB_ARTIFACT_DIR"] = str(temp / "artifacts")
+        old_cwd = Path.cwd()
+        environment = patch.dict(os.environ, {
+            "OPENBEAR_WEB_ARTIFACT_DIR": str(temp / "artifacts"),
+            "OPENBEAR_CONFIG": str(temp / "openbear.json"),
+            "OPENBEAR_INSTANCE_ROLE": "controller",
+            "OPENBEAR_DISABLE_UPDATE_CHECK": "1",
+        })
+        environment.start()
+        os.chdir(temp)
         config = Config.model_validate({
             "telegram": {"botToken": "test-only", "whitelistIds": [123]},
             "models": {"providers": {"test": {"baseUrl": "http://127.0.0.1:1", "apiKey": "test-only",
                 "protocol": "chat", "models": [{"id": "test"}]}}, "primary": "test/test"},
-            "memory": {"baseUrl": "http://127.0.0.1:1", "identity": "smoke", "accessKey": "test-only"},
+            "memory": {"provider": "builtin"},
+            "tools": {"skillsDir": str(temp / "skills")},
+            "browser": {"enabled": False}, "mcp": {"enabled": False},
             "storage": {"dbPath": str(temp / "smoke.db")},
             "web": {"enabled": True, "host": "127.0.0.1", "port": 18961},
         })
-        db = DB(str(temp / "smoke.db"))
-        await db.connect()
+        config.web.port = 0
         bot = FakeBot()
-        server = SkillsWebAdminServer(config, db, bot)
-        server.workspace_dir = str(temp / "workspace")
+        service = Services(config, bot)
+        server, db = service.web_admin, service.db
         server._web_dist_dir = lambda: dist
-        client = TestClient(TestServer(server.make_app()))
+        client = None
         try:
-            await server.ensure_secret_key()
+            # Replace only optional Internet fetches, never lifecycle/recovery.
+            service.models_dev_catalog.refresh = AsyncMock()
+            service.cron._sync_holidays = AsyncMock()
+            async with asyncio.timeout(30):
+                await service.startup()
+            assert service.startup_ready.is_set(), "Full service startup never became ready"
+            port = server._site._server.sockets[0].getsockname()[1]
+            base = f"http://127.0.0.1:{port}"
+            client = ClientSession(base_url=base, cookie_jar=CookieJar(unsafe=True))
             secret = await server.get_secret_key()
-            await client.start_server()
-            base = str(client.make_url("")).rstrip("/")
+            report["serviceLifecycle"] = {"fullStartup": True, "ready": True}
             health = await client.get("/health")
             assert health.status == 200
             assert (await health.json()) == {"ok": True, "version": installed_version()}
             login = await client.get("/login")
             assert login.status == 200 and login.headers["Cache-Control"] == "no-store"
             html = await login.text()
-            assert html == (dist / "index.html").read_text(), "Not serving the packaged frontend"
+            # The server fills in the login mode; a plain install is the controller.
+            expected = (dist / "index.html").read_text().replace('"[[controller]]"', '"controller"', 1)
+            assert html == expected, "Not serving the packaged frontend"
             references, scripts = index_references(html)
             assert scripts, "Packaged frontend lacks its entry script"
             assets = [ref for ref in references if ref.startswith("/assets/")]
@@ -103,7 +120,7 @@ async def verify(args):
                 return report
 
             async def start_login():
-                client.session.cookie_jar.clear()
+                client.cookie_jar.clear()
                 before = len(bot.requests)
                 response = await client.post("/api/auth/login/start", json={"secret": secret})
                 assert response.status == 200
@@ -119,7 +136,7 @@ async def verify(args):
             assert (await client.post(data["consumeUrl"])).status == 409
             await server.decide_login_request(data["requestUuid"], approved=True, decided_by=123)
             # An approved request cannot be consumed by a different client/nonce.
-            client.session.cookie_jar.clear()
+            client.cookie_jar.clear()
             assert (await client.post(data["consumeUrl"])).status == 403
             assert await server.login_request_status(data["requestUuid"]) == "approved"
             accepted = await client.post(data["consumeUrl"], cookies={auth_module._LOGIN_NONCE_COOKIE: nonce})
@@ -179,12 +196,16 @@ async def verify(args):
             assert probe["ok"] and probe["assets"]
             report["updaterWebProbe"] = {"httpsConfigured": True, "entryAssetsFetched": len(probe["assets"])}
         finally:
-            await client.close()
-            await db.close()
-            if old_artifacts is None:
-                os.environ.pop("OPENBEAR_WEB_ARTIFACT_DIR", None)
-            else:
-                os.environ["OPENBEAR_WEB_ARTIFACT_DIR"] = old_artifacts
+            try:
+                if client:
+                    await client.close()
+                async with asyncio.timeout(15):
+                    await service.shutdown()
+                assert db._conn is None and server._runner is None, "Service resources survived shutdown"
+                report.setdefault("serviceLifecycle", {})["cleanShutdown"] = True
+            finally:
+                os.chdir(old_cwd)
+                environment.stop()
     return report
 
 

@@ -29,6 +29,7 @@ import {
 	isActiveAgentEvent,
 	isActivityExcludedEventKind,
 	isAgentMonitorEventKind,
+	liveProgressEvent,
 	mergeAgentEventLines,
 } from "./agentPlanPresentation.js";
 import {toolArgumentsSummary} from "./toolArgumentsPresentation.js";
@@ -353,6 +354,16 @@ function activityEventLine(item, index = 0) {
 		message: recentEventMessage(source) || String(source.summary || source.kind || "Agent 动态"),
 	};
 }
+
+// Streaming progress of the running model call is pushed with the task only;
+// shown as the event line it used to be stored as.
+const liveProgressLine = computed(() => {
+	const tasks = agentTasks(props.event);
+	const task = tasks.find((item) => String(item?.taskUuid || item?.task_uuid || "").trim() === taskUuid.value)
+		|| (tasks.length === 1 ? tasks[0] : null);
+	const event = liveProgressEvent(task?.liveProgress);
+	return event ? {...activityEventLine(event), attemptId: event.attemptId} : null;
+});
 
 function responseMonitorTotal(data) {
 	if (!data || !Object.prototype.hasOwnProperty.call(data, "monitorTotal")) return null;
@@ -874,6 +885,7 @@ watch(agentPushKey, (value, oldValue) => {
 						:activity-lines="activityDisplayLines"
 						:activity-loading="activityLoading"
 						:activity-error="activityError"
+						:live-progress-line="liveProgressLine"
 						@refresh="loadWorkspace(true); ensurePlanRecentActivity()"
 					/>
 
@@ -935,6 +947,7 @@ watch(agentPushKey, (value, oldValue) => {
 								:model-label="activityModelLabel"
 								:think-level="activityThinkLevel"
 								:fast-mode="activityFastMode"
+								:live-progress-line="liveProgressLine"
 							/>
 						</div>
 					</div>

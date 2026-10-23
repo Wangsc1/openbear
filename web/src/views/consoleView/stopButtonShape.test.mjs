@@ -1,3 +1,4 @@
+import { userStorage } from '../../sessionBoundary.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -22,7 +23,7 @@ const render=compile(button.loc.source);
 function harness(storage=new Map(), initialProps={}){
   const timers=new Map(), emitted=[], stops=[];let sequence=0;
   const props=reactive({conversationUuid:'a',running:true,draft:'',canSend:false,...initialProps});
-  const context=vm.createContext({props,ref,watch:(...args)=>{const stop=watch(...args);stops.push(stop);return stop;},emit:(...args)=>emitted.push(args),
+  const context=vm.createContext({userStorage,props,ref,watch:(...args)=>{const stop=watch(...args);stops.push(stop);return stop;},emit:(...args)=>emitted.push(args),
     window:{localStorage:{getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value)},setTimeout:(fn,ms)=>{timers.set(++sequence,{fn,ms});return sequence;},clearTimeout:id=>timers.delete(id)}});
   vm.runInContext(actual,context);
   const bindings=proxyRefs(vm.runInContext('({props,emit,stopButtonShape,clickStopButton,clickSendButton,buttonShapeKeydown,cancelButtonShapeInteraction,stopButtonContextMenu,startStopShapePress,moveStopShapePress,endStopShapePress,cancelStopShapePress})',context));

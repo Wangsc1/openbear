@@ -11,6 +11,7 @@ from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from app.lifecycle import wait_for_startup
 from app.tools.confirmation import argument_digest, constraints_within
 from app.cron.contracts import CronError, JobConfig, Schedule, timestamp
 from app.cron.schedule import next_state, preview_details
@@ -54,6 +55,7 @@ class CronService:
             log.exception('Cron holiday sync failure')
 
     async def holiday_loop(self):
+        await wait_for_startup(self)
         while not self.closing:
             self.request_holiday_sync()
             await asyncio.shield(self.holiday_refresh_task)
@@ -368,6 +370,7 @@ class CronService:
         await asyncio.gather(*list(self.tasks.values()), return_exceptions=True)
 
     async def loop(self):
+        await wait_for_startup(self)
         while not self.closing:
             self.wake.clear()
             try: await self.tick()

@@ -10,6 +10,8 @@ const props = defineProps({
 	fastMode: {type: Boolean, default: false},
 	limit: {type: Number, default: 0},
 	emptyText: {type: String, default: "暂无过程记录。"},
+	// Running model call's in-memory progress as an event line (liveProgressEvent).
+	liveProgressLine: {type: Object, default: null},
 });
 
 const now = ref(Date.now());
@@ -19,6 +21,7 @@ const displayLines = computed(() => {
 		thinkLevel: props.thinkLevel,
 		fastMode: props.fastMode,
 		nowMs: now.value,
+		liveProgressLine: props.liveProgressLine,
 	});
 	return props.limit > 0 ? lines.slice(-props.limit) : lines;
 });

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import itertools
 import json
+import time
 import uuid
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -108,24 +109,6 @@ def _assert_anthropic_cache_breakpoints(payload: dict) -> None:
     assert len(actual) + 2 <= 4
 
 
-def test_anthropic_prefix_normalization_keeps_tool_arguments_and_message_order():
-    plain = [{"role": "user", "content": "fixed"}]
-    marked = [{"role": "user", "content": [{"type": "text", "text": "fixed", "cache_control": {"type": "ephemeral"}}]}]
-    original = json.dumps(marked)
-    assert _anthropic_content_units(plain) == _anthropic_content_units(marked)
-    assert json.dumps(marked) == original
-    tools = [{"role": "assistant", "content": [{"type": "tool_use", "id": "call-a", "name": "Echo",
-              "input": {"cache_control": "user-owned-value"}, "cache_control": {"type": "ephemeral"}}]}]
-    normalized = _anthropic_content_units(tools)
-    assert normalized[0]["content"][0]["input"] == {"cache_control": "user-owned-value"}
-    for field, replacement in (("id", "call-b"), ("name", "Other"), ("input", {"cache_control": "changed"})):
-        changed = json.loads(json.dumps(tools))
-        changed[0]["content"][0][field] = replacement
-        assert _anthropic_content_units(changed) != normalized
-    assert _anthropic_content_units(plain + tools) != _anthropic_content_units(tools + plain)
-    assert _anthropic_content_units([{**plain[0], "content": "changed"}]) != _anthropic_content_units(plain)
-
-
 @pytest.fixture
 async def deterministic_task_memory(tmp_path, monkeypatch):
     uuid_counter = itertools.count(1)
@@ -157,8 +140,23 @@ async def deterministic_task_memory(tmp_path, monkeypatch):
         await db.close()
 
 
+def _advance_wall_clock(monkeypatch, seconds: float) -> None:
+    """Move the wall clocks read on this path forward without really sleeping."""
+    import app.utils
+
+    real_time = time.time
+    monkeypatch.setattr(time, "time", lambda: real_time() + seconds)
+
+    class ShiftedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) + timedelta(seconds=seconds)
+
+    monkeypatch.setattr(app.utils, "datetime", ShiftedDatetime)
+
+
 async def test_task_memory_final_provider_units_are_complete_prefixes(
-    deterministic_task_memory,
+    deterministic_task_memory, monkeypatch,
 ):
     dao, shared = deterministic_task_memory
     first_context = await reconcile_task_memory_runtime_state(
@@ -173,7 +171,7 @@ async def test_task_memory_final_provider_units_are_complete_prefixes(
 
     first_outbound = repair_role_alternation(first_context)
     # Cross a wall-clock second: physical-call time must not enter runtime state.
-    await asyncio.sleep(1.05)
+    _advance_wall_clock(monkeypatch, 1.05)
     second_context = [
         *first_context,
         {

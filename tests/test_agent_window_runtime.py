@@ -84,7 +84,7 @@ async def test_actual_agent_finishes_once_across_windows_and_recovers_evicted_re
     runner = AgentExecutor(
         dao, task_uuid, agent=agent, backend=backend, model="test-model", max_tokens=1024,
         tools=registry, context_window=40_000, rollover_trigger_tokens=8000,
-        window_retain_ratio=0.15, model_call_limit=20, tool_call_limit=20,
+        window_retain_tokens=1200, model_call_limit=20, tool_call_limit=20,
     )
     output = await runner.run()
     assert output["summary"].startswith("Six lines verified")

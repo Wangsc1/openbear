@@ -6,13 +6,15 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="OpenBear" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="icon" type="image/x-icon" sizes="16x16 32x32 48x48 64x64" href="/assets/brand/favicon-d60af5867ad8.ico" />
-    <link rel="icon" type="image/png" sizes="32x32" href="/assets/brand/favicon-32-d60af5867ad8.png" />
+    <link rel="icon" type="image/x-icon" sizes="16x16 32x32 48x48 64x64" href="/assets/brand/favicon-fe324e6fb666.ico" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/assets/brand/favicon-32-fe324e6fb666.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png" />
     <meta name="color-scheme" content="light" />
     <meta name="theme-color" content="#f8f8f8" />
     <link rel="stylesheet" href="/src/theme-tokens.css" />
     <script>
+      // The serving process replaces this value; an untouched page is the controller.
+      window.__OPENBEAR_AUTH_MODE__ = "[[controller]]";
       (() => {
         let mode = "auto";
         try {
@@ -30,6 +32,9 @@
         root.style.backgroundColor = browserColor;
         document.querySelector('meta[name="theme-color"]').content = browserColor;
         document.querySelector('meta[name="color-scheme"]').content = resolvedTheme;
+        const manifest = document.querySelector('link[rel="manifest"]');
+        const manifestPath = dark ? "/assets/pwa/manifest-dark.webmanifest" : "/manifest.webmanifest";
+        if (manifest.getAttribute("href") !== manifestPath) manifest.setAttribute("href", manifestPath);
         root.dataset.theme = dark ? "dark" : "light";
         root.dataset.themeMode = mode;
       })();

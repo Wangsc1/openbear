@@ -224,6 +224,8 @@ async def test_unfinished_task_resume_stays_on_frozen_channel_and_thinking(model
 
 async def test_retry_does_not_switch_channel_when_defaults_change_mid_request(model_env):
     x = model_env
+    # Only the retry's channel matters here, not the default 3s backoff wait.
+    x.config.agent = x.config.agent.model_copy(update={"retry_backoff_s": 0.0})
     backend, _, _ = x.factory.backend_for(OLD)
 
     async def fail_once():

@@ -164,6 +164,7 @@
   "logLevel": "INFO",
   "contextManagement": {
     "defaultStrategy": "sliding_window",
-    "retainRatio": 0.15
+    "retainTokens": 40000,
+    "dialogueTokens": 10000
   }
 }

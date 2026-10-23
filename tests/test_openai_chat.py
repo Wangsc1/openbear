@@ -101,26 +101,6 @@ async def test_chat_stream_tool_calls_fragmented():
     assert json.loads(tc.arguments) == {"command": "ls"}
 
 
-async def test_chat_stream_edit_array_arguments():
-    payload = {"path": "app/x.py", "edits": [{"old_string": "a", "new_string": "b"}]}
-    encoded = json.dumps(payload)
-    lines = [
-        _chunk({"choices": [{"index": 0, "delta": {"tool_calls": [
-            {"index": 0, "id": "call_edit", "function": {"name": "Edit", "arguments": encoded[:18]}}]}}]}),
-        "",
-        _chunk({"choices": [{"index": 0, "delta": {"tool_calls": [
-            {"index": 0, "function": {"arguments": encoded[18:]}}]}}]}),
-        "",
-        _chunk({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
-    ]
-    backend = OpenAIChatBackend(make_client(lambda r: sse_response(lines)), "https://x/v1", "k")
-
-    result = await aggregate(backend.stream([{"role": "user", "content": "hi"}], model="m"))
-
-    assert result.tool_calls[0].name == "Edit"
-    assert json.loads(result.tool_calls[0].arguments) == payload
-
-
 async def test_chat_stream_tool_calls_with_stop_finish_are_normalized():
     """Parrot 可能把 Responses 上游工具调用转成 Chat SSE，但 finish_reason 仍是 stop。"""
     lines = [

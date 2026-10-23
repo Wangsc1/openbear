@@ -9,6 +9,7 @@ from app.conversation_titles import (
     render_naming_transcript,
     select_naming_turns,
 )
+from app.lifecycle import wait_for_startup
 from app.llm.events import Usage
 from app.model_cost import usage_cost_usd
 from app.task_memory import TaskMemoryDAO
@@ -23,6 +24,8 @@ from app.web_console.notification_delivery import pause_notifications
 class WebAdminConversationsMixin:
     _DUPLICATE_NOTIFICATION_TASK_BATCH_SIZE = 500
     _DISPLAY_ORDER_STEP = 1024.0
+    _WEB_TASK_NOTIFICATION_IDLE_POLL_S = 0.5
+    _WEB_TASK_NOTIFICATION_DEBOUNCE_S = 0.35
 
     async def _current_session_uuid(self, chat_id: int) -> str:
         return await MessageDAO(self.db).current_session_uuid(chat_id)
@@ -111,6 +114,7 @@ class WebAdminConversationsMixin:
             "pinned": int(data.get("pinned_at") or 0) > 0,
             "displayOrder": float(data["display_order"]) if data.get("display_order") is not None else None,
             "folderId": str(data.get("folder_uuid") or ""),
+            "origin": str(data.get("origin_kind") or "user"),
             "archivedAt": int(data.get("archived_at") or 0),
             "archived": int(data.get("archived_at") or 0) > 0,
             "messageCount": int(data.get("message_count") or 0),
@@ -215,6 +219,8 @@ class WebAdminConversationsMixin:
         persist_defaults: bool = False,
         defaults_seed: dict[str, Any] | None = None,
         create_lock_held: bool = False,
+        origin_kind: str = "user",
+        origin_ref: str = "",
     ) -> dict[str, Any]:
         conv_uuid = conversation_uuid or str(uuid.uuid4())
         config = run_config if isinstance(run_config, dict) else {}
@@ -254,14 +260,14 @@ class WebAdminConversationsMixin:
                               conversation_uuid, owner_chat_id, internal_chat_id, title, model,
                               agent_model, agent_think_level, agent_fast_mode,
                               status, current_status, created_at, updated_at, display_order, folder_uuid, context_strategy,
-                              last_interaction_at_ms, last_conversation_at
-                            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                              last_interaction_at_ms, last_conversation_at, origin_kind, origin_ref
+                            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                             """,
                             (
                                 conv_uuid, owner_chat_id, internal, title or "新对话", model_label,
                                 agent_model, agent_thinking, agent_fast,
                                 "idle", "就绪", ts, ts, display_order, str(folder_uuid or ""), context_strategy,
-                                0, 0,
+                                0, 0, str(origin_kind or "user"), str(origin_ref or ""),
                             ),
                         )
                         await conn.execute(
@@ -312,7 +318,14 @@ class WebAdminConversationsMixin:
                                  defaults_seed["main_fast_mode"], defaults_seed["agent_model"], defaults_seed["agent_think_level"],
                                  defaults_seed["agent_fast_mode"], 1, ts),
                             )
-                    return await self._conversation_row(owner_chat_id, conv_uuid, require=True)
+                        # Read back on the writer: after commit the shared reader may
+                        # still hold an older snapshot and miss the row just created.
+                        cur = await conn.execute(
+                            "SELECT * FROM web_conversations WHERE owner_chat_id=? AND conversation_uuid=? LIMIT 1",
+                            (owner_chat_id, conv_uuid),
+                        )
+                        created = await cur.fetchone()
+                    return dict(created)
                 except sqlite3.IntegrityError as exc:
                     last_exc = exc
                     if internal_chat_id is not None:
@@ -941,7 +954,7 @@ class WebAdminConversationsMixin:
                 )
             # Prompt settings and their frozen activation state travel together.
             # Keep old sessions explicitly in normal mode when no sidecar existed.
-            from app.context.prompt_policy import read_json, write_json, snapshot_key
+            from app.context.prompt_policy import read_json, snapshot_key, write_json
             local_prompt = await read_json(self.db.conn, 'conversation_context:' + old_uuid)
             if local_prompt is not None:
                 await write_json(self.db.conn, 'conversation_context:' + new_uuid, local_prompt)
@@ -1894,7 +1907,7 @@ class WebAdminConversationsMixin:
             return True
 
         status = str(payload.get("status") or "")
-        urgent = bool(payload.get("requiresDecision")) or status in {
+        urgent = bool(payload.get("requiresDecision")) or str(payload.get("kind") or "") == "task-notification-collab" or status in {
             "needs_openbear_control",
             "failed",
             "cancelled",
@@ -1935,7 +1948,8 @@ class WebAdminConversationsMixin:
         """Own one post-turn drain without yielding between check and claim."""
         conv_uuid = str(conversation_uuid or "").strip()
         if (
-            not conv_uuid
+            getattr(self, "_web_stopping", False)
+            or not conv_uuid
             or not int(internal_chat_id or 0)
             or not self._web_task_notification_pending.get(conv_uuid)
             or conv_uuid in self._web_task_notification_workers
@@ -2696,15 +2710,16 @@ class WebAdminConversationsMixin:
         lock = self._web_task_notification_lock(internal_chat_id)
         inflight_notification_ids: set[str] = set()
         try:
+            await wait_for_startup(self)
             async with lock:
                 while True:
                     # Match Claude Code's queue processor: task-notification is handled
                     # only once the active query is idle.  New notifications that arrive
                     # while waiting are batched into one internal follow-up turn.
                     while self.runs is not None and self.runs.is_running(internal_chat_id):
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(self._WEB_TASK_NOTIFICATION_IDLE_POLL_S)
                     # Small debounce so near-simultaneous Agent completions summarize once.
-                    await asyncio.sleep(0.35)
+                    await asyncio.sleep(self._WEB_TASK_NOTIFICATION_DEBOUNCE_S)
                     pending = self._web_task_notification_pending.pop(conversation_uuid, [])
                     if payload:
                         pending.insert(0, dict(payload))
@@ -2826,6 +2841,9 @@ class WebAdminConversationsMixin:
                             if self.runs is not None and self.runs.is_running(internal_chat_id):
                                 pass
                             else:
+                                # Model saves share this acceptance lock; the row
+                                # read before notification preparation may be stale.
+                                row = await self._conversation_row(int(row["owner_chat_id"]), conversation_uuid, require=True)
                                 live = self._live_for(row)
                                 turn_uuid = root_turn_uuid or str(uuid.uuid4())
                                 notification_text = str(batch_payload.get("content") or "").strip()
@@ -3082,8 +3100,9 @@ class WebAdminConversationsMixin:
         *,
         prompt: str,
         transcript: str,
+        configured: list[str] | None = None,
     ) -> list[str]:
-        configured = list(config.models.naming_models or [])
+        configured = list(config.models.naming_models or []) if configured is None else list(configured)
 
         def usable(label: str) -> bool:
             resolved = config.models.resolve(str(label or ""))

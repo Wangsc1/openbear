@@ -3,6 +3,7 @@ import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref } from
 import draggable from "vuedraggable";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Api, apiError } from "../api";
+import { userStorage } from '../sessionBoundary.js';
 import { copyTextToClipboard } from "../utils/clipboard.js";
 import { mobileSelectOptions } from "../mobileSelect.js";
 import { scrollModelListAbove } from "../components/modelDragAutoScroll.js";
@@ -642,7 +643,7 @@ async function copyModelMetadata(row) {
   copiedModelMetadata.value = payload;
   copiedModelMetadataSource.value = row?.fullname || "";
   let stored = false, copied = false;
-  try { localStorage.setItem(MODEL_METADATA_CLIPBOARD_KEY, text); stored = true; } catch { /* memory copy still works in this page */ }
+  try { userStorage(localStorage).setItem(MODEL_METADATA_CLIPBOARD_KEY, text); stored = true; } catch { /* memory copy still works in this page */ }
   try { copied = await copyTextToClipboard(text); } catch { /* browser clipboard may be blocked */ }
   if (copied) ElMessage.success("模型元数据已复制");
   else ElMessage.warning(stored
@@ -690,7 +691,7 @@ async function pasteModelMetadata() {
   let text = "";
   try { text = await navigator.clipboard?.readText?.() || ""; } catch { text = ""; }
   if (!text.trim()) {
-    try { text = localStorage.getItem(MODEL_METADATA_CLIPBOARD_KEY) || ""; } catch { /* private storage can reject reads */ }
+    try { text = userStorage(localStorage).getItem(MODEL_METADATA_CLIPBOARD_KEY) || ""; } catch { /* private storage can reject reads */ }
   }
   if (!text.trim() && copiedModelMetadata.value) text = JSON.stringify(copiedModelMetadata.value);
   if (!text.trim()) {

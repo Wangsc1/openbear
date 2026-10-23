@@ -1,7 +1,7 @@
 # ruff: noqa: F401,F403,F405
 from __future__ import annotations
 
-from app.agent.progress_watch import ProgressWatch
+from app.agents import live_state
 from app.agents.agent_prompt import render_agent_base_system_prompt
 from app.agents.plan import PlanError
 from app.tools.allowlist import agent_delegation_catalog, agent_delegation_names, preserve_tool_allowlist
@@ -13,7 +13,7 @@ _RATH_MONITOR_EVENT_KINDS = frozenset({
     "agent_control", "agent_supervision", "control_requested", "control_response", "steer_applied",
     "pause_applied", "resume_applied", "cancel_requested", "needs_openbear_control",
     "plan_submitted", "plan_decision", "plan_decision_approve", "plan_decision_revise", "plan_decision_cancel",
-    "plan_replan_requested", "agent_plan_protocol_corrected", "agent_control_continuation_saved",
+    "plan_replan_requested", "agent_plan_protocol_corrected", "agent_gate_repeated", "agent_control_continuation_saved",
     "model_context_window_rotated", "model_context_pre_compacted", "model_context_overflow_compacted", "model_context_compaction_failed",
 })
 
@@ -281,6 +281,8 @@ class WebAdminAgentsMixin:
             "nextBeforeSeq": int(events[0].seq or 0) if not after_seq and has_more and events else 0,
             "nextAfterSeq": int(events[-1].seq or after_seq) if events else after_seq,
             "direction": "newer" if after_seq else "older",
+            # The running model call's streaming progress is never an event row.
+            "liveProgress": live_state.apply_public(task, {}, include_progress=True)["liveProgress"],
         })
 
     async def handle_api_rath_options(self, request: web.Request) -> web.Response:
@@ -466,6 +468,7 @@ class WebAdminAgentsMixin:
                 tool_allowlist=agent.tool_allowlist,
                 model_name=model_name,
                 workspace_dir=str(getattr(self, "workspace_dir", "") or ""),
+                conversation_uuid=str((conv or {}).get("conversation_uuid") or ""),
             )
             async def _on_model_call(detail: dict[str, Any]) -> None:
                 effective_label = str(detail.get("modelLabel") or model_name)
@@ -533,7 +536,6 @@ class WebAdminAgentsMixin:
                 retry_jitter_ratio=self.config.agent.retry_jitter_ratio,
                 retry_cancel_check=lambda: self.agents.consume_retry_cancel(task_uuid),
                 retry_control_check=lambda wait_id: self.agents.consume_retry_action(task_uuid, wait_id),
-                progress_watch=ProgressWatch.from_config(self.config.agent, agent=True),
                 model_call_limit=int(getattr(self.config.agents, "agent_model_call_limit", 20) or 0),
                 tool_call_limit=int(getattr(self.config.agents, "agent_tool_call_limit", 40) or 0),
                 plan_control_call_limit=int(getattr(self.config.agents, "plan_control_call_limit", 200) or 200),

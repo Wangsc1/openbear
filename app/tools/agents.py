@@ -18,7 +18,6 @@ from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
-from app.agent.progress_watch import ProgressWatch
 from app.config import Config
 from app.db.dao import MessageDAO
 from app.llm.events import Usage
@@ -31,12 +30,14 @@ from app.models.thinking import (
     normalize_think_level,
     normalize_think_levels,
 )
+from app.agents import live_state
 from app.agents.agent_prompt import render_agent_base_system_prompt
 from app.agents.profiles import SINGLE_AGENT_WORKFLOW_SLUG, ensure_builtin_workflows
 from app.agents.continuity import agent_session_public
 from app.agents.controller_projection import project_agent_payload_for_controller
 from app.agents.dao import AgentDAO
 from app.agents.control import AgentControlService
+from app.context.window import capped_trigger_tokens
 from app.agents.plan import AgentPlanCoordinator, PlanError, register_agent_plan_tools
 from app.agents.schemas import (
     ACTIVE_TASK_STATUSES,
@@ -125,6 +126,7 @@ def _task_public(
     include_output: bool = False,
     model: str = "",
     context_window: int = 0,
+    live_progress: bool = False,
 ) -> dict[str, Any]:
     if task is None:
         return {}
@@ -138,7 +140,7 @@ def _task_public(
     duration_ms = max(0, finished_at_ms - started_at_ms) if started_at_ms and finished_at_ms else 0
     retry_state = task.output.get("retry") if isinstance(task.output, dict) else None
     include_runtime_output = isinstance(retry_state, dict)
-    return {
+    return live_state.apply_public(task, {
         "taskUuid": task.task_uuid,
         "taskId": task.task_uuid,
         "agentId": task.agent_session_uuid,
@@ -187,7 +189,7 @@ def _task_public(
         "durationMs": duration_ms,
         "error": task.error,
         **({"output": task.output} if include_output or include_runtime_output else {}),
-    }
+    }, include_progress=live_progress)
 
 
 def _agent_progress_signature(
@@ -422,6 +424,14 @@ class AgentTools(AgentContinuationTools):
             "evidence": evidence,
             "recentDecisions": list(snapshot.get("decisions") or [])[-10:],
         }
+
+    async def _prompt_conversation_uuid(self, session_uuid: str, chat_id: int) -> str:
+        """The Web conversation an Agent works for; its folder prompt applies."""
+        value = str(session_uuid or "")
+        if value and not value.startswith("chat:"):
+            return value
+        conv = await self._conversation_for_chat_id(int(chat_id or 0))
+        return str((conv or {}).get("conversation_uuid") or "")
 
     async def _conversation_for_chat_id(self, chat_id: int) -> dict[str, Any] | None:
         if not chat_id:
@@ -1068,10 +1078,11 @@ class AgentTools(AgentContinuationTools):
         progress_started = asyncio.get_running_loop().time()
         detached = False
         last_progress_signature = ""
+        last_pushed_events: list[dict[str, Any]] | None = None
         latest_ledger_usage: dict[str, Any] | None = None
 
         async def _emit_progress() -> str:
-            nonlocal last_progress_signature
+            nonlocal last_progress_signature, last_pushed_events
             if progress_cb is None and progress_payload_cb is None:
                 return ""
             task_row = await self.dao.get_task(task_uuid)
@@ -1079,7 +1090,7 @@ class AgentTools(AgentContinuationTools):
                 return ""
             events = await self.dao.events(task_uuid, limit=12)
             refreshed_session = await self.dao.agent_session(task_row.agent_session_uuid or task.agent_session_uuid)
-            task_payload = _task_public(task_row, model=model_name, context_window=context_window)
+            task_payload = _task_public(task_row, model=model_name, context_window=context_window, live_progress=True)
             task_payload["title"] = task_row.title
             task_payload["detached"] = detached
             task_payload["agentSession"] = (
@@ -1099,6 +1110,9 @@ class AgentTools(AgentContinuationTools):
                 )
                 if signature != last_progress_signature:
                     last_progress_signature = signature
+                    # Progress-only pushes keep the card's merged event tail.
+                    events_changed = event_payload != last_pushed_events
+                    last_pushed_events = event_payload
                     await progress_payload_cb({
                         "toolName": progress_tool_name,
                         "status": task_payload.get("status") or "running",
@@ -1107,7 +1121,7 @@ class AgentTools(AgentContinuationTools):
                         "task": task_payload,
                         **({"ledgerUsage": latest_ledger_usage} if latest_ledger_usage is not None else {}),
                         **({"result": result_payload} if result_payload is not None else {}),
-                        "recentEvents": event_payload,
+                        **({"recentEvents": event_payload} if events_changed else {}),
                         "durationMs": duration_ms,
                     })
             if progress_cb is not None and not (detached and progress_payload_cb is not None):
@@ -1182,6 +1196,7 @@ class AgentTools(AgentContinuationTools):
             tool_allowlist=agent.tool_allowlist,
             model_name=model_name,
             workspace_dir=self.workspace_dir,
+            conversation_uuid=await self._prompt_conversation_uuid(parent_conversation_uuid, int(task.chat_id or 0)),
         )
 
         resumed_session = await self.dao.agent_session(task.agent_session_uuid) if task.agent_session_uuid else None
@@ -1228,7 +1243,6 @@ class AgentTools(AgentContinuationTools):
                 self.config.tools.tool_result_max_chars,
             ),
             **self._model_retry_kwargs(task_uuid),
-            progress_watch=ProgressWatch.from_config(self.config.agent, agent=True),
             model_call_limit=self._model_call_limit_for(agent),
             tool_call_limit=self._tool_call_limit_for(agent),
             plan_control_call_limit=int(getattr(self.config.agents, "plan_control_call_limit", 200) or 200),
@@ -1712,13 +1726,17 @@ class AgentTools(AgentContinuationTools):
     def _context_window_kwargs(self, model_name: str) -> dict[str, Any]:
         resolved = self.config.models.resolve(model_name)
         policy = self.config.context_management
+        context_window = int(self.llm_factory.context_window(model_name) or 0)
         return {
-            "context_window": int(self.llm_factory.context_window(model_name) or 0),
-            "rollover_trigger_tokens": int(resolved[1].rollover_trigger_tokens or 0) if resolved else 0,
+            "context_window": context_window,
+            "rollover_trigger_tokens": capped_trigger_tokens(
+                int(resolved[1].rollover_trigger_tokens or 0) if resolved else 0, context_window,
+                self.config.agent.compact_ratio, int(getattr(self.config.agents, "context_trigger_tokens", 0) or 0)),
             "window_trigger_ratio": self.config.agent.compact_ratio,
             "context_config": self.config,
             "context_llm_factory": self.llm_factory,
-            "window_retain_ratio": policy.retain_ratio,
+            "window_retain_tokens": policy.retain_tokens,
+            "window_dialogue_tokens": policy.dialogue_tokens,
         }
 
     async def _agent_session_for(
@@ -1951,12 +1969,11 @@ class AgentTools(AgentContinuationTools):
         # Re-resolve current defaults; continue_task restores an unfinished task
         # separately using that task's frozen runtime snapshot.
         runtime = await self._resolve_agent_runtime(agent, chat_id=resolved_chat_id)
-        await self.dao.freeze_agent_instance(
+        agent_session = await self.dao.freeze_agent_instance(
             agent_session.session_uuid, agentSnapshot=agent_to_snapshot(agent, runtime=runtime),
             presetToolCeiling=list(preset_ceiling or []),
             llmSessionId=safe_agent_llm_session_id(agent_session.session_uuid, agent_session.session_uuid, agent.agent_key),
         )
-        agent_session = await self.dao.agent_session(agent_session.session_uuid)
         model_name = str(runtime.get("model") or self.model_selection.current or self.config.models.primary)
         think_level = str(runtime.get("thinkLevel") or "off")
         service_tier = str(runtime.get("serviceTier") or "")
@@ -2005,6 +2022,7 @@ class AgentTools(AgentContinuationTools):
         conversation_event_cb = getattr(ctx, "conversation_event", None)
         progress_started = asyncio.get_running_loop().time()
         last_progress_signature = ""
+        last_pushed_events: list[dict[str, Any]] | None = None
         latest_ledger_usage: dict[str, Any] | None = None
         try:
             context_window = int(self.llm_factory.context_window(model_name) or 0)
@@ -2013,7 +2031,7 @@ class AgentTools(AgentContinuationTools):
         detached = False
 
         async def _emit_progress() -> str:
-            nonlocal last_progress_signature
+            nonlocal last_progress_signature, last_pushed_events
             if progress_cb is None and progress_payload_cb is None and progress_payload_update is None:
                 return ""
             task_row = await self.dao.get_task(task_uuid)
@@ -2021,7 +2039,7 @@ class AgentTools(AgentContinuationTools):
                 return ""
             events = await self.dao.events(task_uuid, limit=12)
             event_payload = _events_public(events)
-            task_payload = _task_public(task_row, model=model_name, context_window=context_window)
+            task_payload = _task_public(task_row, model=model_name, context_window=context_window, live_progress=True)
             task_payload["title"] = task_row.title
             task_payload["agentSession"] = self._agent_session_public(agent_session)
             task_payload["detached"] = detached
@@ -2039,6 +2057,9 @@ class AgentTools(AgentContinuationTools):
             if changed and progress_payload_update is not None:
                 await progress_payload_update(task_payload, event_payload, duration_ms)
             if changed and progress_payload_cb is not None:
+                # Progress-only pushes keep the card's merged event tail.
+                events_changed = event_payload != last_pushed_events
+                last_pushed_events = event_payload
                 await progress_payload_cb({
                     "toolName": progress_tool_name,
                     "status": task_payload.get("status") or "running",
@@ -2047,7 +2068,7 @@ class AgentTools(AgentContinuationTools):
                     "task": task_payload,
                     **({"ledgerUsage": latest_ledger_usage} if latest_ledger_usage is not None else {}),
                     **({"result": result_payload} if result_payload is not None else {}),
-                    "recentEvents": event_payload,
+                    **({"recentEvents": event_payload} if events_changed else {}),
                     "durationMs": duration_ms,
                 })
             if progress_cb is not None and not (detached and progress_payload_cb is not None):
@@ -2114,6 +2135,7 @@ class AgentTools(AgentContinuationTools):
                 tool_allowlist=agent.tool_allowlist,
                 model_name=model_name,
                 workspace_dir=self.workspace_dir,
+                conversation_uuid=await self._prompt_conversation_uuid(resolved_openbear_session_uuid, resolved_chat_id),
             )
             if "baseSystemPrompt" in agent_session.metadata:
                 agent_base_system_prompt = str(agent_session.metadata["baseSystemPrompt"])
@@ -2157,7 +2179,6 @@ class AgentTools(AgentContinuationTools):
                     self.config.tools.tool_result_max_chars,
                 ),
                 **self._model_retry_kwargs(task_uuid),
-                progress_watch=ProgressWatch.from_config(self.config.agent, agent=True),
                 model_call_limit=self._model_call_limit_for(agent),
                 tool_call_limit=self._tool_call_limit_for(agent),
                 plan_control_call_limit=int(getattr(self.config.agents, "plan_control_call_limit", 200) or 200),

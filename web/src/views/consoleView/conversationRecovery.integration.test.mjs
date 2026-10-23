@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {markRaw, toRaw} from 'vue';
-import {applyOperationFrame,deriveOperationRunState,projectOperationMessages,isRootRunTerminalFrame,isTerminalOperationFrame,normalizeOperations,shouldApplyOperationFrame} from '../../timelineProjection.js';
+import {applyLiveOperationUpdate,applyOperationFrame,deriveOperationRunState,projectOperationMessages,isRootRunTerminalFrame,isTerminalOperationFrame,normalizeOperations,preferNewerLiveOperations,shouldApplyOperationFrame} from '../../timelineProjection.js';
 import {mergeOperationSnapshots} from './timelinePagination.js';
 import {createOperationFrameBuffer} from './operationFrameBuffer.js';
 
@@ -21,7 +21,8 @@ function harness(){
   const snapshot=deferred(),stateReadStarted=deferred();
   const context=vm.createContext({
     Map,props,markRaw,toRaw,console:{warn(){}},applyOperationFrame,normalizeOperations,mergeOperationSnapshots,shouldApplyOperationFrame,
-    deriveOperationRunState,projectOperationMessages,
+    deriveOperationRunState,projectOperationMessages,applyLiveOperationUpdate,preferNewerLiveOperations,
+    WebSocket:{OPEN:1},mergeStatsUsageIntoState(){},
     stateStatsByOpId:new Map(),chatState:{value:null},searchWindowActive:{value:false},
     mergeLedgerUsageIntoState(){},operationScrollImpact:()=> 'none',mergeScrollImpact:()=> 'none',
     isRootRunTerminalFrame,isTerminalOperationFrame,scheduleProjectedMessagesFlush:options=>flushes.push(options),
@@ -39,7 +40,7 @@ function harness(){
   });
   vm.runInContext(`
     let operationResyncInFlight=null,operationResyncTimer=null,pendingLoadReplaceOperations=false;
-    let pendingProjectionOps=null,pendingScrollImpact='none',pendingTerminalFrame=null;
+    let pendingProjectionOps=null,pendingScrollImpact='none',pendingTerminalFrame=null,pendingLiveUpdates=[],lastLiveResyncAt=0;
     const orderedOperationsList=()=>[...operationsById.value.values()];
     ${between('function replaceOperationSnapshots(', 'function applyTimelinePageMetadata(')}
     let componentMounted=true,ws={id:'socket-a'},wsConversationUuid='A';
@@ -54,6 +55,49 @@ function harness(){
   const run=code=>vm.runInContext(code,context);
   return {context,props,requests,loads,connections,flushes,timers,snapshot,stateReadStarted,run};
 }
+const liveOp=(liveRev,payload,extra={})=>({opId:'reasoning:t:0',opType:'reasoning',action:'append',revision:1,liveRev,payload,...extra});
+
+test('live progress extends the operation without a frame; stale, gapped and snapshot updates converge',()=>{
+  const h=harness(),sent=[];
+  h.context.sent=sent;
+  h.run("ws={id:'socket-a',readyState:1,send:message=>sent.push(JSON.parse(message))}");
+  h.run(`loadOperationsFromState({frameSeq:40000,operations:[{opId:'reasoning:t:0',opType:'reasoning',revision:1,displaySeq:1,status:'running',lifecycle:'active',payload:{text:'先',complete:false}}]})`);
+  h.context.updates=[liveOp(1,{delta:'想'}),liveOp(2,{delta:'一'})];
+  h.run(`handleWsMessage(JSON.stringify({type:'live',ops:updates}))`);
+  const op=()=>h.context.operationsById.value.get('reasoning:t:0');
+  assert.equal(op().payload.textChunks.join(''),'先想一');
+  assert.equal(op().liveRev,2);assert.equal(op().revision,1);assert.equal(h.context.lastFrameSeq.value,40000);
+  h.context.updates=[liveOp(2,{delta:'一'})];
+  h.run(`handleWsMessage(JSON.stringify({type:'live',ops:updates}))`);
+  assert.equal(op().payload.textChunks.join(''),'先想一','a repeated update is ignored');
+  h.context.updates=[liveOp(4,{delta:'下'})];
+  h.run(`handleWsMessage(JSON.stringify({type:'live',ops:updates}))`);
+  assert.equal(op().liveRev,2,'a gapped update is not applied');
+  assert.equal(JSON.stringify(sent),'[{"type":"live_resync"}]');
+  h.context.updates=[liveOp(4,{text:'先想一下',complete:false},{action:'snapshot'})];
+  h.run(`handleWsMessage(JSON.stringify({type:'live_snapshot',ops:updates}))`);
+  assert.equal(op().payload.text,'先想一下');assert.equal(op().liveRev,4);
+  // An older HTTP snapshot of the same revision cannot roll the live text back.
+  h.run(`loadOperationsFromState({frameSeq:40000,operations:[{opId:'reasoning:t:0',opType:'reasoning',revision:1,liveRev:3,displaySeq:1,status:'running',lifecycle:'active',payload:{text:'先想一',complete:false}}]})`);
+  assert.equal(op().payload.text,'先想一下');
+  // The durable end frame carries the complete text and restarts live ordering.
+  h.run(`applyOperationFrameMessage({opId:'reasoning:t:0',opType:'reasoning',action:'end',revision:2,frameSeq:40001,displaySeq:1,payload:{text:'先想一下。',complete:true}})`);
+  assert.equal(op().payload.text,'先想一下。');assert.equal(op().liveRev,0);assert.equal(op().lifecycle,'terminal');
+});
+
+test('live progress received during an HTTP snapshot is replayed on top of it',()=>{
+  const h=harness();
+  h.context.conversationStateRequests.pending=true;
+  h.context.updates=[liveOp(2,{delta:'二'}),liveOp(3,{delta:'三'})];
+  h.run(`handleWsMessage(JSON.stringify({type:'live',ops:updates}))`);
+  assert.equal(h.run('pendingLiveUpdates.length'),2);
+  h.context.conversationStateRequests.pending=false;
+  h.run(`loadOperationsFromState({frameSeq:40000,operations:[{opId:'reasoning:t:0',opType:'reasoning',revision:1,liveRev:2,displaySeq:1,status:'running',lifecycle:'active',payload:{text:'一二',complete:false}}]});replayBufferedOperationFrames(40000)`);
+  const op=h.context.operationsById.value.get('reasoning:t:0');
+  assert.equal(op.payload.textChunks.join(''),'一二三');assert.equal(op.liveRev,3);
+  assert.equal(h.run('pendingLiveUpdates.length'),0);
+});
+
 const missingFrames=()=>Array.from({length:1000},(_,i)=>({opId:`retained-tool-${i}`,opType:'tool',action:'end',revision:2,frameSeq:i+11,displaySeq:i+60,payload:{status:'completed'}}));
 
 test('terminal frame arriving before its HTTP base is retained, then replayed without skipping its cursor',async()=>{

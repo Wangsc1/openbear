@@ -1,0 +1,13 @@
+appId: dev.openbear.app
+---
+- launchApp:
+    stopApp: false
+- tapOn:
+    id: "back"
+    optional: true
+- tapOn:
+    id: "open-mdlab"
+- extendedWaitUntil:
+    visible:
+      id: "mdlab-label"
+    timeout: 20000

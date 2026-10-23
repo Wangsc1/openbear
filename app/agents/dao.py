@@ -10,6 +10,7 @@ from typing import Any
 import aiosqlite
 
 from app.db.engine import DB, now_ts
+from app.agents import live_state
 from app.agents.continuity import AgentContinuityDAO
 from app.agents.schemas import (
     ACTIVE_TASK_STATUSES,
@@ -576,8 +577,12 @@ class AgentDAO(AgentContinuityDAO):
         model: str,
         session_id: str,
         state: dict[str, Any],
+        encoded_state: str | None = None,
     ) -> int:
-        """Commit a private checkpoint and its instance head as one write unit."""
+        """Commit a private checkpoint and its instance head as one write unit.
+
+        ``encoded_state``, when given, must equal _json_dumps(state).
+        """
         ts = now_ts()
         async with self._db.write_transaction(label="agent_context_checkpoint") as conn:
             cur = await conn.execute(
@@ -594,7 +599,7 @@ class AgentDAO(AgentContinuityDAO):
                    ON CONFLICT(task_uuid) DO UPDATE SET protocol=excluded.protocol,model=excluded.model,
                    session_id=excluded.session_id,state_json=excluded.state_json,
                    revision=rath_task_model_contexts.revision+1,updated_at=excluded.updated_at""",
-                (task_uuid, protocol, model, session_id, _json_dumps(state), ts, ts),
+                (task_uuid, protocol, model, session_id, encoded_state if encoded_state is not None else _json_dumps(state), ts, ts),
             )
             cur = await conn.execute("SELECT revision FROM rath_task_model_contexts WHERE task_uuid=?", (task_uuid,))
             row = await cur.fetchone()
@@ -1138,7 +1143,9 @@ class AgentDAO(AgentContinuityDAO):
                         str(status or ""),
                         updated_at=ts,
                     )
-                return bool(cur.rowcount)
+            if cur.rowcount:
+                live_state.clear(task_uuid)
+            return bool(cur.rowcount)
         cur = await self._db.conn.execute(sql, tuple(params))
         await self._db.conn.commit()
         return bool(cur.rowcount)
@@ -1341,7 +1348,7 @@ class AgentDAO(AgentContinuityDAO):
         page = [self._event_from_row(row) for row in rows[:limit]]
         kinds = (
             "model_call_started", "model_call_finished", "model_stream_interrupted",
-            "model_stream_progress", "tool_call_started", "tool_call_finished",
+            "tool_call_started", "tool_call_finished",
             "model_call_retry_wait", "model_call_retry_resumed",
             "pause_applied", "needs_openbear_control",
             "plan_submitted", "plan_replan_submitted",

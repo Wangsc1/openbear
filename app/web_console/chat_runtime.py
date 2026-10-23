@@ -4,7 +4,6 @@ from __future__ import annotations
 import inspect
 
 from app.agent.native_continuation import deserialize_messages, validate_model_context
-from app.agent.progress_watch import ProgressWatch
 from app.agents.supervision import restore_review_state, review_observation
 from app.context.configuration import conversation_strategy
 from app.context.editor import branch_settings, EditedToolRegistry
@@ -15,7 +14,7 @@ from app.context.resume import restore_controller_run_inputs
 from app.context.runtime import ContextManager
 from app.context.store import ContextOwner, WindowStore
 from app.context.strategies import ModelSummaryStrategy
-from app.context.window import WindowPolicy, mark_source
+from app.context.window import WindowPolicy, mark_source, neutral_context
 from app.model_cost import resolved_usage_cost_usd
 from app.references import BUNDLE_FIELD, ReferenceError
 from app.task_memory import (
@@ -57,7 +56,7 @@ class WebAdminChatRunMixin:
         webhook_assignment_id: str = "",
         webhook_resume_message_id: int = 0,
         cron_run_id: str = "",
-        recommendation_run_id: str = "",
+        collab_request_id: str = "",
         backend_override: Any = None,
     ) -> bool:
         messages = MessageDAO(self.db)
@@ -76,6 +75,9 @@ class WebAdminChatRunMixin:
         session_id = ""
         stats_task: asyncio.Task[Any] | None = None
         post_turn_actions_drained = False
+        instance_binding = None
+        instance_audit_token = instance_reference_token = None
+        instance_service = getattr(self, 'instances', None)
         # Turn/run identity for this run's stats snapshots. Populated once the run
         # is established; kept outside the try so the cancellation path can still
         # publish its terminal snapshot.
@@ -85,6 +87,11 @@ class WebAdminChatRunMixin:
         if self.control_actions is not None:
             # Never let a late cancel click from a completed turn affect a new run.
             self.control_actions.clear_retry_cancel(chat_id)
+        stage_marks = [("", time.monotonic())]
+
+        def mark_stage(name: str) -> None:
+            stage_marks.append((name, time.monotonic()))
+
         try:
             await messages.ensure_session(chat_id)
             session_id = await messages.get_or_create_session_uuid(chat_id)
@@ -95,6 +102,15 @@ class WebAdminChatRunMixin:
             run_fast_mode_requested = await messages.get_fast_mode(chat_id)
             if not root_turn_uuid and renderer.live is not None:
                 root_turn_uuid = str(getattr(renderer.live, "_agent_turn_uuid", "") or getattr(renderer.live, "current_turn_uuid", "") or "")
+            if instance_service is not None:
+                instance_binding = await instance_service.prepare_turn(conversation, root_turn_uuid,
+                    automatic=bool(task_notification or webhook_assignment_id or cron_run_id or collab_request_id))
+                if instance_binding:
+                    from app.instances.security import _AUDIT, _REFERENCE_AUTH, PublicRenderer
+                    instance_audit_token = _AUDIT.set(instance_binding['scrub'])
+                    instance_reference_token = _REFERENCE_AUTH.set((conversation_uuid, instance_binding['id'], asyncio.current_task(), instance_binding['bundle']))
+                    renderer = PublicRenderer(renderer, instance_binding['scrub'])
+                    reference_bundle_id = reference_bundle_id or instance_binding['bundle']
             # A terminal event (error/stopped/done) clears the live stream's turn
             # and run identity. A stats snapshot published afterwards would then
             # have no turn to attach to and could land on an unrelated
@@ -107,11 +123,14 @@ class WebAdminChatRunMixin:
             live_run_uuid = str(getattr(renderer.live, "current_run_uuid", "") or "") if renderer.live is not None else ""
             if live_run_uuid:
                 stats_identity["runUuid"] = live_run_uuid
+            mark_stage("sessionMs")
             edited_context = await branch_settings(self.db, conversation_uuid)
             run_tools = EditedToolRegistry(self.tools, edited_context['tools']) if edited_context else self.tools
-            if recommendation_run_id:
-                from app.tools.recommendation import RecommendationRunTools
-                run_tools = RecommendationRunTools(run_tools)
+            from app.collab.store import member_row as collab_member_row
+            collab_member = await collab_member_row(self.db.conn, conversation_uuid) if conversation_uuid else None
+            if collab_member:
+                from app.collab.runtime import MemberToolRegistry
+                run_tools = MemberToolRegistry(run_tools)
             prompt_builder = self._build_system_prompt_for_chat
             cached_system = await messages.get_system_snapshot(chat_id)
             if edited_context or cached_system:
@@ -166,7 +185,9 @@ class WebAdminChatRunMixin:
                 matches_live=system == system_live,
                 effective_chars=len(system),
             )
+            mark_stage("systemPromptMs")
             history = await self._build_history(chat_id)
+            mark_stage("historyMs")
 
             # Resolve the immutable per-run model identity before accepting the
             # current user row. A private checkpoint anchor covers exactly the
@@ -205,6 +226,9 @@ class WebAdminChatRunMixin:
             else:
                 think_level = "off"
             ctx_window = self.llm_factory.context_window(model_label)
+            if instance_binding:
+                from app.instances.security import PrivateOutputBackend
+                backend = PrivateOutputBackend(backend, instance_binding['scrub'])
 
             # The existing private sidecar is protocol-neutral for ordinary neutral
             # messages. Responses additionally carries opaque items, while Chat and
@@ -232,6 +256,10 @@ class WebAdminChatRunMixin:
                     restored_controller_anchor = private_state["anchor"]
                 else:
                     await messages.clear_controller_model_context(chat_id)
+            if restored_controller_anchor is None:
+                # Only a matching checkpoint can authenticate provider-owned state.
+                history = neutral_context(history)
+            mark_stage("nativeContextMs")
 
             if conversation_uuid and task_notification:
                 history = await restore_controller_run_inputs(
@@ -288,15 +316,19 @@ class WebAdminChatRunMixin:
 
             visible_user_text = (user_text or "").strip() or ("请根据我发送的附件内容回答。" if media else "")
             llm_text = build_llm_text_with_media(user_text, media or [])
+            if instance_binding:
+                visible_user_text = instance_binding['scrub'](visible_user_text)
+                llm_text += ('\n服务端实例绑定：operation=' + instance_binding['id'] + ', revision=' + str(instance_binding['revision'])
+                             + '。仅当前真实回合可上报；后续用户回合不是自动重新部署指令。所有变更仍受工具确认约束。')
             if webhook_assignment_id:
                 from app.webhooks.runtime_bridge import PROVENANCE
                 llm_text = PROVENANCE + "\nTrusted assignmentId: " + webhook_assignment_id + "\n\n" + llm_text
             if cron_run_id:
                 from app.cron.executor import PROVENANCE as CRON_PROVENANCE
                 llm_text = CRON_PROVENANCE + "\nTrusted Cron run: " + cron_run_id + "\n\n" + llm_text
-            if recommendation_run_id:
-                llm_text = ("Recommendation cycle (trusted runtime provenance): an automatic run of the "
-                            "recommendation module, not a live human message.\n\n" + llm_text)
+            if collab_request_id:
+                from app.collab.prompts import REQUEST_PROVENANCE
+                llm_text = REQUEST_PROVENANCE + "\nTrusted requestId: " + collab_request_id + "\n\n" + llm_text
             if background_control_payload:
                 llm_text += (
                     "\n\n<background-agent-control-context>\n"
@@ -308,7 +340,8 @@ class WebAdminChatRunMixin:
             user_msg: Message = {
                 "role": "user",
                 "content": build_llm_content(llm_text, media or []),
-                **({BUNDLE_FIELD: [reference_bundle_id]} if reference_bundle_id else {}),
+                **({BUNDLE_FIELD: list(dict.fromkeys(v for v in (reference_bundle_id, instance_binding['bundle'] if instance_binding else '') if v))}
+                   if reference_bundle_id or instance_binding else {}),
             }
             # Public history and the current user stay clean. The private model
             # context retains trusted runtime-state messages across physical calls
@@ -322,6 +355,14 @@ class WebAdminChatRunMixin:
             task_memory_epoch = task_memory_runtime_epoch(history)
 
             async def _refresh_task_memory_request(request_messages: list[Message]) -> list[Message]:
+                collab_service = getattr(self, "collab", None)
+                if collab_service is not None and conversation_uuid and await collab_service.has_notes(conversation_uuid):
+                    from app.collab.runtime import notes_message
+                    notes = await collab_service.take_notes(conversation_uuid)
+                    if notes:
+                        request_messages = [*request_messages, mark_source(
+                            {"role": "user", "content": notes_message(notes)}, kind="control",
+                            source_id=f"collab-notes:{notes[-1]['id']}", turn_uuid=root_turn_uuid, run_root_turn_uuid=root_turn_uuid)]
                 if active_policy['overrideSystemPrompt']:
                     return [m for m in request_messages if not is_task_memory_runtime_message(m)]
                 if not inject_memories:
@@ -364,7 +405,7 @@ class WebAdminChatRunMixin:
                     run_root_turn_uuid=root_turn_uuid,
                     op_ids=[user_op_id] if user_op_id else None,
                     tokens=estimate_tokens(visible_user_text),
-                    binding_meta={"source": "webhook", "assignmentId": webhook_assignment_id} if webhook_assignment_id else {"source": "cron", "cronRunId": cron_run_id} if cron_run_id else {"source": "recommendation", "recommendationRunId": recommendation_run_id} if recommendation_run_id else None,
+                    binding_meta={"source": "webhook", "assignmentId": webhook_assignment_id} if webhook_assignment_id else {"source": "cron", "cronRunId": cron_run_id} if cron_run_id else {"source": "collab", "collabRequestId": collab_request_id} if collab_request_id else None,
                 )
             else:
                 user_message_id = await messages.add(
@@ -373,26 +414,27 @@ class WebAdminChatRunMixin:
                     visible_user_text,
                     tokens=estimate_tokens(visible_user_text),
                 )
-            mark_source(user_msg, kind="webhook" if webhook_assignment_id else "cron" if cron_run_id or recommendation_run_id else "notification" if task_notification else "human",
+            mark_source(user_msg, kind="webhook" if webhook_assignment_id else "cron" if cron_run_id or collab_request_id else "notification" if task_notification else "human",
                         assignment_id=webhook_assignment_id,
                         source_id=f"message:{user_message_id}", message_id=user_message_id,
                         turn_uuid=root_turn_uuid, run_root_turn_uuid=root_turn_uuid)
             if not task_notification and not webhook_resume_message_id:
                 await messages.bump_user_turn(chat_id)
             user_saved = True
-            if not task_notification and not webhook_assignment_id and not cron_run_id and not recommendation_run_id:
+            if not task_notification and not webhook_assignment_id and not cron_run_id and not collab_request_id:
                 user_msg['content'] = message_with_suffix(user_msg['content'], source=user_message_source,
                     message_id=user_op_id.removeprefix('msg:') or str(user_message_id),
                     attachments=[{'name': m.file_name, 'type': m.mime_type, 'kind': m.kind, 'size': m.size} for m in media or []])
             if conversation:
-                if not task_notification and not recommendation_run_id:
+                if not task_notification and not collab_request_id:
                     await self._maybe_title_web_conversation(conversation, visible_user_text)
                 await self._touch_web_conversation(
                     conversation_uuid,
                     status="running",
-                    current_status="Agent 结果汇总中" if task_notification else ("后台 Agent 控制中" if background_control_payload else "运行中"),
+                    current_status="Agent 结果汇总中" if task_notification else ("后台 Agent 控制中" if background_control_payload else "处理会话请求" if collab_request_id else "运行中"),
                     last_error="",
                 )
+                await self._clear_prompt_suggestions(conversation_uuid)
 
             agent = Agent(
                 backend, run_tools,
@@ -407,7 +449,6 @@ class WebAdminChatRunMixin:
                 retry_jitter_ratio=self.config.agent.retry_jitter_ratio,
                 empty_response_retry_limit=self.config.agent.empty_response_retry_limit,
                 reasoning_only_retry_limit=self.config.agent.reasoning_only_retry_limit,
-                progress_watch=ProgressWatch.from_config(self.config.agent),
             )
             async def _rewrite_assistant_artifacts(content: str) -> str:
                 if not conversation_uuid or not hasattr(self, "_rewrite_web_artifact_links"):
@@ -420,6 +461,9 @@ class WebAdminChatRunMixin:
                 message_kwargs: dict[str, Any],
                 meta: dict[str, Any],
             ) -> int:
+                if instance_binding:
+                    scrub = instance_binding['scrub']
+                    content, message_kwargs, meta = scrub(content), scrub(message_kwargs), scrub(meta)
                 turn = str(meta.get("turnUuid") or root_turn_uuid or "")
                 op_ids = [str(item or "") for item in (meta.get("opIds") or []) if str(item or "")]
                 if role == "assistant":
@@ -529,8 +573,10 @@ class WebAdminChatRunMixin:
                              trigger_tokens=(int(self.config.models.resolve(model_label)[1].rollover_trigger_tokens or 0)
                                              if self.config.models.resolve(model_label) else 0),
                              trigger_ratio=self.config.agent.compact_ratio,
-                             retain_ratio=self.config.context_management.retain_ratio,
-                             max_output_tokens=max_tokens),
+                             retain_tokens=self.config.context_management.retain_tokens,
+                             dialogue_tokens=self.config.context_management.dialogue_tokens,
+                             max_output_tokens=max_tokens,
+                             tool_result_artifact_tokens=self.config.context_management.tool_result_artifact_tokens),
                 backend=backend, model=model_id, model_label=model_label,
                 on_rotated=_on_window_rotated, on_state=_compression_state,
                 active_run_root_turn_uuid=root_turn_uuid,
@@ -851,9 +897,12 @@ class WebAdminChatRunMixin:
                 if not self._web_controller_notifications.get(conversation_uuid):
                     await self._recover_web_task_notifications(conversation_uuid)
                 active = await _scoped_agent_tasks(include_terminal=False)
+                from app.collab.runtime import wait_requests, wait_summary
+                collab_waiting = await wait_requests(self, conversation_uuid=conversation_uuid, root_turn_uuid=root_turn_uuid)
+                active = [*active, *collab_waiting]
                 queued_notifications = self._web_controller_notifications.get(conversation_uuid, [])
                 queued_requires_wake = (not active and bool(queued_notifications)) or any(
-                    bool(item.get("requiresDecision"))
+                    bool(item.get("requiresDecision")) or str(item.get("kind") or "") == "task-notification-collab"
                     or str(item.get("status") or "")
                     in {"needs_openbear_control", "failed", "cancelled", "interrupted"}
                     for item in queued_notifications
@@ -884,6 +933,9 @@ class WebAdminChatRunMixin:
                 wait_cycle_uuid = str(uuid.uuid4())
                 planned_review_at_ms = int((time.time() + review_after_s) * 1000) if mode == "review_after" and review_after_s > 0 else 0
                 status_text = "等待 Agent 事件" if mode == "event_only" else f"计划 {int(review_after_s)} 秒后统一复查 Agent"
+                if collab_waiting and mode == "event_only":
+                    from app.collab.runtime import wait_status_text
+                    status_text = await wait_status_text(self, collab_waiting, agents_running=len(active) - len(collab_waiting)) or status_text
                 await renderer.emit({
                     "type": "agent_supervision",
                     "runRootTurnUuid": root_turn_uuid,
@@ -909,10 +961,13 @@ class WebAdminChatRunMixin:
                     else:
                         await controller_wake.wait()
                 controller_wake.clear()
+                collab_service = getattr(self, "collab", None)
                 if steering.has_pending(chat_id):
                     wake_reason = "user_interruption"
                 elif queued_requires_wake:
                     wake_reason = "task_notification"
+                elif collab_service is not None and await collab_service.has_notes(conversation_uuid):
+                    wake_reason = "collab_note"
                 notifications = self._dedupe_web_task_notifications(
                     self._web_controller_notifications.pop(conversation_uuid, [])
                 )
@@ -944,9 +999,13 @@ class WebAdminChatRunMixin:
                     controller_notification_ids.update(item_ids)
                 notifications = self._dedupe_web_task_notifications(claimed_notifications)
                 snapshot = await _aggregate_agent_snapshot(wake_reason=wake_reason, notifications=notifications)
+                collab_now = wait_summary(await wait_requests(self, conversation_uuid=conversation_uuid, root_turn_uuid=root_turn_uuid))
+                if collab_now["waiting"] or collab_waiting:
+                    snapshot["conversationRequests"] = collab_now
+                    snapshot["summary"]["running"] = int(snapshot["summary"].get("running") or 0) + collab_now["waiting"]
                 summary = snapshot.get("summary") if isinstance(snapshot.get("summary"), dict) else {}
                 if int(summary.get("running") or 0) == 0 and int(summary.get("waitingControl") or 0) == 0:
-                    status_text = "全部 Agent 已完成"
+                    status_text = "全部会话请求已有结果" if collab_waiting and not snapshot.get("agents") else "全部 Agent 已完成"
                     status_value = "completed"
                     active_value = False
                 elif wake_reason == "user_interruption":
@@ -955,6 +1014,10 @@ class WebAdminChatRunMixin:
                     active_value = False
                 elif wake_reason == "review_due":
                     status_text = "Agent 统一复查时间已到"
+                    status_value = "completed"
+                    active_value = False
+                elif any(str(item.get("kind") or "") == "task-notification-collab" for item in notifications):
+                    status_text = "会话请求有新进展"
                     status_value = "completed"
                     active_value = False
                 else:
@@ -1034,7 +1097,7 @@ class WebAdminChatRunMixin:
 
             runtime_tool_context = ToolRuntimeContext(
                 chat_id=chat_id, session_uuid=session_id, conversation_uuid=conversation_uuid,
-                source="webhook" if webhook_assignment_id else "cron" if cron_run_id else "recommendation" if recommendation_run_id else "web", turn_uuid=root_turn_uuid,
+                source="webhook" if webhook_assignment_id else "cron" if cron_run_id else "web", turn_uuid=root_turn_uuid,
                 run_root_turn_uuid=root_turn_uuid,
                 soft_stop_check=(lambda: self.control_actions.consume_soft_stop(chat_id)) if self.control_actions is not None else None,
                 task_notification=_task_notification_cb, conversation_event=_conversation_event_cb,
@@ -1042,7 +1105,6 @@ class WebAdminChatRunMixin:
                 webhook_assignment_id=webhook_assignment_id,
                 webhook_owner_id=int((conversation or {}).get("owner_chat_id") or 0),
                 webhook_automatic=bool(webhook_assignment_id),
-                recommendation_run_id=recommendation_run_id,
             )
             webhook_service = getattr(self, "webhooks", None)
             if webhook_service is not None and webhook_service.bridge is not None:
@@ -1053,6 +1115,21 @@ class WebAdminChatRunMixin:
             if cron_run_id:
                 from app.cron.executor import bind_context as bind_cron_context
                 bind_cron_context(self.cron, runtime_tool_context, cron_run_id)
+            if instance_binding:
+                from app.instances.runtime import bind_context as bind_instance_context
+                bind_instance_context(instance_service, runtime_tool_context, instance_binding)
+            if getattr(self, "collab", None) is not None and conversation:
+                from app.collab.runtime import bind_finish as bind_collab_finish
+                from app.collab.runtime import bind_turn as bind_collab_turn
+                await bind_collab_turn(self, runtime_tool_context, conversation=conversation, root_turn_uuid=root_turn_uuid,
+                    collab_request_id=collab_request_id, human_text=visible_user_text if not task_notification else "",
+                    user_source=user_message_source if not (webhook_assignment_id or cron_run_id or collab_request_id) else "system")
+                bind_collab_finish(self, runtime_tool_context, collab_request_id=collab_request_id)
+            mark_stage("turnSetupMs")
+            log.info("web.turn.prepared", conversation_uuid=conversation_uuid, messages=len(convo),
+                     native=restored_controller_anchor is not None,
+                     **{name: int((at - stage_marks[index][1]) * 1000)
+                        for index, (name, at) in enumerate(stage_marks[1:])})
             result = await agent.run(
                 convo, renderer, model=model_id, system=system,
                 max_tokens=max_tokens,
@@ -1062,6 +1139,8 @@ class WebAdminChatRunMixin:
                 think_level=think_level,
                 service_tier=service_tier,
                 fast_request=fast_request,
+                # Users often return after 5-60 minutes; Agents run continuous loops and keep 5m.
+                prompt_cache_ttl="1h",
                 session_id=session_id,
                 persister=persister,
                 window_runtime=window_runtime,
@@ -1133,8 +1212,10 @@ class WebAdminChatRunMixin:
                     )
                 else:
                     await self._touch_web_conversation(conversation_uuid, status="idle", current_status="就绪", last_error="")
-                    if turn_succeeded and conversation and not task_notification and not cron_run_id and not recommendation_run_id:
+                    if turn_succeeded and conversation and not task_notification and not cron_run_id:
                         self._start_conversation_title_task(conversation, automatic=True)
+                    if turn_succeeded and conversation and not (cron_run_id or webhook_assignment_id or collab_request_id):
+                        self._start_prompt_suggestion_task(conversation, root_turn_uuid)
         except asyncio.CancelledError:
             with contextlib.suppress(Exception):
                 await messages.repair_dangling_tool_calls(chat_id)
@@ -1204,11 +1285,24 @@ class WebAdminChatRunMixin:
             if conversation_uuid:
                 await self._touch_web_conversation(conversation_uuid, status="idle", current_status="已停止")
         except Exception as exc:
-            log.exception("Web 对话处理异常", 会话=chat_id)
+            if instance_binding:
+                log.error("实例会话处理异常", 会话=chat_id, 类型=type(exc).__name__)
+                exc = RuntimeError(instance_binding['scrub'](str(exc)))
+            else:
+                log.exception("Web 对话处理异常", 会话=chat_id)
             await renderer.fail(f"❌ 内部错误：{type(exc).__name__}: {exc}")
             if conversation_uuid:
                 await self._touch_web_conversation(conversation_uuid, status="error", current_status="出错", last_error=f"{type(exc).__name__}: {exc}")
         finally:
+            if instance_binding:
+                from app.instances.security import _AUDIT, _REFERENCE_AUTH
+                try:
+                    with contextlib.suppress(Exception):
+                        await asyncio.shield(instance_service.finish(instance_binding['id'], instance_binding['revision'],
+                            instance_binding['root'], 'completed' if turn_succeeded else 'interrupted'))
+                finally:
+                    _REFERENCE_AUTH.reset(instance_reference_token)
+                    _AUDIT.reset(instance_audit_token)
             if self.control_actions is not None:
                 self.control_actions.clear_retry_cancel(chat_id)
                 # A Web stop may leave a cooperative fallback while hard

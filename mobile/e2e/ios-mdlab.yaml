@@ -1,0 +1,72 @@
+# iOS Markdown 用例逐例截图（mdlab：第 1 例为中文强调修复演示，另截修复前）
+appId: dev.openbear.app
+---
+- launchApp:
+    stopApp: false
+- tapOn:
+    id: "back"
+    optional: true
+- extendedWaitUntil:
+    visible:
+      id: "open-mdlab"
+    timeout: 30000
+- tapOn:
+    id: "open-mdlab"
+- extendedWaitUntil:
+    visible:
+      id: "mdlab-label"
+    timeout: 20000
+- waitForAnimationToEnd
+- takeScreenshot: md-01-cjk-fix-demo-after
+- tapOn:
+    id: "mdlab-raw"
+- waitForAnimationToEnd
+- takeScreenshot: md-01-cjk-fix-demo-before
+- tapOn:
+    id: "mdlab-raw"
+- tapOn:
+    id: "mdlab-next"
+- waitForAnimationToEnd
+- takeScreenshot: md-02-cjk-emphasis-real
+- tapOn:
+    id: "mdlab-next"
+- waitForAnimationToEnd
+- takeScreenshot: md-03-cjk-emphasis-edge
+- tapOn:
+    id: "mdlab-next"
+- waitForAnimationToEnd
+- takeScreenshot: md-04-code-real
+- tapOn:
+    id: "mdlab-next"
+- waitForAnimationToEnd
+- takeScreenshot: md-05-code-edge
+- tapOn:
+    id: "mdlab-next"
+- waitForAnimationToEnd
+- takeScreenshot: md-06-table-real
+- tapOn:
+    id: "mdlab-next"
+- waitForAnimationToEnd
+- takeScreenshot: md-07-table-wide
+- tapOn:
+    id: "mdlab-next"
+- waitForAnimationToEnd
+- takeScreenshot: md-08-math-edge
+- tapOn:
+    id: "mdlab-next"
+- waitForAnimationToEnd
+- takeScreenshot: md-09-math-real
+- tapOn:
+    id: "mdlab-next"
+- waitForAnimationToEnd
+- takeScreenshot: md-10-link-quote-real
+- tapOn:
+    id: "mdlab-next"
+- waitForAnimationToEnd
+- takeScreenshot: md-11-link-quote-edge
+- tapOn:
+    id: "mdlab-next"
+- waitForAnimationToEnd
+- takeScreenshot: md-12-heading-real
+- tapOn:
+    id: "mdlab-back"

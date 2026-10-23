@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any
 
+from app.context.window import source_of
 from app.runtime.store import RuntimeStore
 
 log = logging.getLogger(__name__)
@@ -101,6 +102,7 @@ class RunSession:
         self.tool_outcome = None
         self._accepted_controls: set[str] = set()
         self.delivered_controls: set[str] = set()
+        self._archived_sources: set[str] = set()
 
     async def run(self, body, *, classify=None):
         self.task = asyncio.current_task()
@@ -192,7 +194,15 @@ class RunSession:
     async def archive(self, messages) -> None:
         if self.window is not None:
             self.window.bind_sources(messages)
-            await self.window.store.archive(messages)
+            # Only units this run has not archived yet. Every checkpoint and
+            # window preparation still archives the whole context, which
+            # re-verifies the earlier units against their stored fingerprints.
+            fresh = [message for message in messages
+                     if not source_of(message).get("id") or str(source_of(message)["id"]) not in self._archived_sources]
+            if not fresh:
+                return
+            await self.window.store.archive(fresh)
+            self._archived_sources.update(str(source_of(message)["id"]) for message in fresh if source_of(message).get("id"))
 
     async def start_tool(self, call) -> str:
         if self.store:
@@ -231,8 +241,9 @@ class RunSession:
     async def deliver_context(self, messages, command_ids) -> None:
         if self.window is None or not command_ids:
             return
+        plan = await self.window.plan_checkpoint(messages)
         async with self.store.db.write_transaction(label="runtime-control-context"):
-            state = await self.window.checkpoint(messages)
+            state = await self.window.checkpoint(messages, plan=plan)
             await self.delivered(command_ids, state["revision"])
 
     async def acknowledge_commands(self, command_ids) -> None:

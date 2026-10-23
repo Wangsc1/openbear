@@ -233,4 +233,7 @@
   .mcp-drawer .el-descriptions__content { overflow-wrap: anywhere; word-break: break-word; }
   .mcp-drawer .el-descriptions__content .flex { flex-wrap: wrap; }
   .mcp-drawer .tool-row { min-width: 0; }
+  /* A plain toast sits over the phone title bar for seconds; it must not swallow
+     taps meant for the buttons below it. Toasts with a close button stay tappable. */
+  .el-message:not(:has(.el-message__closeBtn)) { pointer-events: none; }
 }

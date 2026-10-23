@@ -48,6 +48,7 @@ class StreamEvent:
     """归一化流式事件。
 
     kind:
+      - "output_started" provider 已开始输出块（无内容；区分 preflight 拒绝）
       - "content"    正文增量（text）
       - "reasoning"  思考增量（text）；anthropic 还可带 signature
       - "encrypted_reasoning" 加密思考展示（text，整段替换）；不作为可读思考聚合或回灌

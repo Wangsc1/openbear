@@ -53,6 +53,8 @@ def _user_interaction_sensitive(arguments: str) -> bool:
 
 def redact_tool_arguments_for_audit(name: str, arguments: str) -> str:
     """Redact sensitive UserInteraction prompt defaults at the audit boundary."""
+    from app.instances.security import audit
+    arguments = audit(arguments)
     if str(name or "") != "UserInteraction" or not _user_interaction_sensitive(arguments):
         return arguments
     try:
@@ -81,6 +83,8 @@ def redact_tool_arguments_for_audit(name: str, arguments: str) -> str:
 
 def redact_tool_result_for_audit(name: str, result: str, arguments: str = "") -> str:
     """Redact sensitive UserInteraction prompt values without changing raw results."""
+    from app.instances.security import audit
+    result = audit(result)
     if str(name or "") != "UserInteraction":
         # Shared approval consumers can return a user's sensitive feedback inside
         # their result. Keep raw text for the model, but not for audit surfaces.
@@ -179,8 +183,6 @@ class ToolRuntimeContext:
     webhook_owner_id: int = 0
     webhook_start_cursor: int | None = None
     webhook_automatic: bool = False
-    # Host-injected recommendation-run authority for the Recommendation tool.
-    recommendation_run_id: str = ""
     receipt_repair: bool = False
     receipt_repair_calls: int = 0
     receipt_repair_started: float = 0.0

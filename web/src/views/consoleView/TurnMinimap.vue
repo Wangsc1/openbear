@@ -22,6 +22,8 @@ watch(() => [props.activeTurnIndex, props.turns.length], async () => {
 }, {immediate: true, flush: "post"});
 
 function turnNavLabel(turn, index = 0) {
+	const continuation = turn?.user?.continuation;
+	if (continuation) return `接续：${shortText(continuation.rootPreview || "之前的一轮", 37)}`;
 	const text = shortText(visibility.userContent(turn), 40);
 	return text || `第 ${index + 1} 轮对话`;
 }

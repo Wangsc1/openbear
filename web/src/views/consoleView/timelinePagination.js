@@ -35,7 +35,9 @@ export function mergeOperationSnapshots(current = [], incoming = []) {
   for (const operation of current || []) {
     if (!operation?.opId) continue;
     const existing = byId.get(operation.opId);
-    if (!existing || operationRevision(operation) > operationRevision(existing)) {
+    const revisionDelta = existing ? operationRevision(operation) - operationRevision(existing) : 0;
+    if (!existing || revisionDelta > 0
+        || (revisionDelta === 0 && (Number(operation.liveRev || 0) || 0) > (Number(existing.liveRev || 0) || 0))) {
       byId.set(operation.opId, operation);
     }
   }

@@ -24,6 +24,7 @@ from pydantic import (
 )
 
 from app.browser.config import BrowserConfig
+from app.managed.settings import ManagedConfig, persistent_paths
 from app.context.configuration import migrate_context_config
 from app.context.user_message_template import DEFAULT_USER_MESSAGE_TEMPLATE, validate_user_message_template
 from app.models.thinking import (
@@ -254,10 +255,11 @@ class ModelsConfig(BaseModel):
     # Stored at their original path; edited only in system settings.
     compression_models: list[str] = Field(default_factory=list, alias="compressionModels")
     naming_models: list[str] = Field(default_factory=list, alias="namingModels")
+    suggestion_models: list[str] = Field(default_factory=list, alias="suggestionModels")
 
     model_config = {"populate_by_name": True}
 
-    @field_validator("compression_models", "naming_models", mode="before")
+    @field_validator("compression_models", "naming_models", "suggestion_models", mode="before")
     @classmethod
     def _normalize_compression_models(cls, value: Any) -> list[str]:
         items = re.split(r"[,;\n]+", value) if isinstance(value, str) else value or []
@@ -371,33 +373,23 @@ class UserMessageTemplateConfig(BaseModel):
 
 class ContextManagementConfig(BaseModel):
     """Shared Controller/Agent context policy; summary settings retain their original paths."""
-    default_strategy: Literal["sliding_window", "model_summary"] = Field(default="sliding_window", alias="defaultStrategy")
-    retain_ratio: float = Field(default=0.15, alias="retainRatio", gt=0, lt=1)
 
-    model_config = {"populate_by_name": True, "extra": "forbid"}
-
-
-class ProgressReminderConfig(BaseModel):
-    """无推进提醒：长时间只在思考和读取时，下一次请求前提醒模型；不打断、不改档位。"""
-    enabled: bool = True
-    minutes: float = Field(default=15.0, ge=1.0, le=1440.0)
-    # 与用户消息尾部模板一致：默认值就是内置正文，设置页打开即可编辑；运行时空值仍回退内置模板。
-    controller_prompt: str = Field(default_factory=lambda: _progress_prompt("controller"), alias="controllerPrompt")
-    agent_prompt: str = Field(default_factory=lambda: _progress_prompt("agent"), alias="agentPrompt")
-
-    model_config = {"populate_by_name": True, "extra": "forbid"}
-
-    @field_validator("controller_prompt", "agent_prompt")
+    @model_validator(mode="before")
     @classmethod
-    def _validate_prompt(cls, value: str) -> str:
-        from app.agent.progress_watch import validate_notice_template
-        validate_notice_template(value)
+    def _drop_legacy_retain_ratio(cls, value: Any) -> Any:
+        # Retention is an absolute message budget; a ratio of each model's
+        # trigger has no equivalent value to migrate.
+        if isinstance(value, dict):
+            value = {key: item for key, item in value.items() if key not in {"retainRatio", "retain_ratio"}}
         return value
 
+    default_strategy: Literal["sliding_window", "model_summary"] = Field(default="sliding_window", alias="defaultStrategy")
+    retain_tokens: int = Field(default=40_000, alias="retainTokens", ge=20_000, le=200_000)
+    dialogue_tokens: int = Field(default=10_000, alias="dialogueTokens", ge=0, le=100_000)
+    # Only actual compression externalizes ordinary tool bodies; 0 disables it.
+    tool_result_artifact_tokens: int = Field(default=16_000, alias="toolResultArtifactTokens", ge=0)
 
-def _progress_prompt(kind: str) -> str:
-    from app.agent.progress_watch import DEFAULT_AGENT_PROMPT, DEFAULT_CONTROLLER_PROMPT
-    return DEFAULT_AGENT_PROMPT if kind == "agent" else DEFAULT_CONTROLLER_PROMPT
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
 
 class AgentConfig(BaseModel):
@@ -408,6 +400,9 @@ class AgentConfig(BaseModel):
         # serialized). Explicit custom delays, zero-wait and maxRetries survive.
         if not isinstance(value, dict):
             return value
+        # The no-progress reminder was removed; configs written before keep the key.
+        if "progressReminder" in value or "progress_reminder" in value:
+            value = {k: v for k, v in value.items() if k not in ("progressReminder", "progress_reminder")}
         fields = (("retryBackoffS", "retry_backoff_s", 0.5),
                   ("retryMaxDelayS", "retry_max_delay_s", 32.0),
                   ("retryJitterRatio", "retry_jitter_ratio", 0.25))
@@ -428,7 +423,6 @@ class AgentConfig(BaseModel):
 
     max_run_wall_seconds: float = Field(default=0.0, alias="maxRunWallSeconds")
     no_progress_rounds: int = Field(default=8, alias="noProgressRounds")
-    progress_reminder: ProgressReminderConfig = Field(default_factory=ProgressReminderConfig, alias="progressReminder")
     compact_ratio: float = Field(default=0.7, alias="compactRatio", gt=0, lt=1)
     keep_recent_messages: int = Field(default=8, alias="keepRecentMessages", ge=0)
     compact_prompt: str = Field(default="", alias="compactPrompt")
@@ -442,6 +436,11 @@ class AgentConfig(BaseModel):
     naming_max_retries: int = Field(default=3, alias="namingMaxRetries", ge=0, le=50)
     naming_max_turns: int = Field(default=8, alias="namingMaxTurns", ge=0)
     naming_max_chars: int = Field(default=50_000, alias="namingMaxChars", ge=1000, le=100_000)
+    prompt_suggestions_enabled: bool = Field(default=True, alias="promptSuggestionsEnabled")
+    suggestion_follow_conversation_model: bool = Field(default=False, alias="suggestionFollowConversationModel")
+    suggestion_count: int = Field(default=3, alias="suggestionCount", ge=1, le=5)
+    suggestion_timeout_s: float = Field(default=30.0, alias="suggestionTimeoutS", ge=1.0, le=600.0)
+    suggestion_prompt: str = Field(default="", alias="suggestionPrompt")
     # Deprecated compatibility input; queue/steering control now owns new-message behavior.
     interrupt_on_new: bool = Field(default=False, alias="interruptOnNew", exclude=True)
     # 错误分类决定是否重试；次数不含首次请求，等待采用整数阶梯。
@@ -536,6 +535,7 @@ class MCPServerConfig(BaseModel):
     # None means inherit from mcp.defaultApproval.
     approval: Literal["allow", "ask", "deny"] | None = None
     tools: MCPToolFilterConfig = Field(default_factory=MCPToolFilterConfig)
+    disabled_tools: list[str] = Field(default_factory=list, alias="disabledTools")
     agent_access: MCPAgentAccessConfig = Field(default_factory=MCPAgentAccessConfig, alias="agentAccess")
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
@@ -551,6 +551,8 @@ class MCPConfig(BaseModel):
     inline_max_chars: int = Field(default=8000, alias="inlineMaxChars", ge=1000)
     default_approval: Literal["allow", "ask", "deny"] = Field(default="ask", alias="defaultApproval")
     tool_name_prefix: str = Field(default="mcp", alias="toolNamePrefix")
+    tool_count_threshold: int = Field(default=30, alias="toolCountThreshold", ge=0)
+    definition_size_threshold_kb: int = Field(default=64, alias="definitionSizeThresholdKB", ge=0)
     allow_tools: list[str] = Field(default_factory=lambda: ["*"], alias="allowTools")
     deny_tools: list[str] = Field(default_factory=list, alias="denyTools")
     servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
@@ -575,6 +577,9 @@ class AgentsConfig(BaseModel):
     status_update_interval_s: float = Field(default=3.0, alias="statusUpdateIntervalS")
     max_concurrent_tasks: int = Field(default=3, alias="maxConcurrentTasks", ge=1)
     agent_model_call_limit: int = Field(default=40, alias="agentModelCallLimit", ge=0)
+    # Upper bound on an Agent's compaction trigger; the model's own threshold
+    # applies when lower. 0 = model threshold only. Main conversations ignore it.
+    context_trigger_tokens: int = Field(default=300_000, alias="contextTriggerTokens", ge=0)
     agent_tool_call_limit: int = Field(default=80, alias="agentToolCallLimit", ge=0)
     plan_control_call_limit: int = Field(default=200, alias="planControlCallLimit", ge=1, le=2000)
     agent_plan_enabled: bool = Field(default=True, alias="agentPlanEnabled")
@@ -703,7 +708,8 @@ from app.webhooks.contracts import WebhooksConfig
 
 class Config(BaseModel):
     webhooks: WebhooksConfig = Field(default_factory=WebhooksConfig)
-    telegram: TelegramConfig
+    managed: ManagedConfig = Field(default_factory=ManagedConfig.from_environment, exclude=True)
+    telegram: TelegramConfig | None = None
     models: ModelsConfig
     memory: MemoryConfig
     agent: AgentConfig = Field(default_factory=AgentConfig)
@@ -729,15 +735,25 @@ class Config(BaseModel):
             return value
         migrated = copy.deepcopy(value)
         migrate_context_config(migrated)
+        # Role/credentials are process bootstrap inputs, never mutable JSON settings.
+        migrated["managed"] = ManagedConfig.from_environment()
+        if migrated["managed"].enabled:
+            persistent_paths(migrated, migrated["managed"])
+            migrated["telegram"] = None
         return migrated
 
     def validate_for_startup(self) -> list[str]:
         """启动前强校验：返回错误列表（空=通过）。"""
         errors: list[str] = []
-        if not self.telegram.bot_token.strip():
-            errors.append("缺少 telegram.botToken")
-        if not self.telegram.whitelist_ids:
-            errors.append("缺少 telegram.whitelistIds（单人自用至少配一个）")
+        if self.managed.enabled:
+            errors.extend(self.managed.startup_errors())
+            if not self.web.enabled:
+                errors.append("managed requires web.enabled")
+        else:
+            if not self.telegram or not self.telegram.bot_token.strip():
+                errors.append("缺少 telegram.botToken")
+            if not self.telegram or not self.telegram.whitelist_ids:
+                errors.append("缺少 telegram.whitelistIds（单人自用至少配一个）")
         if not self.models.providers:
             errors.append("缺少 models.providers")
         if self.models.resolve(self.models.primary) is None:
@@ -747,7 +763,7 @@ class Config(BaseModel):
                 errors.append("memory.provider=external 时必须配置 memory.baseUrl")
             if not self.memory.access_key.strip():
                 errors.append("memory.provider=external 时必须配置 memory.accessKey")
-        if self.telegram.mode == "webhook":
+        if not self.managed.enabled and self.telegram and self.telegram.mode == "webhook":
             if not self.telegram.webhook_host.strip():
                 errors.append("webhook 模式必须配置 telegram.webhookHost")
             if not self.telegram.webhook_secret.strip():
@@ -756,6 +772,12 @@ class Config(BaseModel):
 
 
 def config_path() -> Path:
+    if os.environ.get("OPENBEAR_INSTANCE_ROLE") == "managed":
+        root = Path(os.environ.get("OPENBEAR_WORKSPACE", "/workspace")).expanduser().resolve()
+        path = Path(os.environ.get("OPENBEAR_CONFIG", str(root / "openbear.json"))).expanduser().resolve()
+        if not path.is_relative_to(root) or path == root:
+            raise ValueError("managed config must be inside OPENBEAR_WORKSPACE")
+        return path
     return Path(os.environ.get("OPENBEAR_CONFIG", "./openbear.json")).expanduser()
 
 

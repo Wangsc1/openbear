@@ -16,7 +16,7 @@ function harness(name, props = {}, api = {}, extra = {}) {
   const inputs = Vue.reactive(props), events = [], mounts = [], cleanup = [], scope = Vue.effectScope();
   const bindings = compileScript(descriptor, {id:'policy-test'}).bindings;
   const components = Object.fromEntries(Object.entries(bindings).filter(([key]) => /^[A-Z]/.test(key)).map(([key]) => [key, shell]));
-  const ctx = vm.createContext({...Vue, ...components, ...policy, ...settingsDisplay, defineAsyncComponent:() => shell,
+  const ctx = vm.createContext({...Vue, ...components, ...policy, ...settingsDisplay, authMode: Vue.ref('controller'), defineAsyncComponent:() => shell,
     defineProps:() => inputs, defineEmits:() => (name, value) => {events.push([name, value]); if (name === 'update:modelValue') inputs.modelValue = value;},
     defineOptions(){}, onMounted:fn => mounts.push(fn), onBeforeUnmount:fn => cleanup.push(fn),
     Api:api, apiError:e => e?.response?.data?.error || e.message, mobileSelectOptions:() => ({}),
@@ -137,7 +137,7 @@ function settingsHarness(api={}) {
 }
 test('global template specs use template labels/defaults and preview current draft using settings endpoint',async()=>{
   const calls=[];const h=settingsHarness({previewSettingPrompt:async(path,value)=>{calls.push({path,value});return {ok:true,path,rendered:'Current time'};}});
-  assert.equal(h.run('isPromptEditorSpec(templateSpec)'),true);assert.deepEqual(clone(h.run('userMessageTemplateCompletionRoots')),['time','message','conversation','runtimeInfo.model','runtimeInfo.host','runtimeInfo.os','folderWorkspaceDir']);assert.match(h.descriptor.template.content,/:completion-roots="templateCompletionRoots\(spec.path\)"/);assert.deepEqual(clone(h.run("templateCompletionRoots('userMessageTemplate.template')")),clone(h.run('userMessageTemplateCompletionRoots')));assert.deepEqual(clone(h.run("templateCompletionRoots('agent.progressReminder.controllerPrompt')")),['loop']);assert.deepEqual(clone(h.run("templateCompletionRoots('agent.progressReminder.agentPrompt')")),['loop']);assert.equal(h.run("templateCompletionRoots('agent.namingPrompt')"),null);assert.equal(h.run('draft[enabledSpec.path]'),true);
+  assert.equal(h.run('isPromptEditorSpec(templateSpec)'),true);assert.deepEqual(clone(h.run('userMessageTemplateCompletionRoots')),['time','message','conversation','runtimeInfo.model','runtimeInfo.host','runtimeInfo.os','folderWorkspaceDir']);assert.match(h.descriptor.template.content,/:completion-roots="templateCompletionRoots\(spec.path\)"/);assert.deepEqual(clone(h.run("templateCompletionRoots('userMessageTemplate.template')")),clone(h.run('userMessageTemplateCompletionRoots')));assert.equal(h.run("templateCompletionRoots('agent.namingPrompt')"),null);assert.equal(h.run('draft[enabledSpec.path]'),true);
   assert.equal(h.run("promptVariableLabel('time.now',templateSpec)"),'[[ time.now ]]');assert.equal(h.run("promptVariableLabel('time', {editor:'prompt'})"),'{time}');
   h.run("draft[templateSpec.path]='[[ message.id ]]';editingPromptPath.value=templateSpec.path");await h.run('previewPrompt(templateSpec)');
   assert.deepEqual(calls,[{path:settingSpec.path,value:'[[ message.id ]]'}]);assert.equal(h.run('promptPreviewText.value'),'Current time');assert.equal(h.run('draft[templateSpec.path]'),'[[ message.id ]]');
@@ -155,7 +155,7 @@ test('global template save/restore and switch requests preserve drafts on error 
 
 test('API contract uses named URLs and exact bodies; setting preview has no legacy formatting variables by default',async()=>{
   const source=fs.readFileSync(new URL('../api.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,'').replaceAll('export ', '');
-  const calls=[];const api={interceptors:{response:{use(){}}}};
+  const calls=[];const api={interceptors:{request:{use(){}},response:{use(){}}}};
   for(const method of ['get','post','put','patch'])api[method]=async(url,body)=>{calls.push({method,url,body});return {data:{ok:true}};};
   const ctx=vm.createContext({axios:{create:()=>api}});vm.runInContext(source,ctx);
   await vm.runInContext("Api.promptTools();Api.previewPromptTemplate({folderId:'F1',text:'draft'});Api.conversationPropertiesImpact('C/1',{contextText:''});Api.previewSettingPrompt('userMessageTemplate.template','[[ time.now ]]')",ctx);

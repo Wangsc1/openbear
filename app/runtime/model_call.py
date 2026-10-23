@@ -18,6 +18,7 @@ from app.llm.base import AgentResult, Message, OpenBearLLMError, apply_provider_
 from app.llm.events import StreamEvent, Usage
 from app.llm.retry import RetryPolicy, retry_wait_payload, wait_for_retry
 from app.runtime.lifecycle import current_session, _consume_cleanup_result
+from app.runtime.thinking_recovery import is_anthropic_prefix_mismatch
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +50,7 @@ class AttemptOutcome:
     first_token_ms: int = 0
     total_time_ms: int = 0
     reasoning_ms: int = 0
+    output_started: bool = False
 
 
 @dataclass(slots=True)
@@ -202,6 +204,10 @@ async def execute_attempt(
                 now = time.monotonic()
                 result = outcome.response
                 apply_provider_billing(result, event.details)
+                if (event.kind in {"output_started", "tool_input"}
+                        or event.kind in {"content", "reasoning", "encrypted_reasoning"} and (event.text or event.signature)
+                        or event.tool_calls or event.native_output_items):
+                    outcome.output_started = True
                 if event.kind == "error":
                     outcome.error = OpenBearLLMError.from_stream_event(
                         event, protocol=str(getattr(request.backend, "protocol", "") or ""),
@@ -262,6 +268,8 @@ async def execute_attempt(
             if not isinstance(result, AgentResult):
                 raise TypeError("backend.complete must return AgentResult")
             outcome.response = result
+            outcome.output_started = bool(result.text or result.reasoning or result.signature
+                                          or result.tool_calls or result.native_output_items)
             outcome.usage_reported = bool(getattr(result, "usage_reported", False)) or any(
                 (result.usage.input_tokens, result.usage.output_tokens,
                  result.usage.total_tokens, result.usage.cache_read_tokens,
@@ -273,6 +281,15 @@ async def execute_attempt(
             partial.reasoning += result.reasoning
             partial.tool_calls = copy.deepcopy(result.tool_calls)
             partial.finish_reason = result.finish_reason
+        if outcome.error is None and outcome.response.finish_reason == "refusal":
+            message = ("上游拒绝生成（refusal），本轮未完成。已保留返回的正文，未自动重试。"
+                       if outcome.response.text.strip() else
+                       "上游拒绝生成（refusal），未返回正文，本轮未完成。未自动重试。")
+            outcome.status = "error"
+            outcome.error = OpenBearLLMError(
+                message, summary=message, reason="refusal", retryable=False,
+                protocol=str(getattr(request.backend, "protocol", "") or ""),
+            )
     except asyncio.CancelledError as exc:
         outcome.status = "cancelled"
         cancelled = exc
@@ -355,17 +372,22 @@ class ModelCallDriver:
         accumulate_reasoning: bool = True,
         on_start: StartCallback | None = None,
         after_settle: SettleCallback | None = None,
+        recover_thinking: Callable[[AttemptOutcome], Any] | None = None,
     ) -> LogicalResponse:
         """Retry provider failures only, never preparation, controls or accounting.
 
         ``recover_overflow`` owns its own bounded rotation policy. A successful
         rotation discards stale partial/native state without spending normal retries.
+        ``recover_thinking`` persists an active-context derivative and announces
+        the downgrade. It runs at most once, only for a pre-output Anthropic
+        prefix-binding 400, after settlement; its failures are local, not retries.
         ``settle`` is atomic accounting only; presentation belongs in
         ``after_settle``, outside the writer transaction (including cancellation).
         """
         logical = AgentResult()
         attempts = retries = normal_retries = 0
         mixed = False
+        thinking_recovery_used = False
         tail: list[Message] = []
         first_structured: OpenBearLLMError | None = None
         last_retry_state: dict[str, Any] | None = None
@@ -404,6 +426,21 @@ class ModelCallDriver:
                 if not accumulate_reasoning and mixed:
                     logical.reasoning = attempt.reasoning
                 return LogicalResponse(logical, attempts, retries, native_replayable=not mixed)
+            if is_anthropic_prefix_mismatch(
+                error, protocol=str(getattr(outcome.request.backend, "protocol", "") or ""),
+            ):
+                # A second binding failure is terminal even if a gateway calls
+                # it retryable. Neither normal retries nor overflow reset this.
+                if not thinking_recovery_used and not outcome.output_started and recover_thinking is not None:
+                    thinking_recovery_used = True
+                    if await _invoke(recover_thinking, outcome):
+                        await wait_for_retry(0, state={"waitId": uuid.uuid4().hex},
+                                             cancel_check=cancel_check, control_check=control_check)
+                        retries += 1
+                        # No output was contributed by this failed request.
+                        # Retain any earlier normal-retry tail/mixed state.
+                        continue
+                raise error
             if first_structured is None and error.structured:
                 first_structured = error
             if error.retryable and attempt.tool_calls:

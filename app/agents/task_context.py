@@ -68,6 +68,10 @@ class AgentTaskContext:
         self.notify_persisted_event(kind, agent_key=agent_key, summary=summary, detail=detail)
         return event_id
 
+    def notify_live_update(self) -> None:
+        """Push in-memory progress (``app.agents.live_state``); no event row exists."""
+        self.notify_persisted_event("live_progress")
+
     def notify_persisted_event(self, kind: str, *, agent_key: str = "", summary: str = "",
                                detail: dict[str, Any] | None = None) -> None:
         """Forward an already committed event without inserting it twice."""

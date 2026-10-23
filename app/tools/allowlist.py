@@ -50,10 +50,15 @@ def agent_tool_capability(name: object) -> str:
 def agent_phase_tool_names(
     initial: Iterable[object], *, managed: bool = False,
     phase: str = "", approved: Iterable[object] = (),
-    pending_control: bool = False, ceiling: Iterable[object] = (),
-    available: Iterable[str] | None = None,
+    ceiling: Iterable[object] = (), available: Iterable[str] | None = None,
 ) -> set[str]:
-    """Canonical phase capabilities for runner schemas and inspection surfaces."""
+    """Canonical phase capabilities for runner schemas and inspection surfaces.
+
+    AgentControlAck stays in every phase whether or not a control is pending:
+    the tool list leads the cached prompt prefix, so adding it on arrival and
+    dropping it after the ack would rewrite the whole cache twice. The tool
+    itself rejects a control that is not applied to this task.
+    """
     ordinary = set(sanitize_tool_allowlist(approved if managed else initial)) & set(AGENT_DELEGATION_TOOL_NAMES if available is None else available)
     configured_ceiling = preserve_tool_allowlist(ceiling)
     cap = set(sanitize_tool_allowlist(configured_ceiling))
@@ -62,7 +67,7 @@ def agent_phase_tool_names(
     if configured_ceiling:
         ordinary &= cap
     if not managed:
-        return expand_agent_tool_names(ordinary | AGENT_RUNTIME_TOOL_NAMES | ({"AgentControlAck"} if pending_control else set()))
+        return expand_agent_tool_names(ordinary | AGENT_RUNTIME_TOOL_NAMES | {"AgentControlAck"})
     protocol = {
         "drafting": {"AgentPlanSubmit"}, "revising": {"AgentPlanSubmit"},
         "executing": {"AgentPlanProgress", "AgentPlanReplan"},

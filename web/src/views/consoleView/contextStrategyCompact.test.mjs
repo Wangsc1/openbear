@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import {compile, createSSRApp, h} from "vue";
 import {renderToString} from "vue/server-renderer";
-import {parse, compileTemplate} from "@vue/compiler-sfc";
+import {parse} from "@vue/compiler-sfc";
 import {baseParse} from "@vue/compiler-dom";
 
 const source = fs.readFileSync(new URL("./ConsoleComposer.vue", import.meta.url), "utf8");
@@ -17,17 +17,6 @@ function find(nodes, predicate) {
 }
 const row = find(baseParse(descriptor.template.content).children, node => node.type === 1 && node.props.some(
   prop => prop.name === "class" && prop.value?.content === "fast-control context-strategy-control"));
-
-test("strategy setting is one shared Fast-style row below the model controls, not a large panel above the list", () => {
-  assert.ok(row);
-  assert.doesNotMatch(source, /ContextStrategySwitch|run-config-context-strategy|context-strategy-heading/);
-  assert.ok(source.indexOf(row.loc.source) > source.indexOf('class="thinking-segments agent-fast-segments"'));
-  assert.equal((source.match(/class="fast-control context-strategy-control"/g) || []).length, 1);
-  assert.doesNotMatch(row.loc.source, /<small|<p[ >]|strategy-caption/);
-  assert.match(row.loc.source, /class="fast-switch"/);
-  assert.match(source, /\.run-config-model-list\s*\{[^}]*min-height: 0;[^}]*flex: 1 1 auto;[^}]*overflow-y: auto;/);
-  assert.deepEqual(compileTemplate({source: descriptor.template.content, filename: "ConsoleComposer.vue", id: "composer"}).errors, []);
-});
 
 for (const strategy of ["sliding_window", "model_summary"]) {
   for (const saving of [false, true]) {

@@ -275,12 +275,13 @@ async def test_supervision_indexes_upgrade_and_bounded_empty_review(tmp_path):
 
             await conn.set_trace_callback(traces.append)
             await conn.set_progress_handler(progress, 100)
-            # First and no-new-event reviews must not scan dense hidden telemetry.
+            # First and no-new-event reviews must not scan dense hidden telemetry
+            # (legacy stored progress rows are no longer a current-state kind).
             for after in (0, size):
                 batch = await dao.supervision_events("dense", after_seq=after, controller_visible=True)
                 assert batch["events"] == [] and not batch["hasMore"]
                 assert batch["nextAfter"] == batch["highWater"] == size
-                assert [e.seq for e in batch["current"]] == [1, size]
+                assert [e.seq for e in batch["current"]] == [1]
             await conn.set_progress_handler(None, 100)
             await conn.set_trace_callback(None)
             costs.append(ticks[0] * 100)

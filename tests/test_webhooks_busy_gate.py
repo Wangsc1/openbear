@@ -45,7 +45,8 @@ async def test_C01_ordinary_batches_do_not_steer_tool_child_or_agentwait(env):
             elif self.calls==3:
                 args={'action':'report','params':{'receiptId':'initial','results':[{'eventId':initial['eventId'],'outcome':'completed'}]}}
                 yield StreamEvent(kind='tool_call',tool_calls=[ToolCall('r','Webhook',json.dumps(args))]); yield StreamEvent(kind='finish',finish_reason='tool_calls')
-            else: yield StreamEvent(kind='finish',finish_reason='stop')
+            # A final round without text is a failed turn; this test is about busy gating.
+            else: yield StreamEvent(kind='content',text='Reported'); yield StreamEvent(kind='finish',finish_reason='stop')
     backend=Backend(); env.server.llm_factory=FakeRunFactory(backend,context_window=128000)
     try:
         await env.worker.tick(); main=env.server.runs.scheduler.tasks(kind='controller')

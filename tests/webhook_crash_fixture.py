@@ -1,7 +1,17 @@
-"""Isolated child only: READY is a committed crash barrier, never a sleep race."""
+"""Isolated child only: READY is a committed crash barrier, never a sleep race.
+
+Run as ``python -m tests.webhook_crash_fixture --fork-server`` to start a
+pre-imported parent that never opens a loop, DB or thread; every JSON request
+line on stdin forks one fresh session-leader child that runs ``main``.
+"""
 import asyncio
 import json
+import os
+import select
+import signal
 import sys
+import threading
+import traceback
 from types import SimpleNamespace
 from aiohttp import ClientSession
 from aiohttp.test_utils import TestClient,TestServer
@@ -30,7 +40,7 @@ async def main(path,stage,url):
     async def barrier():
         event=await one(db.conn,'SELECT event_id FROM webhook_events ORDER BY receive_seq LIMIT 1')
         assignment=await one(db.conn,'SELECT assignment_id,conversation_uuid,root_turn_uuid FROM webhook_assignments LIMIT 1')
-        print('READY '+json.dumps({'event':event,'assignment':assignment}),flush=True)
+        print('READY '+json.dumps({'pid':os.getpid(),'event':event,'assignment':assignment}),flush=True)
         await asyncio.Event().wait()
     if stage=='notification_ack':
         async def enqueue(owner,conversation,key,status,**metadata):
@@ -138,4 +148,65 @@ async def main(path,stage,url):
     raise RuntimeError('Crash barrier not reached: '+stage)
 
 
-if __name__=='__main__': asyncio.run(main(*sys.argv[1:]))
+def _emit(fd,text):
+    os.write(fd,(text+'\n').encode())
+
+
+def _child(request,out):
+    """Forked child: own session, request-specific stderr/env, then ``main``."""
+    status=1
+    try:
+        os.setsid()
+        err=os.open(request['stderr'],os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o644)
+        os.dup2(err,2); os.close(err)
+        null=os.open(os.devnull,os.O_RDONLY); os.dup2(null,0); os.close(null)
+        os.dup2(out,1)
+        os.environ.clear(); os.environ.update(request['env']); os.chdir(request['cwd'])
+        asyncio.run(main(request['path'],request['stage'],request['url']))
+        status=0
+    except BaseException:
+        traceback.print_exc(); sys.stderr.flush()
+    finally:
+        os._exit(status)
+
+
+def serve():
+    """Fork server loop: requests on stdin, PID/EXIT lines and child READY on stdout."""
+    out=os.dup(1); children=set()
+    _emit(out,'HELLO '+json.dumps({'threads':threading.active_count()}))
+    def reap():
+        while children:
+            try: pid,status=os.waitpid(-1,os.WNOHANG)
+            except ChildProcessError: children.clear(); return
+            if not pid: return
+            children.discard(pid)
+            code=-os.WTERMSIG(status) if os.WIFSIGNALED(status) else os.WEXITSTATUS(status)
+            _emit(out,f'EXIT {pid} {code}')
+    buffer=b''
+    try:
+        while True:
+            readable,_,_=select.select([0],[],[],.02)
+            reap()
+            if not readable: continue
+            chunk=os.read(0,65536)
+            if not chunk: return
+            buffer+=chunk
+            while b'\n' in buffer:
+                line,buffer=buffer.split(b'\n',1)
+                request=json.loads(line)
+                pid=os.fork()
+                if pid==0: _child(request,out)
+                children.add(pid); _emit(out,f'PID {pid}')
+    finally:
+        for pid in list(children):
+            for kill in (os.killpg,os.kill):
+                try: kill(pid,signal.SIGKILL); break
+                except ProcessLookupError: pass
+        for pid in list(children):
+            try: os.waitpid(pid,0)
+            except ChildProcessError: pass
+
+
+if __name__=='__main__':
+    if sys.argv[1:]==['--fork-server']: serve()
+    else: asyncio.run(main(*sys.argv[1:]))

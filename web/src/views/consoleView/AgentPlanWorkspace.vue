@@ -12,6 +12,7 @@ const props = defineProps({
 	activityLines: {type: Array, default: () => []},
 	activityLoading: {type: Boolean, default: false},
 	activityError: {type: String, default: ""},
+	liveProgressLine: {type: Object, default: null},
 });
 const emit = defineEmits(["refresh"]);
 
@@ -233,6 +234,7 @@ function selectRelevantStep(check) {
 								:model-label="launchInfo.model === '—' ? '' : launchInfo.model"
 								:think-level="launchInfo.thinkLevel === '—' ? '' : launchInfo.thinkLevel"
 								:fast-mode="launchInfo.fastMode"
+								:live-progress-line="props.liveProgressLine"
 								:limit="5"
 							/>
 						</section>

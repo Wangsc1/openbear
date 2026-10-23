@@ -766,6 +766,19 @@ copy_release_tree() {
     for f in pyproject.toml uv.lock openbear.service openbear.json.example release-meta.json; do
         cp -a "$pkg/$f" "$INSTALL_DIR/$f" || return 1
     done
+    # Instance deployment and the access gateway read these from the install
+    # root. Same rule as the web updater: replace what the package ships.
+    if [[ -d "$pkg/gateway/bin" ]]; then
+        mkdir -p "$INSTALL_DIR/gateway"
+        rm -rf "$INSTALL_DIR/gateway/bin"
+        cp -a "$pkg/gateway/bin" "$INSTALL_DIR/gateway/bin" || return 1
+    fi
+    for f in gateway/README.md Dockerfile .dockerignore docs/instances.md; do
+        if [[ -f "$pkg/$f" ]]; then
+            mkdir -p "$(dirname "$INSTALL_DIR/$f")"
+            cp -a "$pkg/$f" "$INSTALL_DIR/$f" || return 1
+        fi
+    done
     for f in README.md README; do
         if [[ -e "$pkg/$f" ]]; then
             cp -a "$pkg/$f" "$INSTALL_DIR/$f" || return 1
@@ -932,7 +945,8 @@ prepare_release_upgrade() {
     fi
 
     for rel in app web/dist prompts scripts pyproject.toml uv.lock openbear.service \
-        openbear.json.example README.md README release-meta.json .venv; do
+        openbear.json.example README.md README release-meta.json .venv \
+        gateway/bin gateway/README.md Dockerfile .dockerignore docs/instances.md; do
         [[ -e "$INSTALL_DIR/$rel" ]] && existing+=("$rel")
     done
     if [[ "${#existing[@]}" -gt 0 ]]; then
@@ -970,7 +984,8 @@ restore_release_upgrade() {
         return 1
     fi
     for rel in app web/dist prompts scripts pyproject.toml uv.lock openbear.service \
-        openbear.json.example README.md README release-meta.json .venv; do
+        openbear.json.example README.md README release-meta.json .venv \
+        gateway/bin gateway/README.md Dockerfile .dockerignore docs/instances.md; do
         if ! rm -rf "$INSTALL_DIR/$rel"; then
             err "清理新版本 $rel 失败；备份保留在 $txn"
             return 1

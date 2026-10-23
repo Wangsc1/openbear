@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import signal
 import sys
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -15,6 +19,7 @@ from app.config import get_config
 from app.logging import get_logger, setup_logging
 from app.restart_notify import send_pending_restart_completion_notices
 from app.services import Services
+from app.systemd_notify import CONFIG_ERROR_EXIT, SystemdNotify
 
 log = get_logger("main")
 
@@ -63,24 +68,69 @@ async def _drain_startup_backlog(bot: Bot, svc: Services) -> None:
         log.info("已消费 Telegram 启动积压消息，仅登记匹配的会话回复", 数量=drained)
 
 
+async def _telegram_startup_notices(bot: Bot, svc: Services) -> None:
+    await setup_menu(bot)
+    try:
+        await send_pending_restart_completion_notices(bot, svc)
+    except Exception:
+        log.exception("重启完成通知暂未送达")
+
+
 async def run() -> None:
-    config = get_config()
+    try:
+        config = get_config()
+    except (ValueError, FileNotFoundError, PermissionError) as exc:
+        # Validation errors can contain submitted credentials.
+        print(f"OpenBear configuration invalid or unreadable ({type(exc).__name__})", file=sys.stderr)
+        raise SystemExit(CONFIG_ERROR_EXIT) from None
+    except Exception:
+        if os.environ.get("OPENBEAR_INSTANCE_ROLE") == "managed":
+            # Pydantic errors may reproduce submitted provider/account inputs.
+            print("managed startup configuration invalid or missing", file=sys.stderr)
+            raise SystemExit(1) from None
+        raise
     setup_logging(config.log_level)
     errors = config.validate_for_startup()
     if errors:
         for e in errors:
             log.error("启动配置校验失败", 原因=e)
-        sys.exit(1)
+        sys.exit(CONFIG_ERROR_EXIT)
+
+    notifier = SystemdNotify.from_environment()
+    if config.managed.enabled:
+        root = Path(config.managed.workspace_root)
+        root.mkdir(parents=True, exist_ok=True)
+        os.chdir(root)
+        os.umask(0o077)
+        log.info("OpenBear 启动中", 模式="managed", 主力模型=config.models.primary)
+        svc = Services(config, None)
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, stop.set)
+        try:
+            await svc.startup()
+            await notifier.ready()
+            await stop.wait()
+        finally:
+            await notifier.stopping()
+            try:
+                await svc.shutdown()
+            finally:
+                for sig in (signal.SIGTERM, signal.SIGINT):
+                    loop.remove_signal_handler(sig)
+        return
 
     log.info("OpenBear 启动中", 模式=config.telegram.mode, 主力模型=config.models.primary)
     bot = Bot(config.telegram.bot_token, default=DefaultBotProperties(parse_mode=None))
-    svc = Services(config, bot)
-    await svc.startup()
-    dp = build_dispatcher(svc)
-    await setup_menu(bot)
-    await send_pending_restart_completion_notices(bot, svc)
-
+    svc = None
+    runner = None
+    notices = None
     try:
+        svc = Services(config, bot)
+        await svc.startup()
+        dp = build_dispatcher(svc)
+        notices = asyncio.create_task(_telegram_startup_notices(bot, svc), name="telegram-startup-notices")
         if config.telegram.mode == "webhook":
             from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
             host = config.telegram.webhook_host.rstrip("/")
@@ -96,22 +146,37 @@ async def run() -> None:
             site = web.TCPSite(runner, host="0.0.0.0", port=config.telegram.webhook_port)
             await site.start()
             log.info("Webhook 已启动", 端口=config.telegram.webhook_port)
+            await notifier.ready()
             await asyncio.Event().wait()
         else:
             await bot.delete_webhook(drop_pending_updates=False)
             await _drain_startup_backlog(bot, svc)
             log.info("Polling 模式启动")
+            dp.startup.register(notifier.ready)
+            dp.shutdown.register(notifier.stopping)
             await dp.start_polling(bot, handle_as_tasks=True)
     finally:
-        await svc.shutdown()
-        await bot.session.close()
-        log.info("OpenBear 已退出")
+        await notifier.stopping()
+        if notices is not None:
+            notices.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await notices
+        try:
+            if runner is not None:
+                await runner.cleanup()
+        finally:
+            try:
+                if svc is not None:
+                    await svc.shutdown()
+            finally:
+                await bot.session.close()
+                log.info("OpenBear 已退出")
 
 
 def main() -> None:
     try:
         asyncio.run(run())
-    except (KeyboardInterrupt, SystemExit):
+    except KeyboardInterrupt:
         pass
 
 

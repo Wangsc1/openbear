@@ -3,6 +3,7 @@ import {computed, ref, watch} from 'vue';
 import {ChevronRight} from '@lucide/vue';
 import WorkDisclosure from './WorkDisclosure.vue';
 import {conversationWorkChunks, lastAnswerIndex, workDurationLabel} from './conversationWork.js';
+import {collabStatusLabel, collabToolCall, useCollabRequests} from './collabRequests.js';
 import './conversationWork.css';
 
 const props = defineProps({
@@ -18,6 +19,14 @@ watch(() => props.running, running => {
 	open.value = running || resultIndex.value < 0;
 }, {immediate: true});
 const label = computed(() => `已工作${workDurationLabel(props.durationMs) ? ` ${workDurationLabel(props.durationMs)}` : ''}`);
+// A folded block must not hide how requests to other conversations ended.
+const collabStore = useCollabRequests();
+const requestSummary = computed(() => {
+	const calls = props.entries.map(entry => collabToolCall(entry.event)).filter(call => call?.action === 'send');
+	if (!calls.length) return '';
+	const live = calls.length === 1 ? collabStore?.get(calls[0].requestId) || collabStore?.forCall(calls[0].toolCallId) : null;
+	return live ? `「${live.to?.title || '另一个会话'}」${collabStatusLabel(live)}` : `${calls.length} 个会话请求`;
+});
 function entryKey(entry) { return `${entry.event.id || entry.event.eventKey || entry.event.message?.id || entry.event.operation?.opId || entry.index}:${entry.part || 'event'}`; }
 </script>
 
@@ -27,6 +36,7 @@ function entryKey(entry) { return `${entry.event.id || entry.event.eventKey || e
 			<template v-if="chunk.kind === 'work'">
 				<button v-if="!props.running && chunk.key === firstWork" type="button" class="work-heading" :aria-expanded="open" @click="open = !open">
 					<span>{{ label }}</span>
+					<span v-if="requestSummary && !open" class="work-heading-note">· {{ requestSummary }}</span>
 					<ChevronRight class="work-chevron" :stroke-width="1.75" :class="{'is-open': open}"/>
 				</button>
 				<WorkDisclosure :open="props.running || open">
@@ -47,6 +57,7 @@ function entryKey(entry) { return `${entry.event.id || entry.event.eventKey || e
 .work-heading { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 0 10px; margin: 0; border: 0; border-bottom: 1px solid var(--work-summary-rule); background: transparent; color: var(--work-muted); font: inherit; font-size: 13px; line-height: 1.6; text-align: left; cursor: pointer; }
 .work-heading:focus-visible { outline: 2px solid var(--bear-accent, var(--ob-focus)); outline-offset: 3px; border-radius: 4px; }
 .work-heading:hover { color: var(--work-text); }
+.work-heading-note { min-width: 0; overflow: hidden; color: var(--work-faint); text-overflow: ellipsis; white-space: nowrap; }
 .work-chevron { width: 13px; height: 13px; flex: none; transition: transform 200ms ease, opacity 200ms ease; opacity: .65; }
 .work-chevron.is-open { transform: rotate(90deg); }
 /* Both intra-group and inter-group spacing come from the same leading space.

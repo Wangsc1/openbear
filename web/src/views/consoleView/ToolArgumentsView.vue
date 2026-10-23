@@ -1,5 +1,6 @@
 <script setup>
 import {computed, onBeforeUnmount, ref} from "vue";
+import { contextResourceUrl } from '../../sessionBoundary.js';
 import {copyTextToClipboard} from "../../utils/clipboard.js";
 import {highlightCodeHtml} from "./markdown.js";
 import {buildToolArgumentsView} from "./toolArgumentsPresentation.js";
@@ -90,7 +91,7 @@ onBeforeUnmount(() => {
 							{{ copiedKey === `row-${index}` ? "已复制" : "复制" }}
 						</button>
 					</div>
-					<a v-if="row.kind === 'url'" :href="row.value" target="_blank" rel="noopener noreferrer">{{ row.value }}</a>
+					<a v-if="row.kind === 'url'" :href="contextResourceUrl(row.value)" target="_blank" rel="noopener noreferrer">{{ row.value }}</a>
 					<code v-else-if="row.mono">{{ row.value }}</code>
 					<p v-else>{{ row.value }}</p>
 				</div>

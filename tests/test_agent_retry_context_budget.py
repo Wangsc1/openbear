@@ -64,6 +64,7 @@ async def test_retry_full_request_obeys_threshold_and_preserves_partial(agent_en
     backend = Backend()
     runner = AgentExecutor(dao, tid, agent=agent, backend=backend, model="main", model_label="p/main",
         max_tokens=16384, tools=tools, context_window=128000, rollover_trigger_tokens=8000,
+        window_retain_tokens=1200,
         max_retries=1, retry_backoff_s=0, retry_max_delay_s=0,
         context_config=cfg, context_llm_factory=strategy_env.factory)
     if case == "shrink":

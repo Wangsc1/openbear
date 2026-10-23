@@ -36,7 +36,11 @@ async def test_summary_candidate_multiselect_roundtrip_order_fallback_and_invali
     ("agent.compactTimeoutS", 120), ("agent.manualCompactMinPercent", 40),
     ("agent.compactPrompt", "Existing={existing}\nHistory={history}"),
     ("contextManagement.defaultStrategy", "model_summary"),
-    ("contextManagement.retainRatio", .2),
+    ("contextManagement.retainTokens", 60000),
+    ("contextManagement.dialogueTokens", 0),
+    ("contextManagement.toolResultArtifactTokens", 0),
+    ("contextManagement.toolResultArtifactTokens", 16000),
+    ("contextManagement.toolResultArtifactTokens", 8000),
 ])
 async def test_all_retained_and_new_context_settings_persist_and_hot_reload(admin_env, path, value):
     env = admin_env
@@ -52,3 +56,18 @@ async def test_all_retained_and_new_context_settings_persist_and_hot_reload(admi
     before = env.cfg_path.read_bytes()
     reminder = await env.client.patch("/api/settings/agent.memoryReminderPercent", json={"value": 50}, cookies=env.cookie)
     assert reminder.status == 400 and env.cfg_path.read_bytes() == before
+
+
+async def test_tool_artifact_threshold_is_in_agent_compaction_and_rejects_negative(admin_env):
+    env = admin_env
+    path = "contextManagement.toolResultArtifactTokens"
+    response = await env.client.get("/api/settings", cookies=env.cookie)
+    assert (await response.json())["values"][path] == 16000
+    specs = await (await env.client.get("/api/settings/specs", cookies=env.cookie)).json()
+    assert specs["specs"][path]["unit"] == "token"
+    agent = next(domain for domain in specs["domains"] if domain["key"] == "agent")
+    section = next(section for section in agent["sections"] if section["key"] == "compaction")
+    assert path in section["paths"]
+    before = env.cfg_path.read_bytes()
+    response = await env.client.patch(f"/api/settings/{path}", json={"value": -1}, cookies=env.cookie)
+    assert response.status == 400 and env.cfg_path.read_bytes() == before

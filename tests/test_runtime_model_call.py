@@ -107,6 +107,40 @@ async def test_complete_compat_explicit_override_and_request_snapshot():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["stream", "complete"])
+@pytest.mark.parametrize("text", ["", "上游返回的部分正文"])
+async def test_refusal_is_terminal_and_settled_as_error(mode, text):
+    usage = Usage(input_tokens=7, output_tokens=11)
+    call = ToolCall(id="blocked", name="side_effect", arguments="{}")
+    if mode == "stream":
+        backend = FakeStream([[
+            StreamEvent("reasoning", text="thinking"),
+            StreamEvent("content", text=text),
+            StreamEvent("tool_call", tool_calls=[call]),
+            StreamEvent("finish", finish_reason="refusal"),
+            StreamEvent("usage", usage=usage),
+        ]])
+    else:
+        backend = FakeComplete(AgentResult(text=text, reasoning="thinking", tool_calls=[call],
+                                           usage=usage, finish_reason="refusal"))
+    settled, retries = [], []
+    with pytest.raises(OpenBearLLMError) as caught:
+        await driver().call(lambda tail: req(backend), settled.append, on_retry=retries.append)
+    error = caught.value
+    assert error.reason == "refusal" and not error.retryable
+    assert "上游拒绝生成" in error.user_message()
+    assert ("未返回正文" in error.user_message()) == (not text)
+    assert retries == [] and len(settled) == 1
+    outcome = settled[0]
+    assert outcome.status == "error" and outcome.error is error
+    assert outcome.response.text == text
+    assert outcome.response.finish_reason == "refusal"
+    assert outcome.response.usage == usage and outcome.usage_reported
+    assert outcome.prompt_usage_reported
+    assert len(backend.seen) == 1 if mode == "stream" else backend.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_error_event_partial_text_tail_and_no_native_mixing():
     backend = FakeStream([
         [StreamEvent("content", text="first "),

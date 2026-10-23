@@ -130,26 +130,31 @@ async def test_model_only_overrides_normalize_inherited_capabilities_without_fre
     assert state["agentRunConfig"]["fastMode"] is None
 
 
-@pytest.mark.parametrize("bad", [
+INVALID_FOLDER_DEFAULTS = [
     None, [], {"unexpected": "x"}, {"mainModel": ""}, {"mainModel": "missing/model"},
     {"mainFastMode": None}, {"mainFastMode": "false"}, {"agentFastMode": 1},
     {"mainModel": "openai/cheap", "mainFastMode": True}, {"mainThinkingLevel": "off"},
     {"agentModel": "openai/cheap", "agentThinkLevel": "high"},
-])
-async def test_invalid_folder_defaults_are_rejected_without_modifying_other_properties(web_env, bad):
+]
+
+
+async def test_invalid_folder_defaults_are_rejected_without_modifying_other_properties(web_env):
     env = web_env
     await baseline(env)
     project = await folder(env, "valid", defaults=PAID)
     await save(env, project, PAID, workspaceDir="/project", promptMarkdown="keep this prompt")
     url = f"/api/conversation-folders/{project}/properties"
-    for target in (url + "/impact", url):
-        method = env.client.post if target.endswith("/impact") else env.client.put
-        response = await method(target, json={"runDefaults": bad})
-        assert response.status in {400, 404}, await response.text()
-    response = await env.client.get(url)
-    data = await response.json()
-    assert data["runDefaults"]["local"] == PAID
-    assert data["workspace"]["local"] == "/project" and data["prompt"]["local"] == "keep this prompt"
+    # Each rejected input is checked against the untouched properties before
+    # the next one is tried, so one environment serves every case.
+    for bad in INVALID_FOLDER_DEFAULTS:
+        for target in (url + "/impact", url):
+            method = env.client.post if target.endswith("/impact") else env.client.put
+            response = await method(target, json={"runDefaults": bad})
+            assert response.status in {400, 404}, f"bad={bad!r} target={target}: {await response.text()}"
+        response = await env.client.get(url)
+        data = await response.json()
+        assert data["runDefaults"]["local"] == PAID, f"bad={bad!r}"
+        assert data["workspace"]["local"] == "/project" and data["prompt"]["local"] == "keep this prompt", f"bad={bad!r}"
 
 
 async def test_defaults_changes_only_affect_new_conversations_and_preserve_workspace_prompt(web_env):

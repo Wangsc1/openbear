@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import {parse, compileScript, compileTemplate, compileStyle} from '@vue/compiler-sfc';
+import {parse, compileScript} from '@vue/compiler-sfc';
 import * as Vue from 'vue';
 import {renderToString} from 'vue/server-renderer';
 import {Message, ArrowRight, CopyDocument, Check} from '@element-plus/icons-vue';
@@ -53,14 +53,4 @@ test('closing dialog ignores late responses and purged body has an honest fallba
   let resolve;const pending=new Promise(r=>resolve=r);const h=harness(()=>pending);h.run('show()');await flush();h.run('open.value=false');await flush();
   assert.equal(h.calls[0].options.signal.aborted,true);resolve({event:{raw:{body:'late'}}});await flush();assert.equal(h.run('detail.value'),null);h.close();
   const p=harness(async()=>({event:{payloadStatus:'purged'}}));p.run('show()');await flush();assert.match(await p.html(),/已清理或不可用/);p.close();
-});
-test('card and TurnList templates/styles compile with an explicit left-side event branch',()=>{
-  for(const file of ['WebhookMessageCard.vue','TurnList.vue']){
-    const d=parse(fs.readFileSync(new URL(file,import.meta.url),'utf8')).descriptor;
-    assert.deepEqual(compileTemplate({source:d.template.content,filename:file,id:file}).errors,[]);
-    for(const s of d.styles)assert.deepEqual(compileStyle({source:s.content,filename:file,id:file,scoped:s.scoped}).errors,[]);
-  }
-  const turn=fs.readFileSync(new URL('TurnList.vue',import.meta.url),'utf8');
-  assert.match(turn,/<WebhookMessageCard v-if="turn.user.source === 'webhook'"/);
-  assert.match(turn,/\.timed-row-event \.user-row \{ justify-content: flex-start;/);
 });

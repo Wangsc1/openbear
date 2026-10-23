@@ -1,4 +1,5 @@
 import { shallowReactive } from 'vue';
+import { contextWebSocket, pageSession, onSessionEnd } from '../sessionBoundary.js';
 import Fuse from 'fuse.js';
 import { pinyin } from 'pinyin-pro';
 import { catalogKey, referenceKey } from './codec.js';
@@ -153,10 +154,10 @@ export function includeArchivedReferences(value) {
   referenceCatalog.includeArchived=Boolean(value); referenceCatalog.stale=true; sendScope();
 }
 function connect() {
-  if (stopped || typeof window==='undefined') return;
+  if (stopped || pageSession.blocked || typeof window==='undefined') return;
   timer = null;
   const initialScope = referenceCatalog.includeArchived;
-  const current = new WebSocket(`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/api/events/ws${initialScope?'?archived=1':''}`);
+  const current = contextWebSocket(`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/api/events/ws${initialScope?'?archived=1':''}`);
   socket=current;
   current.onopen=()=>{
     if(socket!==current)return;
@@ -194,6 +195,7 @@ function resume() {
   if (socket?.readyState===1) sendScope();
   else if(!socket && !timer)connect();
 }
+onSessionEnd(() => stopReferenceCatalog({clear:true}));
 export function startReferenceCatalog() {
   if(!stopped || typeof window==='undefined')return;
   stopped=false;retry=0;connect();

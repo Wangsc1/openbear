@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.agents import live_state
 from app.agents.schemas import AgentTask
 
 
@@ -34,8 +35,10 @@ def restore_review_state(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
             observed = max(after, int(page["highWater"]))
         except (KeyError, TypeError, ValueError):
             continue
+        execution = agent.get("currentExecution") if isinstance(agent.get("currentExecution"), dict) else {}
         restored[str(agent["taskUuid"])] = {
             "lastEventSeq": after, "observedEventSeq": observed,
+            "observedOutputAtMs": int(execution.get("lastReportedOutputAtMs") or 0),
             "hasMore": bool(page.get("hasMore")),
             "status": agent.get("status"), "currentStatus": agent.get("currentStatus"),
             "deliveryEvidenceState": _delivery_evidence_state(agent.get("planRuntime") or {}),
@@ -49,12 +52,19 @@ def review_observation(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     latest = events["latest"]
     high_water = events["highWater"]
+    # Streaming progress is in memory only (never an event row).
+    live = live_state.progress(task.task_uuid) if task.status in {"running", "resuming", "pausing"} else None
+    live_at = int((live or {}).get("updatedAtMs") or 0) or None
     activity = bool(
         high_water > int(previous.get("observedEventSeq") or 0)
         or task.status != previous.get("status")
         or task.current_status != previous.get("currentStatus")
+        or (live_at or 0) > int(previous.get("observedOutputAtMs") or 0)
     )
     last_at = latest.ts * 1000 if latest and latest.ts else None
+    activity_source = "latest_recorded_event"
+    if live_at and (last_at is None or live_at > last_at):
+        last_at, activity_source = live_at, "latest_reported_output"
 
     def age(start: int | None) -> int | None:
         return max(0, now_ms - start) if start is not None else None
@@ -65,21 +75,20 @@ def review_observation(
         "phase": task.status, "startedAtMs": None, "elapsedMs": None,
     }
     transitions = [event for event in events["current"]
-                   if event.kind not in {"model_stream_progress", "plan_submitted", "plan_replan_submitted"}]
+                   if event.kind not in {"plan_submitted", "plan_replan_submitted"}]
     boundary = transitions[-1] if transitions else None
     if task.status in {"running", "resuming", "pausing"} and boundary:
         started = boundary.ts * 1000 if boundary.ts else None
         if boundary.kind == "model_call_started":
-            execution.update(phase="model", startedAtMs=started,
-                             attemptId=str(boundary.detail.get("attemptId") or ""))
-            progress = next((event for event in reversed(events["current"])
-                             if event.kind == "model_stream_progress" and event.seq > boundary.seq), None)
+            attempt_id = str(boundary.detail.get("attemptId") or "")
+            execution.update(phase="model", startedAtMs=started, attemptId=attempt_id)
+            progress = live if live and str(live.get("attemptId") or "") == attempt_id else None
             # Reported progress is throttled; absence is not proof of idle
             # transport, lack of research, or lack of provider computation.
-            execution["lastReportedOutputAtMs"] = progress.ts * 1000 if progress and progress.ts else None
+            execution["lastReportedOutputAtMs"] = live_at if progress else None
             execution["reportedOutputAgeMs"] = age(execution["lastReportedOutputAtMs"])
             if progress:
-                tool_input = progress.detail.get("toolInput")
+                tool_input = progress.get("toolInput")
                 if isinstance(tool_input, dict):
                     execution["toolInput"] = {
                         key: tool_input[key] for key in ("toolNames", "receivedBytes", "phase")
@@ -129,12 +138,13 @@ def review_observation(
         "hasMeaningfulProgress": activity,
         "progressSemantics": "hasMeaningfulProgress is a legacy alias for hasActivity, not delivery evidence.",
         "lastActivityAtMs": last_at, "activityAgeMs": age(last_at),
-        "activitySource": "latest_recorded_event",
+        "activitySource": activity_source,
         "currentExecution": execution, "deliveryEvidence": evidence,
         "eventPage": {key: events[key] for key in ("highWater", "hasMore", "nextAfter")},
     }
     next_state = {
         "lastEventSeq": events["nextAfter"], "observedEventSeq": high_water,
+        "observedOutputAtMs": max(live_at or 0, int(previous.get("observedOutputAtMs") or 0)),
         "hasMore": events["hasMore"],
         "status": task.status, "currentStatus": task.current_status,
         "deliveryEvidenceState": evidence_state,

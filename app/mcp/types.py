@@ -11,6 +11,10 @@ class MCPServerState(BaseModel):
     transport: str
     status: str
     tool_count: int = 0
+    enabled_tool_count: int = 0
+    total_tool_count: int = 0
+    definition_bytes: int = 0
+    exposure_fingerprint: str = ""
     required: bool = False
     error: str = ""
     last_connected_at: float | None = None
@@ -59,5 +63,7 @@ class MCPToolMeta(BaseModel):
     annotations: dict[str, Any] = Field(default_factory=dict)
     approval: str = "ask"
     risk: str = "unknown"
+    enabled: bool = True
+    definition_bytes: int = 0
     filtered: bool = False
     filter_reason: str = ""

@@ -277,8 +277,18 @@ class RecordingAgentBackend:
         return AgentResult(text="isolated simulated completion")
 
 
-@pytest.mark.parametrize("strategy", ["sliding_window", "model_summary"])
-@pytest.mark.parametrize("born_after_cut,checkpoint_mode", [(False, "present"), (True, "present"), (False, "missing"), (False, "malformed"), (False, "orphan_future"), (False, "rollback")])
+# Only a reliable surviving checkpoint is rebuilt into a strategy-specific
+# window and sent again, so those modes run under both strategies. Missing or
+# malformed checkpoints and instances born after the cut only take the
+# owner-wide window deletion/closing branch, which does not read the strategy;
+# they run once under model_summary (the strategy that also writes summaries).
+@pytest.mark.parametrize("born_after_cut,checkpoint_mode,strategy", [
+    *[(False, mode, strategy) for mode in ("present", "orphan_future", "rollback")
+      for strategy in ("sliding_window", "model_summary")],
+    (True, "present", "model_summary"),
+    (False, "missing", "model_summary"),
+    (False, "malformed", "model_summary"),
+])
 async def test_deleted_agent_rounds_cannot_reenter_continue(web_env, monkeypatch, strategy, born_after_cut, checkpoint_mode):
     env = web_env
     row = await env.server._create_web_conversation(123, model="openai/gpt", run_config={"context_strategy": strategy})
@@ -454,6 +464,8 @@ async def test_suffix_does_not_rollback_conversation_preferences(web_env, monkey
 
 
 async def test_suffix_clears_read_dedup_for_actual_next_request(web_env, monkeypatch, tmp_path):
+    from dataclasses import replace
+
     env = web_env
     backend = await configure_web(env, monkeypatch)
     row = await env.server._create_web_conversation(123, model="openai/gpt")
@@ -474,6 +486,7 @@ async def test_suffix_clears_read_dedup_for_actual_next_request(web_env, monkeyp
         if self.active_run_root_turn_uuid == "future-1" and self not in forced:
             forced.add(self)
             kwargs["force"] = True
+            self.policy = replace(self.policy, retain_tokens=1000, dialogue_tokens=0)
         return await original(self, messages, **kwargs)
     monkeypatch.setattr(ContextManager, "prepare", first_boundary)
     assert await run_web(env, row, "future-1", "Read fixture once")
@@ -585,7 +598,7 @@ async def test_agent_rewind_preserves_evicted_history_and_sibling(continuity_env
     original = ContextManager.prepare
     async def bounded(self, messages, **kwargs):
         if self.active_run_root_turn_uuid == "surviving-root":
-            self.policy = WindowPolicy(128000, trigger_tokens=16000)
+            self.policy = WindowPolicy(128000, trigger_tokens=16000, retain_tokens=2400, dialogue_tokens=0)
             kwargs["force"] = True
         return await original(self, messages, **kwargs)
     monkeypatch.setattr(ContextManager, "prepare", bounded)

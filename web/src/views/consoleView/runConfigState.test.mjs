@@ -57,13 +57,14 @@ function deferred() {
   return {promise, resolve, reject};
 }
 
-test("the actual model selector marks its HTTP save pending until commit", async () => {
+for (const [wasRunning, nextRun] of [[false, false], [true, true], [false, true], [true, false], [true, undefined]])
+test(`model save stays pending and trusts server timing: running=${wasRunning}, nextRun=${nextRun}`, async () => {
   const gate = deferred();
   const messages = [];
   const context = vm.createContext({
     modelMutationCounts: {value: new Map()},
     modelMutationKey: () => "conv-a\u0000",
-    running: {value: false},
+    running: {value: wasRunning},
     activeConversationUuid: {value: "conv-a"},
     isLocalConversation: {value: false},
     modelQuery: {value: "sol"},
@@ -97,11 +98,12 @@ test("the actual model selector marks its HTTP save pending until commit", async
   const selecting = vm.runInContext("selectModel({key: 'source-b/gpt-5.6-sol'})", context);
   assert.equal(context.modelMutationCounts.value.get("conv-a\u0000"), 1);
   assert.deepEqual(messages, []);
-  gate.resolve({ok: true});
+  gate.resolve({ok: true, nextRun});
   await selecting;
   assert.equal(context.modelMutationCounts.value.has("conv-a\u0000"), false);
   assert.equal(context.modelQuery.value, "");
   assert.match(messages[0][1], /source-b\/gpt-5\.6-sol/);
+  assert.equal(messages[0][1].includes('下一轮运行生效'), nextRun ?? wasRunning);
 });
 
 test('a save finishing after leave-and-return refreshes the current visit instead of leaving the old model visible', async () => {

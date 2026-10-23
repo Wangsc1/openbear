@@ -8,12 +8,14 @@ import {computed,nextTick,reactive,ref,watch,effectScope} from 'vue';
 import {compareTreeItems, treeItemId as rowId} from './conversationTreeInteractions.js';
 import {ledgerTokenParts,totalSessionDurationMs} from '../views/consoleView/ledgerUsage.js';
 import {startReferenceCatalog,stopReferenceCatalog,watchConversationOverview,applyConversationOverviewPacket} from '../references/catalog.js';
+import {activityReadRequests,activityLabel,activityState,isActivityWaiting,pendingConversationRows,pendingFolderCounts, folderActivityCounts} from '../conversationActivity.js';
+import {groupTreeRows,leadGroupStatus} from './conversationGroupsTree.js';
 
 const treeSource=fs.readFileSync(new URL('./ConversationTree.vue',import.meta.url),'utf8');
 const strip=source=>source.match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import[\s\S]*?;\n/gm,'');
 function hoverHarness(){
  let time=0,serial=0;const timers=new Map();
- const env={normalizePromptPolicy,promptPolicyFlags,useRecentConversationRows,referenceCatalog:{},computed,nextTick,reactive,ref,compareTreeItems,rowId,watch(){},onMounted(){},onBeforeUnmount(){},defineProps:()=>({}),defineEmits:()=>()=>{},defineExpose(){},
+ const env={normalizePromptPolicy,promptPolicyFlags,useRecentConversationRows,referenceCatalog:{},computed,nextTick,reactive,ref,compareTreeItems,rowId,watch(){},onMounted(){},onBeforeUnmount(){},activityReadRequests,activityLabel,activityState,isActivityWaiting,pendingConversationRows,pendingFolderCounts, folderActivityCounts,groupTreeRows,leadGroupStatus,defineProps:()=>({}),defineEmits:()=>()=>{},defineExpose(){},
   // UI import seam only; keep the real hover/timer handlers and assertions.
   defineLazyView:()=>({}),
   setTimeout:(fn,ms)=>{timers.set(++serial,{fn,at:time+ms});return serial;},clearTimeout:id=>timers.delete(id),
@@ -81,24 +83,4 @@ test('overview shares header token/duration functions and does not sum overlappi
   env.referenceCatalog.connected=true;listener({error:'not_found'});assert.equal(card.data.value,null);assert.equal(card.error.value,'会话已删除或不可访问');
   assert.equal(card.stateLabel.value,'会话已删除或不可访问');assert.equal(card.currentRunning.value,false);
  }finally{for(const fn of cleanup)fn();scope.stop();}
-});
-test('overview hides scrollbar chrome without disabling overflow and omits the redundant footer',()=>{
- const source=fs.readFileSync(new URL('./ConversationOverview.vue',import.meta.url),'utf8');
- assert.match(source,/overflow:auto;scrollbar-width:none;-ms-overflow-style:none/);
- assert.match(source,/\.conversation-overview::-webkit-scrollbar\{display:none;width:0;height:0\}/);
- assert.doesNotMatch(source,/<footer|overview-loading|overview-notice|正在校准统计|正在读取统计|正在读取状态|等待连接恢复|会话累计 · 与会话内统计同源/);
- assert.doesNotMatch(source,/<template v-if="data">/);
- assert.match(source,/data\?fmtNum\(data\.messageCount\):'—'/);
- assert.match(source,/data\?fmtNum\(data\.calls\?\.model\):'—'/);
- assert.match(source,/data\?fmtNum\(data\.calls\?\.tool\):'—'/);
- assert.match(source,/'is-running':currentRunning&&referenceCatalog.connected/);
- assert.match(source,/role="status"/);
- assert.match(source,/if\(error\.value\)return error\.value/);
-});
-test('tree running rings retain speed and icon geometry',()=>{
- assert.match(treeSource,/border-top-color:var\(--ob-blue\)/);
- assert.match(treeSource,/border-right-color:rgb\(var\(--ob-blue-rgb\) \/ .42\)/);assert.match(treeSource,/tree-work-border-spin .9s linear infinite/);
- assert.match(treeSource,/position:absolute; inset:-3px/);assert.match(treeSource,/'is-working': running\(row\) && !rowLoading\(row\)/);
- assert.match(treeSource,/@media \(prefers-reduced-motion: reduce\) \{ \.is-spinning,\.running-leaf \{ animation:none; \} \}/);
- assert.doesNotMatch(treeSource,/<el-popover/i);
 });

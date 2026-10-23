@@ -23,6 +23,7 @@ from aiogram.types import (
 
 from app.config import Config
 from app.db.engine import DB
+from app.lifecycle import wait_for_startup
 from app.logging import get_logger
 from app.telegram_ui import send_rich
 
@@ -273,6 +274,7 @@ class WebTelegramReplies:
         return True
 
     async def _worker_loop(self) -> None:
+        await wait_for_startup(self)
         while True:
             self._wake.clear()
             try:

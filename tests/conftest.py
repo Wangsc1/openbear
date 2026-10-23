@@ -20,6 +20,15 @@ def make_client(handler) -> HTTPClient:
     return client
 
 
+@pytest.fixture(autouse=True)
+def _no_background_prompt_suggestions(request, monkeypatch):
+    # Tests count exact upstream requests; the post-turn suggestion call runs only where marked.
+    if "prompt_suggestions" in request.keywords:
+        return
+    from app.web_console.prompt_suggestions import WebAdminPromptSuggestionsMixin
+    monkeypatch.setattr(WebAdminPromptSuggestionsMixin, "_start_prompt_suggestion_task", lambda *_args, **_kwargs: None)
+
+
 def pytest_addoption(parser):
     parser.addoption("--run-live", action="store_true", default=False,
                      help="运行打真实 Parrot 的 live 测试")

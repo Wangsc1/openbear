@@ -1,4 +1,5 @@
 import MarkdownIt from "markdown-it";
+import { contextResourceUrl, onSessionEnd } from '../../sessionBoundary.js';
 import cjkFriendly from "markdown-it-cjk-friendly";
 import texmath from "markdown-it-texmath";
 import katex from "katex";
@@ -16,6 +17,7 @@ const PLAIN_TEXT_CACHE_LIMIT = 500;
 const PLAIN_TEXT_CACHE_MAX_SOURCE_CHARS = 80000;
 const markdownCache = new Map();
 const plainTextCache = new Map();
+onSessionEnd(() => { markdownCache.clear(); plainTextCache.clear(); });
 
 export function escapeHtmlText(value) {
 	return String(value ?? "")
@@ -106,9 +108,16 @@ function createMarkdownRenderer({highlightCode = true} = {}) {
 				return referenceChipOpen(reference) + escapeReferenceHtml(reference.label) + referenceChipClose(reference);
 			}
 		}
+		token.attrSet('href', contextResourceUrl(href));
 		token.attrSet("target", "_blank");
 		token.attrSet("rel", "noopener noreferrer");
 		return self.renderToken(tokens, idx, options);
+	};
+	const imageRule = renderer.renderer.rules.image;
+	renderer.renderer.rules.image = (tokens, idx, options, env, self) => {
+		tokens[idx].attrSet('src', contextResourceUrl(tokens[idx].attrGet('src')));
+		tokens[idx].attrSet('referrerpolicy', 'no-referrer');
+		return imageRule(tokens, idx, options, env, self);
 	};
 	renderer.renderer.rules.link_close = (tokens, idx, options, _env, self) => tokens[idx].meta?.referenceConsumed ? "" : self.renderToken(tokens, idx, options);
 	renderer.renderer.rules.table_open = () => `<div class="md-table-scroll"><table>`;

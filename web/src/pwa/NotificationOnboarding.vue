@@ -1,6 +1,7 @@
 <script setup>
 import {onBeforeUnmount, onMounted, reactive} from "vue";
 import {ElMessage} from "element-plus";
+import { authMode } from '../authMode.js';
 import {Bell} from "@lucide/vue";
 import {createNotificationOnboarding, NOTIFICATION_SETTINGS_PATH} from "./notificationOnboarding.js";
 
@@ -40,7 +41,7 @@ onBeforeUnmount(() => {
         <p>任务完成、执行失败或需要你确认时，通过系统通知提醒你。</p>
       </div>
     </div>
-    <p v-if="state.phase === 'offer'" class="notification-onboarding__detail">适用于当前浏览器或已安装的 OpenBear 应用。不展示回答正文，与 Telegram 通知独立。</p>
+    <p v-if="state.phase === 'offer'" class="notification-onboarding__detail">适用于当前浏览器或已安装的 OpenBear 应用。不展示回答正文<span v-if="authMode === 'controller'">，与 Telegram 通知独立</span>。</p>
     <p v-else-if="state.phase === 'enabled'" class="notification-onboarding__detail" role="status">已完成通知订阅。可在通知设置中发送测试通知，确认系统能否收到。</p>
     <p v-else class="notification-onboarding__error" role="alert">{{ state.error }}</p>
     <div class="notification-onboarding__settings">

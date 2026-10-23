@@ -1,0 +1,5 @@
+appId: dev.openbear.app
+---
+- tapOn:
+    id: "mdlab-next"
+- waitForAnimationToEnd

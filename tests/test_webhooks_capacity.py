@@ -1,4 +1,4 @@
-"""Actual 500-event burst through bounded pre/model/post queues, no live providers."""
+"""Actual event burst exceeding every limit through bounded pre/model/post queues, no live providers."""
 import asyncio
 import json
 
@@ -27,11 +27,14 @@ async def test_bounded_actual_processes_models_and_post(env,local):
     pre='import urllib.request,json,sys\nx=json.load(sys.stdin)\nurllib.request.urlopen(urllib.request.Request('+repr(str(external.make_url('/pre')))+',data=x["actionKey"].encode())).read()\nprint(json.dumps({"decision":"continue"}))'
     post=pre.replace(str(external.make_url('/pre')),str(external.make_url('/post'))).replace('print(json.dumps({"decision":"continue"}))','print("{}")')
     # Disable time triggers: this scenario verifies count/capacity, not elapsed
-    # wall-time. 500 logical jobs still spawn 500 bounded real child processes.
-    c=await create(env,pre={'enabled':True,'code':pre,'timeoutSeconds':300},post={'enabled':True,'code':post,'timeoutSeconds':300},batching={'idleSeconds':None,'maxWaitSeconds':None,'maxEvents':100},limits={'preConcurrency':limits['pre'],'postConcurrency':limits['post'],'autoModelConcurrency':limits['model']})
-    n=120 if local else 500
+    # wall-time. Every logical pre job still spawns one bounded real child
+    # process; the event count is a multiple of maxEvents and exceeds every
+    # limit, so pre, model (5/6 batches) and post all queue behind full slots.
+    # local: revision 2 must replace maxEvents 4 with 2, else only 3 batches.
+    c=await create(env,pre={'enabled':True,'code':pre,'timeoutSeconds':300},post={'enabled':True,'code':post,'timeoutSeconds':300},batching={'idleSeconds':None,'maxWaitSeconds':None,'maxEvents':4 if local else 2},limits={'preConcurrency':limits['pre'],'postConcurrency':limits['post'],'autoModelConcurrency':limits['model']})
+    n=12 if local else 10
     if local:
-        await env.s.update(123,c['endpoint']['id'],{'expectedRevision':1,'requestId':'local-batches','config':{**c['endpoint']['config'],'batching':{'idleSeconds':None,'maxWaitSeconds':None,'maxEvents':20}}})
+        await env.s.update(123,c['endpoint']['id'],{'expectedRevision':1,'requestId':'local-batches','config':{**c['endpoint']['config'],'batching':{'idleSeconds':None,'maxWaitSeconds':None,'maxEvents':2}}})
     class Backend(FakeStreamBackend):
         seen=set()
         async def stream(self,messages,**kwargs):

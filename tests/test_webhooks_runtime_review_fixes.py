@@ -59,7 +59,9 @@ async def test_fixed_blocked_head_starves_unrelated_endpoint(env,phase):
     options={'pre':{'enabled':True,'code':'print(\'{"decision":"skip_model","outcome":"handled"}\')'}} if phase=='pre' else {'batching':{'enabled':False}}
     c=await create(env,**options)
     d=await other_endpoint(env,**options)
-    n={'pre':20,'route':500,'model':50}[phase]
+    # routing.tick/worker.tick scan the whole eligible queue without a page
+    # LIMIT, so a backlog of tens of events already forms the blocked head.
+    n={'pre':20,'route':50,'model':50}[phase]
     # Rate capacity is unrelated to the deliberately queued workload.
     env.s.config.ingress.requests_per_minute=10000
     for i in range(n):

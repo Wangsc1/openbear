@@ -1,0 +1,47 @@
+# A 阶段验收（iOS）：已登录状态下 设置 → 登录设备 → 代码编辑器，在 WebView 编辑器里输入 @mem/ 看补全。
+appId: dev.openbear.app
+---
+- runFlow:
+    when:
+      visible:
+        id: composer-input
+    commands:
+      - tapOn:
+          id: back
+- extendedWaitUntil:
+    visible: 设置
+    timeout: 10000
+- tapOn: 设置
+- extendedWaitUntil:
+    visible:
+      id: settings-sessions
+    timeout: 10000
+- tapOn:
+    id: settings-sessions
+- extendedWaitUntil:
+    visible:
+      text: .*OpenBear App.*
+    timeout: 15000
+- takeScreenshot: ios-06-sessions
+- tapOn:
+    id: sessions-back
+- scrollUntilVisible:
+    element:
+      id: open-editorlab
+    direction: DOWN
+    centerElement: true
+- tapOn:
+    id: open-editorlab
+- extendedWaitUntil:
+    visible:
+      text: .*记忆 [1-9].*
+    timeout: 20000
+- waitForAnimationToEnd
+- tapOn:
+    point: 60%,45%
+- inputText: "@mem/"
+- waitForAnimationToEnd
+- takeScreenshot: ios-07-editor-complete
+- inputText: net
+- waitForAnimationToEnd
+- takeScreenshot: ios-08-editor-filter

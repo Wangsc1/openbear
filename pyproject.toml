@@ -1,6 +1,6 @@
 [project]
 name = "openbear"
-version = "0.12.0"
+version = "0.13.0"
 description = "单人自用 Agent Web 控制台：多协议接入 Parrot（anthropic/chat/responses）+ 工具 + skills + Web 记忆系统"
 requires-python = ">=3.11"
 dependencies = [
@@ -16,6 +16,7 @@ dependencies = [
     "cryptography>=50.0.1",
     "pywebpush>=2.3,<3",
     "markdown-it-py>=4.0,<5",
+    "pillow>=12.0,<13",
 ]
 
 [project.scripts]
@@ -25,6 +26,7 @@ openbear = "app.cli:main"
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-xdist>=3.8",
     "ruff>=0.6",
 ]
 
@@ -48,6 +50,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "live: 打真实 Parrot 上游的集成冒烟测试（默认跳过，需 --run-live）",
+    "prompt_suggestions: 允许 Web 轮次结束后真正启动下一句推荐的后台请求",
 ]
 
 [tool.setuptools]

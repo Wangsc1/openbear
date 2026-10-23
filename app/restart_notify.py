@@ -7,6 +7,7 @@ process drains that queue after startup and sends a management-channel message.
 """
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import time
@@ -166,7 +167,7 @@ async def send_pending_restart_completion_notices(bot: Bot, svc: Services) -> in
 
     sent = 0
     failed: list[dict[str, Any]] = []
-    for entry in entries:
+    for index, entry in enumerate(entries):
         try:
             chat_id = int(entry.get("chatId") or 0)
         except (TypeError, ValueError):
@@ -176,6 +177,9 @@ async def send_pending_restart_completion_notices(bot: Bot, svc: Services) -> in
         try:
             await send_rich(bot, chat_id, await build_restart_completion_message(svc, chat_id))
             sent += 1
+        except asyncio.CancelledError:
+            restore_restart_completion_notices(svc.config, failed + entries[index:])
+            raise
         except Exception:
             log.exception("发送重启完成通知失败", 会话=chat_id)
             failed.append(entry)

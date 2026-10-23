@@ -1,6 +1,8 @@
 # ruff: noqa: F401,F403,F405
 from __future__ import annotations
 
+from app.agent.native_continuation import validate_model_context
+from app.agents import live_state as agent_live_state
 from app.context.configuration import CONTEXT_STRATEGIES, normalize_strategy
 from app.interaction_data import canonical_questionnaire_answers as _canonical_questionnaire_answers
 from app.interaction_data import redact_result
@@ -540,6 +542,8 @@ class WebAdminChatHandlersMixin:
         from app.cron.presentation import enrich_operations as enrich_cron_operations
         await enrich_operations(self.db.conn, operations)
         await enrich_cron_operations(self.db.conn, operations, conv_uuid)
+        from app.instances.presentation import enrich_operations as enrich_instance_operations
+        await enrich_instance_operations(self.db.conn, operations, conv_uuid)
         return web.json_response({"ok": True, "conversationUuid": conv_uuid, "operations": operations,
                                   "nextBeforeDisplaySeq": min(op["displaySeq"] for op in operations)})
 
@@ -570,7 +574,7 @@ class WebAdminChatHandlersMixin:
         operation = await cur.fetchone()
         if operation is None:
             return web.json_response({"ok": False, "error": "operation_detail_not_found"}, status=404)
-        public = operation_public(dict(operation), include_tool_details=True)
+        public = self._live_operation_public(conv_uuid, dict(operation), include_tool_details=True)
         return web.json_response({
             "ok": True,
             "conversationUuid": conv_uuid,
@@ -694,6 +698,18 @@ class WebAdminChatHandlersMixin:
             )
             await self.db.conn.commit()
         steering.clear(internal_chat_id)
+        collab = getattr(self, "collab", None)
+        if collab is not None and conv_uuid and requested_by != "collab":
+            with contextlib.suppress(Exception):
+                await collab.on_conversation_stopped(conv_uuid)
+            groups = getattr(self, "collab_groups", None)
+            if groups is not None:
+                # Stopping a lead stops its members' work; a member stop stays local.
+                for member_uuid in await groups.member_uuids_for_lead(conv_uuid):
+                    member = await self._conversation_row(int(row["owner_chat_id"]), member_uuid)
+                    if member and not int(member.get("archived_at") or 0):
+                        with contextlib.suppress(Exception):
+                            await self._stop_web_conversation(member, requested_by="collab", message="主会话已停止")
         live = self._live_for(row)
         await live.publish({"type": "pending_steering", "action": "clear", "items": []})
         if run_still_running:
@@ -828,7 +844,9 @@ class WebAdminChatHandlersMixin:
             edited_context = await branch_settings(self.db, conv_uuid)
             manager = ContextManager(store, WindowPolicy(self.llm_factory.context_window(label),
                 trigger_tokens=trigger, trigger_ratio=self.config.agent.compact_ratio,
-                retain_ratio=self.config.context_management.retain_ratio, max_output_tokens=max_tokens),
+                retain_tokens=self.config.context_management.retain_tokens,
+                dialogue_tokens=self.config.context_management.dialogue_tokens, max_output_tokens=max_tokens,
+                tool_result_artifact_tokens=self.config.context_management.tool_result_artifact_tokens),
                 backend=backend, model=model, model_label=label, strategy_resolver=strategy, on_rotated=done,
                 frozen_system=bool(edited_context),
                 strategies={"model_summary": ModelSummaryStrategy(self.config, self.llm_factory, label, on_model_call=account)})
@@ -1001,11 +1019,13 @@ class WebAdminChatHandlersMixin:
             params.append(archived_at)
         conv_uuid = str(row.get("conversation_uuid") or "")
         params.extend([conv_uuid, session.chat_id])
-        await self.db.conn.execute(
-            f"UPDATE web_conversations SET {', '.join(assignments)} WHERE conversation_uuid=? AND owner_chat_id=?",
-            tuple(params),
-        )
-        await self.db.conn.commit()
+        async with self.db.write_transaction(label="web-conversation-patch") as conn:
+            await conn.execute(
+                f"UPDATE web_conversations SET {', '.join(assignments)} WHERE conversation_uuid=? AND owner_chat_id=?",
+                tuple(params),
+            )
+        if has_archived and getattr(self, "collab_groups", None) is not None:
+            await self.collab_groups.follow_lead(conv_uuid, archived_at=archived_at)
         self._invalidate_tree_status(int(session.chat_id))
         if has_archived:
             getattr(self, "_tree_projection_ready", set()).discard(int(session.chat_id))
@@ -1294,7 +1314,8 @@ class WebAdminChatHandlersMixin:
                     policy = WindowPolicy(
                         context_window=int(resolved[1].context_window or 0) if resolved else 0,
                         trigger_tokens=threshold, trigger_ratio=self.config.agent.compact_ratio,
-                        retain_ratio=self.config.context_management.retain_ratio, max_output_tokens=max_output,
+                        retain_tokens=self.config.context_management.retain_tokens,
+                        dialogue_tokens=self.config.context_management.dialogue_tokens, max_output_tokens=max_output,
                     )
                     restart_messages = await controller_restart_selection(
                         dao, internal_chat_id, first_message_id, policy=policy,
@@ -1474,15 +1495,46 @@ class WebAdminChatHandlersMixin:
         conv_uuid: str,
         internal_chat_id: int,
     ) -> web.Response:
+        result = await self._delete_web_conversation_locked(
+            owner_chat_id=int(session.chat_id),
+            conv_uuid=conv_uuid,
+            internal_chat_id=internal_chat_id,
+        )
+        if not result.get("ok"):
+            return web.json_response(result, status=409)
+        await self.audit(
+            "web.conversation.delete",
+            actor="web",
+            chat_id=session.chat_id,
+            ip=request.remote or "",
+            detail=result["auditDetail"],
+        )
+        return web.json_response({
+            "ok": True,
+            "conversationUuid": conv_uuid,
+            "taskMemoriesDeleted": result["taskMemoriesDeleted"],
+        })
+
+    async def _delete_web_conversation_locked(
+        self,
+        *,
+        owner_chat_id: int,
+        conv_uuid: str,
+        internal_chat_id: int,
+    ) -> dict[str, Any]:
+        """Stop what the conversation owns and delete it with every derived record.
+
+        Shared by the user's delete and automatic cleanups. The caller holds the
+        conversation's ``web_conversation_delete`` operation lock. When something is
+        still busy nothing is deleted and the returned ``{"ok": False, ...}`` is
+        the HTTP 409 body.
+        """
         stopped_run = False
         if self.runs is not None:
             had_running_controller = self.runs.is_running(internal_chat_id)
             stopped_run = await self.runs.cancel_and_wait(internal_chat_id, timeout_s=2.0)
             if had_running_controller and (not stopped_run or self.runs.is_running(internal_chat_id)):
-                return web.json_response(
-                    {"ok": False, "error": "conversation_delete_busy", "message": "会话仍在停止中，请稍后重试删除。"},
-                    status=409,
-                )
+                return {"ok": False, "error": "conversation_delete_busy", "message": "会话仍在停止中，请稍后重试删除。"}
         stopped_tasks = 0
         if self.agents is not None:
             try:
@@ -1494,16 +1546,10 @@ class WebAdminChatHandlersMixin:
                     require_terminated=True,
                 )
             except TimeoutError:
-                return web.json_response(
-                    {"ok": False, "error": "conversation_delete_busy", "message": "后台 Agent 仍在停止中，请稍后重试删除。"},
-                    status=409,
-                )
+                return {"ok": False, "error": "conversation_delete_busy", "message": "后台 Agent 仍在停止中，请稍后重试删除。"}
         killed_processes = processes.kill_for_chat(internal_chat_id)
         if processes.active_for_chat(internal_chat_id):
-            return web.json_response(
-                {"ok": False, "error": "conversation_delete_busy", "message": "会话子进程仍在停止中，请稍后重试删除。"},
-                status=409,
-            )
+            return {"ok": False, "error": "conversation_delete_busy", "message": "会话子进程仍在停止中，请稍后重试删除。"}
         steering.clear(internal_chat_id)
 
         live = self._web_live_streams.pop(conv_uuid, None)
@@ -1513,7 +1559,7 @@ class WebAdminChatHandlersMixin:
 
         rath_deleted = {"tasks": 0, "events": 0, "artifacts": 0, "controls": 0, "taskMemories": 0}
         task_memory_deleted = 0
-        async with self._web_operation_lock(conv_uuid):
+        async with self._web_operation_lock(conv_uuid), self.db.write_transaction(label="web-conversation-delete"):
             await self.db.conn.execute("DELETE FROM web_operation_messages WHERE conversation_uuid=?", (conv_uuid,))
             await self.db.conn.execute("DELETE FROM web_event_frames WHERE conversation_uuid=?", (conv_uuid,))
             await self.db.conn.execute("DELETE FROM web_operations WHERE conversation_uuid=?", (conv_uuid,))
@@ -1543,12 +1589,16 @@ class WebAdminChatHandlersMixin:
         self._web_stopped_task_uuids.pop(conv_uuid, None)
         self._web_task_notification_deferred.pop(conv_uuid, None)
         await self.interactions.cancel_conversation(conv_uuid)
-        await self.audit(
-            "web.conversation.delete",
-            actor="web",
-            chat_id=session.chat_id,
-            ip=request.remote or "",
-            detail={
+        if getattr(self, "collab", None) is not None:
+            with contextlib.suppress(Exception):
+                await self.collab.on_conversation_stopped(conv_uuid)
+            await self.collab_groups.forget_member(conv_uuid)
+            await self.collab_groups.forget_lead(conv_uuid)
+        return {
+            "ok": True,
+            "conversationUuid": conv_uuid,
+            "taskMemoriesDeleted": task_memory_deleted,
+            "auditDetail": {
                 "conversationUuid": conv_uuid,
                 "internalChatId": internal_chat_id,
                 "stoppedRun": stopped_run,
@@ -1557,12 +1607,7 @@ class WebAdminChatHandlersMixin:
                 "rathDeleted": rath_deleted,
                 "taskMemoriesDeleted": task_memory_deleted,
             },
-        )
-        return web.json_response({
-            "ok": True,
-            "conversationUuid": conv_uuid,
-            "taskMemoriesDeleted": task_memory_deleted,
-        })
+        }
 
     async def _conversation_run_config_public(
         self, owner_chat_id: int, conversation_uuid: str,
@@ -1641,45 +1686,70 @@ class WebAdminChatHandlersMixin:
         model = body["model"].strip()
         if not model:
             return web.json_response({"ok": False, "error": "model_required"}, status=400)
-        running = bool(self.runs is not None and self.runs.is_running(internal_chat_id))
-        if self.model_selection is None or self.config.models.resolve(model) is None:
+        model_meta = self.config.models.resolve(model)
+        if self.model_selection is None or model_meta is None:
             return web.json_response({"ok": False, "error": "model_not_found"}, status=404)
-        current_model = str(row.get("model") or "") or getattr(self.model_selection, "current", "") or self.config.models.primary
         messages = MessageDAO(self.db)
-        if await messages.has_history(internal_chat_id) and self.model_selection.family_of(current_model) != self.model_selection.family_of(model):
-            return web.json_response({"ok": False, "error": "cross_family_requires_new_session"}, status=409)
-        levels = self._model_thinking_levels(model)
-        stored_thinking = normalize_think_level(await messages.get_thinking_level(internal_chat_id))
-        next_thinking = (
-            stored_thinking
-            if stored_thinking and stored_thinking in levels
-            else (self._model_default_thinking_level(model) if levels else "")
-        )
-        next_fast = bool(await messages.get_fast_mode(internal_chat_id) and self._model_supports_fast(model))
-        async with self.db.conn.transaction(label="web-conversation-model-and-defaults") as conn:
-            if not running and model != current_model:
-                await conn.execute("UPDATE context_windows SET usage_known=0,usage_tokens=0,route_fingerprint='',window_version=window_version+1 WHERE owner_kind='controller' AND owner_key LIKE ?", (f"controller:{internal_chat_id}:%",))
-            # Even a same-family model change starts a new provider-native chain.
-            await conn.execute(
-                "DELETE FROM controller_model_contexts WHERE chat_id=?", (internal_chat_id,)
+        # Share the acceptance lock with send/notification/handoff registration.
+        # Neither the request's row nor its initial running state owns this decision.
+        async with self.operation_locks.chat(internal_chat_id, "web_model"):
+            row = await self._conversation_row(session.chat_id, str(row["conversation_uuid"]), require=True)
+            current_model = str(row.get("model") or "") or getattr(self.model_selection, "current", "") or self.config.models.primary
+            levels = self._model_thinking_levels(model)
+            stored_thinking = normalize_think_level(await messages.get_thinking_level(internal_chat_id))
+            next_thinking = (
+                stored_thinking
+                if stored_thinking and stored_thinking in levels
+                else (self._model_default_thinking_level(model) if levels else "")
             )
-            await conn.execute(
-                "UPDATE web_conversations SET model=?, updated_at=? WHERE conversation_uuid=? AND owner_chat_id=?",
-                (model, now_ts(), str(row["conversation_uuid"]), session.chat_id),
-            )
-            await conn.execute(
-                "UPDATE sessions SET thinking_level=?, fast_mode=?, updated_at=? WHERE chat_id=?",
-                (next_thinking, 1 if next_fast else 0, now_ts(), internal_chat_id),
-            )
-            await WebConversationDefaultsDAO(self.db).patch_or_seed(
-                session.chat_id,
-                {
-                    "main_model": model,
-                    "main_thinking_level": next_thinking,
-                    "main_fast_mode": 1 if next_fast else 0,
-                },
-                self._web_builtin_run_defaults(),
-            )
+            next_fast = bool(await messages.get_fast_mode(internal_chat_id) and self._model_supports_fast(model))
+            async with self.db.conn.transaction(label="web-conversation-model-and-defaults") as conn:
+                # A previous runner may finish while preferences/the writer were
+                # awaited. No new runner can register through the acceptance lock.
+                running = bool(self.runs is not None and self.runs.is_running(internal_chat_id))
+                if not running and model != current_model:
+                    session_id = await messages.current_session_uuid(internal_chat_id)
+                    private_state = await messages.load_controller_model_context(
+                        internal_chat_id, conversation_uuid=str(row["conversation_uuid"]),
+                        session_id=session_id, protocol=model_meta[0].protocol,
+                        model=model_meta[1].id, model_label=model,
+                    )
+                    keep_private = (
+                        private_state is not None
+                        and all(isinstance(item, dict) for item in private_state["messages"])
+                        and validate_model_context(private_state["messages"])
+                    )
+                    if not keep_private:
+                        await conn.execute("DELETE FROM controller_model_contexts WHERE chat_id=?", (internal_chat_id,))
+                        cur = await conn.execute(
+                            "SELECT state_json FROM context_windows WHERE owner_key=?",
+                            (f"controller:{internal_chat_id}:{session_id}",),
+                        )
+                        window = await cur.fetchone()
+                        # A->(next B)->A has not left A. Even without a private
+                        # chain, its independent window can still own A's usage.
+                        window_model = json.loads(window["state_json"]).get("requestModelLabel") if window else None
+                        if window_model != model:
+                            await conn.execute("UPDATE context_windows SET usage_known=0,usage_tokens=0,route_fingerprint='',window_version=window_version+1 WHERE owner_kind='controller' AND owner_key LIKE ?", (f"controller:{internal_chat_id}:%",))
+                # Active runs retain their native chain and may keep saving it.
+                # The next actual model load rejects an incompatible identity.
+                await conn.execute(
+                    "UPDATE web_conversations SET model=?, updated_at=? WHERE conversation_uuid=? AND owner_chat_id=?",
+                    (model, now_ts(), str(row["conversation_uuid"]), session.chat_id),
+                )
+                await conn.execute(
+                    "UPDATE sessions SET thinking_level=?, fast_mode=?, updated_at=? WHERE chat_id=?",
+                    (next_thinking, 1 if next_fast else 0, now_ts(), internal_chat_id),
+                )
+                await WebConversationDefaultsDAO(self.db).patch_or_seed(
+                    session.chat_id,
+                    {
+                        "main_model": model,
+                        "main_thinking_level": next_thinking,
+                        "main_fast_mode": 1 if next_fast else 0,
+                    },
+                    self._web_builtin_run_defaults(),
+                )
         row["model"] = model
         run_config = await self._conversation_run_config_public(session.chat_id, str(row["conversation_uuid"]))
         await self.audit("web.conversation.model", actor="web", chat_id=session.chat_id, ip=request.remote or "", detail={"conversationUuid": row.get("conversation_uuid"), "model": model, "nextRun": running})
@@ -1858,16 +1928,20 @@ class WebAdminChatHandlersMixin:
         async with self.operation_locks.chat_unless(internal_chat_id, "web_send", reject_operation="web_manual_compact") as acquired:
             if not acquired:
                 return {"ok": False, "error": "busy", "message": "上下文压缩中，请稍后发送。"}
+            current = await self._conversation_row(
+                int(row["owner_chat_id"]), str(row["conversation_uuid"]), require=not bool(telegram_submission_id),
+            )
             if telegram_submission_id:
-                current = await self._conversation_row(int(row["owner_chat_id"]), str(row["conversation_uuid"]))
                 if (
                     not self.config.web.enabled
+                    or getattr(getattr(self.config, "managed", None), "enabled", False)
                     or int(row["owner_chat_id"]) not in self.config.telegram.whitelist_ids
                     or not current
                     or int(current.get("archived_at") or 0)
                 ):
                     return {"ok": False, "error": "conversation_unavailable"}
-                row = current
+            # The WebSocket snapshot may predate a queued HTTP model save.
+            row = current
             return await self._start_or_steer_web_conversation_locked(
                 row, text, media, live, telegram_submission_id=telegram_submission_id, reference_order=reference_order,
             )
@@ -1960,12 +2034,6 @@ class WebAdminChatHandlersMixin:
             text = effective_reference_text(text, reference_manifest)
             visible_user_text = effective_reference_text(visible_user_text, reference_manifest)
             input_metadata.update(referenceBundleId=reference_bundle_id, references=reference_manifest)
-        rec_service = getattr(self, "recommendations", None)
-        if rec_service is not None:
-            # Feedback only: a card brought into a sent message, or a later human
-            # follow-up in a conversation that started from a card.
-            with contextlib.suppress(Exception):
-                await rec_service.observe_user_message(row, reference_manifest or [], turn_uuid)
         # While the main controller is alive (including its event-driven wait),
         # interruptions stay in the original root and wake that controller.
         # A detached/waiting Agent alone must not strand input in this queue.
@@ -2092,7 +2160,7 @@ class WebAdminChatHandlersMixin:
                     "displayName": self._background_task_display_name(task_row),
                     "title": getattr(task_row, "title", "") or "",
                     "status": getattr(task_row, "status", "") or "",
-                    "currentStatus": getattr(task_row, "current_status", "") or "",
+                    "currentStatus": agent_live_state.current_status(task_row),
                     "agentSessionUuid": getattr(task_row, "agent_session_uuid", "") or "",
                 }
                 coordinator = getattr(self.agents, "plan_coordinator", None) if self.agents is not None else None
@@ -2357,6 +2425,8 @@ class WebAdminChatHandlersMixin:
                             await _send_json(public_event)
                     elif event_type == "message_visibility.changed":
                         await _send_json({"type": event_type, "visibility": event.get("visibility")})
+                    elif event_type == "collab_requests":
+                        await _send_json({"type": event_type, "conversationUuid": event.get("conversationUuid") or ""})
                     elif event_type == "web_confirmation":
                         await _send_json({
                             "type": "web_confirmation",
@@ -2372,10 +2442,19 @@ class WebAdminChatHandlersMixin:
                             "itemIds": event.get("itemIds") if isinstance(event.get("itemIds"), list) else [],
                             "addedItem": event.get("addedItem") if isinstance(event.get("addedItem"), dict) else {},
                         })
+                    elif event_type == "prompt_suggestions":
+                        await _send_json({
+                            "type": "prompt_suggestions",
+                            "turnUuid": event.get("turnUuid") or "",
+                            "items": event.get("items") if isinstance(event.get("items"), list) else [],
+                        })
                     frames = event.get("_webFrames") if isinstance(event.get("_webFrames"), list) else []
                     for frame in frames:
                         if isinstance(frame, dict):
                             await _send_frame_once(frame)
+                    live_ops = event.get("_webLive") if isinstance(event.get("_webLive"), list) else []
+                    if live_ops:
+                        await _send_json({"type": "live", "ops": live_ops})
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -2437,6 +2516,13 @@ class WebAdminChatHandlersMixin:
                     break
                 cursor = next_cursor
 
+        async def _send_live_snapshot(*, requested: bool = False) -> None:
+            # Taken under the operation lock: no live update is half-applied.
+            async with self._web_operation_lock(conv_uuid_for_log):
+                ops = [entry.snapshot() for entry in self._live_operation_store().pending(conv_uuid_for_log)]
+            if ops or requested:
+                await _send_json({"type": "live_snapshot", "ops": ops})
+
         writer: asyncio.Task[Any] | None = None
         try:
             if incremental_bootstrap:
@@ -2450,6 +2536,9 @@ class WebAdminChatHandlersMixin:
                     "frameSeq": last_sent_frame_seq,
                     "pendingConfirmations": self._pending_web_confirmations(conv_uuid_for_log),
                     "pendingSteering": steering.pending_items(internal_chat_id_for_log),
+                    "promptSuggestions": self._prompt_suggestions_public(
+                        await self._conversation_row(owner_chat_id_for_log, conv_uuid_for_log)
+                    ),
                 })
             else:
                 # Legacy clients retain the original full-state bootstrap.
@@ -2460,6 +2549,8 @@ class WebAdminChatHandlersMixin:
                 # than the reconnect query's stale afterFrameSeq.
                 last_sent_frame_seq = int(state_payload.get("frameSeq") or 0)
                 await _send_json({"type": "state", "state": state_payload, "conversations": await self._list_web_conversations(session.chat_id, limit=100)})
+            # Live updates missed while disconnected are not in the frame log.
+            await _send_live_snapshot()
             writer = asyncio.create_task(_writer())
             async for msg in ws:
                 if msg.type == web.WSMsgType.TEXT:
@@ -2479,6 +2570,8 @@ class WebAdminChatHandlersMixin:
                     kind = str(data.get("type") or "")
                     if kind == "ping":
                         await _send_json({"type": "pong", "ts": now_ts()})
+                    elif kind == "live_resync":
+                        await _send_live_snapshot(requested=True)
                     elif kind == "refresh":
                         # A refresh replaces the browser's operation snapshot.
                         # Hold the WS send boundary across materialization and

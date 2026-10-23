@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import copy
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +14,8 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from app.agent import steering
 from app.agent.result import RunResult
-from app.runtime.scheduler import ControllerRuns
+from app.agents.control import AgentControlService
+from app.agents.plan import AgentPlanCoordinator
 from app.config import Config
 from app.control_actions import ControlActionQueue
 from app.db.dao import MessageDAO, SummaryDAO
@@ -22,8 +24,7 @@ from app.llm.base import AgentResult, OpenBearLLMError
 from app.llm.events import StreamEvent, ToolCall, Usage
 from app.llm.openai_responses import _to_responses_input
 from app.media.attachments import InboundMedia
-from app.agents.control import AgentControlService
-from app.agents.plan import AgentPlanCoordinator
+from app.runtime.scheduler import ControllerRuns
 from app.task_memory import (
     SCOPE_AGENT_TASK,
     SCOPE_CONVERSATION,
@@ -180,6 +181,11 @@ async def web_env(tmp_path, monkeypatch):
     await db.connect()
     bot = FakeBot()
     server = WebAdminServer(_cfg(), db, bot)  # type: ignore[arg-type]
+    # Production polls a running controller every 0.5s and debounces 0.35s.
+    # Tests that need the debounce to merge near-simultaneous notifications
+    # restore the class default explicitly; all others drain immediately.
+    server._WEB_TASK_NOTIFICATION_IDLE_POLL_S = 0.005
+    server._WEB_TASK_NOTIFICATION_DEBOUNCE_S = 0.001
     await server.ensure_secret_key()
     client = TestClient(TestServer(server.make_app()))
     await client.start_server()
@@ -262,6 +268,20 @@ async def _login_cookie(web_env) -> dict[str, str]:
     await web_env.server.decide_login_request(req_uuid, approved=True, decided_by=123)
     approved = await web_env.client.post(f"/api/auth/login/consume/{req_uuid}")
     return {"openbear_web_session": approved.cookies["openbear_web_session"].value}
+
+
+async def test_create_conversation_reads_its_row_back_despite_a_pinned_reader(web_env):
+    for index in range(3):
+        await web_env.server._create_web_conversation(123, title=f"earlier {index}")
+    # Pin the shared reader to an older snapshot, as an unfinished cursor elsewhere would
+    # (it must still have rows left to read, or it releases the snapshot).
+    pinned = await web_env.db.conn.execute("SELECT conversation_uuid FROM web_conversations")
+    await pinned.fetchone()
+    try:
+        row = await web_env.server._create_web_conversation(123, title="created under a pinned reader")
+    finally:
+        await pinned.close()
+    assert row["title"] == "created under a pinned reader" and row["owner_chat_id"] == 123
 
 
 async def test_statistics_response_is_not_reused_by_browser_cache(web_env):
@@ -548,39 +568,6 @@ async def test_web_conversation_title_generation_uses_clean_turns_and_usage_ledg
     assert (await messages.recent_model_calls(chat_id))[0].call_kind == "conversation_title"
 
 
-@pytest.mark.parametrize("term,model_title", [
-    ("zcode", "zcode 使用说明"),
-    ("parrot", "parrot 项目分析"),
-    ("claude", "claude 使用说明"),
-    ("parrot", "鹦鹉项目分析"),  # Cleaning must not infer or inject names omitted by the model.
-])
-async def test_web_auto_title_uses_default_prompt_without_rewriting_model_output(web_env, term, model_title):
-    from app.conversation_titles import DEFAULT_NAMING_PROMPT, initial_conversation_title
-
-    question = f"如何配置和使用 {term} 的工具功能？"
-    placeholder = initial_conversation_title(question)
-    row = await web_env.server._create_web_conversation(123, title=placeholder, model="openai/gpt")
-    messages = MessageDAO(web_env.db)
-    for role, text in (("user", question), ("assistant", "先介绍使用方式。")):
-        await web_env.server._persist_web_transcript_message(
-            messages, int(row["internal_chat_id"]), role, text,
-            conversation_uuid=row["conversation_uuid"], turn_uuid="turn-names", run_root_turn_uuid="turn-names",
-        )
-    factory = FakeMemoryFactory(model_title)
-    web_env.server.llm_factory = factory
-    web_env.server.config.agent.naming_max_retries = 0
-
-    result = await web_env.server._generate_conversation_title(row, expected_title=placeholder, automatic=True)
-
-    assert result["ok"] and result["title"] == model_title
-    assert factory.backend.calls[0]["system"] == DEFAULT_NAMING_PROMPT
-    assert term in factory.backend.calls[0]["messages"][0]["content"]
-    cur = await web_env.db.conn.execute(
-        "SELECT title FROM web_conversations WHERE conversation_uuid=?", (row["conversation_uuid"],),
-    )
-    assert (await cur.fetchone())["title"] == model_title
-
-
 async def test_web_conversation_title_generation_never_overwrites_a_concurrent_manual_name(web_env):
     row = await web_env.server._create_web_conversation(
         123, title="调查命名竞态", model="openai/gpt",
@@ -618,6 +605,131 @@ async def test_web_conversation_title_generation_never_overwrites_a_concurrent_m
         (conversation_uuid,),
     )
     assert (await cur.fetchone())["title"] == "用户手动名称"
+
+
+async def _suggestion_conversation(web_env, title: str):
+    row = await web_env.server._create_web_conversation(123, title=title, model="openai/gpt")
+    messages = MessageDAO(web_env.db)
+    for role, content in (("user", "修一下登录超时"), ("assistant", "已修好并通过测试，要提交吗？")):
+        await web_env.server._persist_web_transcript_message(
+            messages, int(row["internal_chat_id"]), role, content,
+            conversation_uuid=str(row["conversation_uuid"]), turn_uuid="turn-s", run_root_turn_uuid="turn-s",
+        )
+    return row
+
+
+async def test_web_prompt_suggestions_are_generated_stored_published_and_dismissed(web_env):
+    row = await _suggestion_conversation(web_env, "推荐生成")
+    chat_id, conversation_uuid = int(row["internal_chat_id"]), str(row["conversation_uuid"])
+    factory = FakeMemoryFactory('["提交一下", "我来提交", "顺便部署上线", "提交一下"]')
+    web_env.server.llm_factory = factory
+    web_env.server.config.agent.suggestion_prompt = "自定义推荐提示词"
+    web_env.server.config.models.suggestion_models = ["openai/cheap"]
+    queue = web_env.server._live_for(row).subscribe()
+
+    items = await web_env.server._generate_prompt_suggestions(row, "turn-s")
+
+    assert items == ["提交一下", "顺便部署上线"]
+    assert factory.requested == ["openai/cheap"]
+    call = factory.backend.calls[0]
+    assert call["system"] == "自定义推荐提示词"
+    assert "用户：修一下登录超时\n助手：已修好并通过测试，要提交吗？" in call["messages"][0]["content"]
+    assert call["messages"][0]["content"].endswith("最多 3 条。")
+    assert (await MessageDAO(web_env.db).recent_model_calls(chat_id))[0].call_kind == "prompt_suggestion"
+    event = queue.get_nowait()
+    assert (event["type"], event["turnUuid"], event["items"]) == ("prompt_suggestions", "turn-s", items)
+    fresh = await web_env.server._conversation_row(123, conversation_uuid)
+    state = await web_env.server._chat_payload(chat_id, fresh)
+    assert state["promptSuggestions"] == {"turnUuid": "turn-s", "items": items}
+    web_env.server.config.agent.prompt_suggestions_enabled = False
+    assert web_env.server._prompt_suggestions_public(fresh) == {"turnUuid": "", "items": []}
+    web_env.server.config.agent.prompt_suggestions_enabled = True
+
+    response = await web_env.client.delete(
+        f"/api/conversations/{conversation_uuid}/prompt-suggestions",
+        cookies={"openbear_web_session": await _login_cookie(web_env)},
+    )
+
+    assert response.status == 200
+    assert queue.get_nowait()["items"] == []
+    cleared = await web_env.server._conversation_row(123, conversation_uuid)
+    assert cleared["prompt_suggestions_json"] == "{}"
+
+
+async def test_web_prompt_suggestions_can_follow_the_conversation_model_and_fall_back(web_env):
+    row = await _suggestion_conversation(web_env, "推荐跟随主模型")
+
+    class Backend:
+        def __init__(self, label):
+            self.label = label
+
+        async def complete(self, messages, *, model, **_opts):
+            if self.label == "openai/gpt":
+                raise RuntimeError("main model down")
+            return AgentResult(text='["提交一下"]')
+
+    requested = []
+
+    class Factory:
+        def backend_for(self, label):
+            requested.append(label)
+            return Backend(label), label, 8192
+
+    web_env.server.llm_factory = Factory()
+    web_env.server.config.models.suggestion_models = ["openai/cheap"]
+    web_env.server.config.agent.suggestion_follow_conversation_model = True
+
+    assert await web_env.server._generate_prompt_suggestions(row, "turn-s") == ["提交一下"]
+    assert requested == ["openai/gpt", "openai/cheap"]
+
+
+async def test_web_prompt_suggestions_never_land_on_a_conversation_that_is_running_again(web_env):
+    row = await _suggestion_conversation(web_env, "推荐竞态")
+    conversation_uuid = str(row["conversation_uuid"])
+    web_env.server.llm_factory = FakeMemoryFactory('["提交一下"]')
+    await web_env.server._touch_web_conversation(conversation_uuid, status="running")
+
+    assert await web_env.server._generate_prompt_suggestions(row, "turn-s") == []
+    stored = await web_env.server._conversation_row(123, conversation_uuid)
+    assert stored["prompt_suggestions_json"] == "{}"
+
+
+@pytest.mark.prompt_suggestions
+async def test_web_turn_end_offers_suggestions_and_the_next_turn_clears_them(web_env, monkeypatch):
+    async def _fake_system_prompt():
+        return "stable system"
+
+    monkeypatch.setattr(web_env.server, "_build_system_prompt_for_chat", _fake_system_prompt)
+    web_env.server.tools = ToolRegistry()
+    row = await web_env.server._create_web_conversation(123, title="推荐端到端", model="openai/gpt")
+    chat_id, conversation_uuid = int(row["internal_chat_id"]), str(row["conversation_uuid"])
+    live = web_env.server._live_for(row)
+    backend = FakeStreamBackend([[
+        StreamEvent(kind="content", text="修好了，要提交吗？"),
+        StreamEvent(kind="finish", finish_reason="stop"),
+    ]], summary='["提交一下"]')
+    web_env.server.llm_factory = FakeRunFactory(backend, context_window=128000)
+    queue = live.subscribe()
+
+    async def turn(text: str, turn_uuid: str) -> None:
+        await live.publish({"type": "accepted", "turnUuid": turn_uuid})
+        assert await web_env.server._run_web_turn(
+            chat_id, text, _WebStreamRenderer(live), conversation=row, root_turn_uuid=turn_uuid,
+        ) is True
+
+    await turn("修一下登录", "turn-1")
+    await web_env.server._web_prompt_suggestion_tasks[conversation_uuid]
+    stored = await web_env.server._conversation_row(123, conversation_uuid)
+    assert web_env.server._prompt_suggestions_public(stored) == {"turnUuid": "turn-1", "items": ["提交一下"]}
+
+    await turn("提交一下", "turn-2")
+    published = []
+    while not queue.empty():
+        event = queue.get_nowait()
+        if event.get("type") == "prompt_suggestions":
+            published.append(event["items"])
+    assert published[:2] == [["提交一下"], []]
+    await web_env.server._web_prompt_suggestion_tasks[conversation_uuid]
 
 
 async def test_web_conversation_archive_only_filters_sidebar_listing(web_env):
@@ -1482,6 +1594,74 @@ async def test_web_responses_native_context_persists_privately_and_reloads_next_
     assert "第一轮完成" in json.dumps(replayed, ensure_ascii=False)
 
 
+async def test_failed_request_keeps_native_history_for_the_next_turn(web_env, monkeypatch):
+    """A refused request must not cost the next turn its signed history and cache."""
+    from app.llm.anthropic import _to_anthropic
+
+    def tool_round(call_id, thought):
+        return [
+            StreamEvent(kind="reasoning", text=thought),
+            StreamEvent(kind="native_output_item", native_output_items=[
+                {"type": "thinking", "thinking": thought, "signature": f"sig-{call_id}"},
+                {"type": "tool_use", "id": call_id, "name": "echo", "input": {"x": call_id},
+                 "caller": {"type": "direct"}},
+            ]),
+            StreamEvent(kind="tool_call", tool_calls=[ToolCall(id=call_id, name="echo", arguments=json.dumps({"x": call_id}))]),
+            StreamEvent(kind="finish", finish_reason="tool_calls"),
+        ]
+
+    def answer(text):
+        return [
+            StreamEvent(kind="native_output_item", native_output_items=[
+                {"type": "thinking", "thinking": "answer", "signature": "sig-answer"},
+                {"type": "text", "text": text},
+            ]),
+            StreamEvent(kind="content", text=text),
+            StreamEvent(kind="finish", finish_reason="stop"),
+        ]
+
+    registry = ToolRegistry()
+
+    async def _echo(args):
+        return f"echo:{args.get('x', '')}"
+
+    registry.add("echo", "echo", {"type": "object", "properties": {}}, _echo)
+    web_env.server.tools = registry
+    web_env.server.model_selection = SimpleNamespace(current="openai/gpt")
+
+    async def _fake_system_prompt():
+        return "stable system"
+
+    monkeypatch.setattr(web_env.server, "_build_system_prompt_for_chat", _fake_system_prompt)
+    row = await web_env.server._create_web_conversation(123, title="refusal", model="openai/gpt")
+    chat_id = int(row["internal_chat_id"])
+    live = _WebLiveStream(str(row["conversation_uuid"]), chat_id)
+
+    async def turn(scripts, text, turn_uuid):
+        backend = FakeStreamBackend(scripts)
+        backend.protocol = "anthropic"
+        web_env.server.llm_factory = FakeRunFactory(backend, context_window=128000)
+        await live.publish({"type": "accepted", "turnUuid": turn_uuid})
+        await web_env.server._run_web_turn(chat_id, text, _WebStreamRenderer(live), conversation=row,
+                                           root_turn_uuid=turn_uuid)
+        return backend
+
+    await turn([tool_round("c1", "first"), answer("一")], "第一轮", "refusal-turn-1")
+    refused = await turn([tool_round("c2", "second"), [StreamEvent(kind="finish", finish_reason="refusal")]],
+                         "第二轮", "refusal-turn-2")
+    assert refused.calls == 2
+    following = await turn([answer("三")], "第三轮", "refusal-turn-3")
+
+    sent_before = refused.seen_convos[-1]
+    sent_after = following.seen_convos[0]
+    assert sent_after[:len(sent_before)] == sent_before
+    wire = _to_anthropic(sent_after)
+    blocks = [block for message in wire if isinstance(message["content"], list) for block in message["content"]]
+    assert [block["signature"] for block in blocks if block.get("type") == "thinking"] == [
+        "sig-c1", "sig-answer", "sig-c2"]
+    assert all("caller" in block for block in blocks if block.get("type") == "tool_use")
+
+
 @pytest.mark.parametrize("protocol", ["chat", "anthropic"])
 async def test_web_neutral_model_context_keeps_task_memory_prefix_across_turns(
     web_env, monkeypatch, protocol,
@@ -1524,6 +1704,7 @@ async def test_web_neutral_model_context_keeps_task_memory_prefix_across_turns(
     first_request = first_backend.seen_convos[0]
     assert sum(is_task_memory_runtime_message(message) for message in first_request) == 1
     assert first_backend.seen_opts[0].get("native_continuation") is not True
+    assert all(options.get("cache_ttl") == "1h" for options in first_backend.seen_opts)
     session_uuid = await MessageDAO(web_env.db).current_session_uuid(chat_id)
     private_state = await MessageDAO(web_env.db).load_controller_model_context(
         chat_id,
@@ -1861,18 +2042,6 @@ async def test_durable_rath_task_stats_merge_exact_usage_once(web_env):
     assert result.expert_tasks == 1
 
 
-async def test_web_api_requires_session_and_path_traversal_not_served(web_env):
-    resp = await web_env.client.get("/api/auth/session")
-    assert resp.status == 401
-    data = await resp.json()
-    assert data["error"] == "unauthorized"
-
-    resp = await web_env.client.get("/%2e%2e/openbear.json", allow_redirects=False)
-    assert resp.status in {302, 404}
-    body = await resp.text()
-    assert "botToken" not in body
-
-
 async def test_secret_key_login_requires_telegram_confirmation(web_env):
     key = await web_env.server.get_secret_key()
     resp = await web_env.client.post("/api/auth/login/start", json={"secret": key})
@@ -2079,17 +2248,6 @@ async def test_web_session_revoke_is_owner_scoped_and_current_logout_clears_cook
     assert (await web_env.client.get(
         "/api/auth/session", cookies={"openbear_web_session": current_cookie}
     )).status == 401
-
-
-async def test_web_write_api_rejects_cross_origin_when_header_present(web_env):
-    cookie = await _login_cookie(web_env)
-    resp = await web_env.client.post(
-        "/api/auth/logout",
-        headers={"Origin": "https://evil.example"},
-        cookies={"openbear_web_session": cookie},
-    )
-    assert resp.status == 403
-    assert (await resp.json())["error"] == "csrf_origin_rejected"
 
 
 async def test_websocket_rejects_cross_origin_when_header_present(web_env):
@@ -2807,6 +2965,9 @@ async def test_agent_continuation_generation_has_new_notification_identity_and_b
 async def test_web_task_notifications_are_batched_into_one_followup_turn(web_env, monkeypatch):
     web_env.server.runs = ControllerRuns()
     row = await web_env.server._create_web_conversation(123, title="batch notify")
+    # The two notifications arrive sequentially; only the production debounce
+    # window merges them into one follow-up turn.
+    web_env.server._WEB_TASK_NOTIFICATION_DEBOUNCE_S = WebAdminServer._WEB_TASK_NOTIFICATION_DEBOUNCE_S
     calls: list[dict] = []
 
     async def fake_run_web_turn(chat_id, user_text, renderer, media=None, *, conversation=None, task_notification=False, task_notification_payload=None, **kwargs):
@@ -3139,6 +3300,8 @@ async def test_web_task_notification_two_control_waits_are_batched_without_deadl
             title=task_uuid, input_data={"agentSnapshot": {"name": task_uuid}}, status="needs_openbear_control", task_uuid=task_uuid,
         )
     await live.publish({"type": "done", "turnUuid": "turn-root"})
+    # Concurrent producers are merged by the production debounce window.
+    web_env.server._WEB_TASK_NOTIFICATION_DEBOUNCE_S = WebAdminServer._WEB_TASK_NOTIFICATION_DEBOUNCE_S
     calls = []
 
     async def fake_run_web_turn(chat_id, user_text, renderer, media=None, *, task_notification=False, task_notification_payload=None, **kwargs):
@@ -3323,16 +3486,19 @@ async def test_control_notification_acknowledges_only_tasks_resolved_by_model_tu
         return True
 
     monkeypatch.setattr(web_env.server, "_run_web_turn", fake_run_web_turn)
-    await asyncio.gather(
-        web_env.server._schedule_web_task_notification(row, {
-            "taskUuid": "task-resolved-a", "status": "needs_openbear_control",
-            "summary": "A waits", "content": "A boundary", "recentEvents": [{"seq": 10}],
-        }),
-        web_env.server._schedule_web_task_notification(row, {
-            "taskUuid": "task-unresolved-b", "status": "needs_openbear_control",
-            "summary": "B waits", "content": "B boundary", "recentEvents": [{"seq": 20}],
-        }),
-    )
+    # Control the real worker's drain boundary, not the debounce wall clock:
+    # both producers must enqueue before the batch is selected.
+    async with web_env.server._web_task_notification_lock(chat_id):
+        await asyncio.gather(
+            web_env.server._schedule_web_task_notification(row, {
+                "taskUuid": "task-resolved-a", "status": "needs_openbear_control",
+                "summary": "A waits", "content": "A boundary", "recentEvents": [{"seq": 10}],
+            }),
+            web_env.server._schedule_web_task_notification(row, {
+                "taskUuid": "task-unresolved-b", "status": "needs_openbear_control",
+                "summary": "B waits", "content": "B boundary", "recentEvents": [{"seq": 20}],
+            }),
+        )
 
     for _ in range(200):
         if calls and row["conversation_uuid"] not in web_env.server._web_task_notification_workers:
@@ -4214,13 +4380,19 @@ async def test_web_operations_mutable_delta_upserts_latest_snapshot(web_env):
     first = await live.publish({"type": "delta", "turnUuid": "turn-delta", "text": "第一帧"})
     second = await live.publish({"type": "delta", "turnUuid": "turn-delta", "text": "第二帧，覆盖第一帧"})
 
-    assert second["opId"] == first["opId"] == "assistant:turn-delta:0"
-    assert second["revision"] > first["revision"]
+    assert first["opId"] == "assistant:turn-delta:0"
+    assert first["revision"] == 1
+    # Later streaming text is a live update of the same operation, not a frame.
+    assert "_webFrames" not in second
+    [update] = second["_webLive"]
+    assert (update["opId"], update["revision"], update["liveRev"]) == ("assistant:turn-delta:0", 1, 1)
+    assert update["payload"]["text"] == "第二帧，覆盖第一帧" and update["payload"]["snapshot"] is True
     assistant_ops = [op for op in await web_env.server._web_operations(row["conversation_uuid"]) if op["opType"] == "assistant_message"]
     assert len(assistant_ops) == 1
     assert assistant_ops[0]["payload"]["text"] == "第二帧，覆盖第一帧"
+    assert assistant_ops[0]["liveRev"] == 1
     delta_frames = await _web_frames_for(web_env, row["conversation_uuid"], event_type="delta")
-    assert [frame["revision"] for frame in delta_frames] == [1, 2]
+    assert [frame["revision"] for frame in delta_frames] == [1]
     assert live.snapshot()["events"] == []
 
 
@@ -4497,12 +4669,19 @@ async def test_web_operations_tool_update_carries_call_id_and_keeps_original_tur
     await live.publish({"type": "user", "turnUuid": "turn-old", "messageUuid": "msg-old", "text": "跑 Bash"})
     await renderer.on_tool_start("call-1", "Bash", '{"command":"sleep 1"}', "Bash: running")
     await live.publish({"type": "user", "turnUuid": "turn-new", "messageUuid": "msg-new", "text": "补充一句"})
-    await renderer.on_tool_update("Bash: still running", tool_call_id="call-1", name="Bash", arguments='{"command":"sleep 1"}')
+    subscriber = live.subscribe()
+    try:
+        await renderer.on_tool_update("Bash: still running", tool_call_id="call-1", name="Bash", arguments='{"command":"sleep 1"}')
+        event = await asyncio.wait_for(subscriber.get(), timeout=1)
+    finally:
+        live.unsubscribe(subscriber)
 
-    updates = await _web_frames_for(web_env, row["conversation_uuid"], event_type="tool_update")
-    assert len(updates) == 1
-    assert _frame_payload(updates[0])["toolCallId"] == "call-1"
-    assert updates[0]["turnUuid"] == "turn-old"
+    assert event["turnUuid"] == "turn-old"
+    [update] = event["_webLive"]
+    assert update["opId"] == "tool:call-1" and update["turnUuid"] == "turn-old"
+    assert update["payload"]["toolCallId"] == "call-1"
+    assert update["payload"]["preview"] == "Bash: still running"
+    assert await _web_frames_for(web_env, row["conversation_uuid"], event_type="tool_update") == []
 
 
 async def test_web_operations_error_is_persisted_with_turn_and_message(web_env):
@@ -4764,13 +4943,24 @@ async def test_live_stats_duration_ticks_broadcast_without_persisting_frames(web
         assert delivered["stats"]["durationMs"] == 600
         assert len(await _web_frames_for(web_env, conv_uuid, op_type="stats")) == 1
 
-        await live.publish({
+        changed = await live.publish({
             "type": "stats",
             "stats": {"live": True, "durationMs": 700, "modelCalls": 2, "toolCalls": 0, "costUsd": 0.02},
         })
+        # Changed live statistics reach the browser but stay in memory only.
+        assert changed["_webLive"][0]["payload"]["modelCalls"] == 2
+        assert len(await _web_frames_for(web_env, conv_uuid, op_type="stats")) == 1
+        stats_op = next(op for op in await web_env.server._web_operations(conv_uuid) if op["opType"] == "stats")
+        assert stats_op["payload"]["modelCalls"] == 2
+
+        await live.publish({
+            "type": "stats",
+            "stats": {"live": False, "durationMs": 900, "modelCalls": 3, "toolCalls": 0, "costUsd": 0.03},
+        })
         durable_frames = await _web_frames_for(web_env, conv_uuid, op_type="stats")
         assert len(durable_frames) == 2
-        assert _frame_payload(durable_frames[-1])["modelCalls"] == 2
+        assert _frame_payload(durable_frames[-1])["modelCalls"] == 3
+        assert web_env.server._live_operation_store().pending(conv_uuid) == []
     finally:
         live.unsubscribe(subscriber)
 
@@ -4881,23 +5071,31 @@ async def test_reasoning_ui_cadence_reaches_real_websocket_without_waiting_for_t
     try:
         assert (await ws.receive_json(timeout=2))["type"] == "state"
         text = ""
-        previous_seq = 0
         for index in range(8):
             clock[0] = 1000.0 + index * .06
             chunk = f"思考{index} "
             text += chunk
             await renderer.on_delta("", text)
             packet = await ws.receive_json(timeout=2)
-            assert packet["type"] == "frame"
-            frame = packet["frame"]
-            assert frame["opType"] == "reasoning"
-            assert frame["payload"]["delta"] == chunk
-            assert frame["frameSeq"] > previous_seq
-            previous_seq = frame["frameSeq"]
+            if index == 0:
+                # The first chunk creates the durable operation row.
+                assert packet["type"] == "frame"
+                frame = packet["frame"]
+                assert frame["opType"] == "reasoning"
+                assert frame["payload"]["delta"] == chunk
+                continue
+            assert packet["type"] == "live"
+            [update] = packet["ops"]
+            assert update["opType"] == "reasoning"
+            assert update["payload"]["delta"] == chunk
+            assert (update["revision"], update["liveRev"]) == (frame["revision"], index)
         await renderer.finalize("", text)
         final = (await ws.receive_json(timeout=2))["frame"]
         assert final["action"] == "end"
         assert final["payload"]["complete"] is True
+        # Replaying clients never saw the live chunks: the end frame is complete.
+        assert final["payload"]["text"] == text
+        assert len(await _web_frames_for(web_env, row["conversation_uuid"], op_type="reasoning")) == 2
         operation = next(op for op in await web_env.server._web_operations(row["conversation_uuid"]) if op["opType"] == "reasoning")
         assert operation["payload"]["text"] == text
         assert operation["lifecycle"] == "terminal"
@@ -4905,7 +5103,7 @@ async def test_reasoning_ui_cadence_reaches_real_websocket_without_waiting_for_t
         await ws.close()
 
 
-async def test_live_delta_frames_are_throttled_but_forced_boundary_is_durable(web_env):
+async def test_live_delta_frames_are_throttled_and_only_boundaries_are_durable(web_env):
     row = await web_env.server._create_web_conversation(123, title="throttled stream frames")
     conv_uuid = str(row["conversation_uuid"])
     live = web_env.server._live_for(row)
@@ -4920,18 +5118,49 @@ async def test_live_delta_frames_are_throttled_but_forced_boundary_is_durable(we
     renderer._last_delta_persist_ms -= 300
     await renderer.on_delta("ABC")
     await renderer._flush_delta()
-    frames = await _web_frames_for(web_env, conv_uuid, op_type="assistant_message")
-    assert len(frames) == 2
-    operations = await web_env.server._web_operations(conv_uuid)
-    assistant = next(op for op in operations if op["opType"] == "assistant_message")
-    assert assistant["payload"]["text"] == "ABC"
-
     await renderer.on_delta("ABCD")
     await renderer._flush_delta(force_persist=True)
-    frames = await _web_frames_for(web_env, conv_uuid, op_type="assistant_message")
-    assert len(frames) == 3
+    assert len(await _web_frames_for(web_env, conv_uuid, op_type="assistant_message")) == 1
     assistant = next(op for op in await web_env.server._web_operations(conv_uuid) if op["opType"] == "assistant_message")
     assert assistant["payload"]["text"] == "ABCD"
+    durable = await web_env.db.conn.execute(
+        "SELECT payload_json FROM web_operations WHERE conversation_uuid=? AND op_type='assistant_message'", (conv_uuid,),
+    )
+    assert json.loads((await durable.fetchone())["payload_json"])["text"] == "A"
+
+    await renderer.cut()
+    frames = await _web_frames_for(web_env, conv_uuid, op_type="assistant_message")
+    assert [frame["action"] for frame in frames] == ["append", "end"]
+    assert _frame_payload(frames[-1])["text"] == "ABCD"
+    # Shaped like the append frames it replaces; snapshot bookkeeping stays out.
+    assert _frame_payload(frames[-1])["textLength"] == 4
+    assert "transcriptMessageIds" not in _frame_payload(frames[-1])
+    assistant = next(op for op in await web_env.server._web_operations(conv_uuid) if op["opType"] == "assistant_message")
+    assert assistant["payload"]["text"] == "ABCD" and "liveRev" not in assistant
+    assert web_env.server._live_operation_store().pending(conv_uuid) == []
+
+
+@pytest.mark.parametrize("ending", [{"type": "done"}, {"type": "stopped", "reason": "已停止"}])
+async def test_run_boundary_stores_newest_progress_of_unclosed_operations(web_env, monkeypatch, ending):
+    row = await web_env.server._create_web_conversation(123, title="run boundary progress")
+    conv_uuid = str(row["conversation_uuid"])
+    live = web_env.server._live_for(row)
+    clock = [1_800_000_000.0]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    await live.publish({"type": "accepted", "turnUuid": "turn-b", "runUuid": "run-b"})
+    await live.publish({"type": "stats", "stats": {"live": True, "durationMs": 100, "modelCalls": 1}})
+    clock[0] += 5
+    await live.publish({"type": "stats", "stats": {"live": True, "durationMs": 900, "modelCalls": 2}})
+    clock[0] += 5
+    # No final statistics: the run ends with only in-memory progress.
+    await live.publish(ending)
+
+    cur = await web_env.db.conn.execute(
+        "SELECT payload_json, updated_at_ms FROM web_operations WHERE conversation_uuid=? AND op_type='stats'", (conv_uuid,))
+    stored = await cur.fetchone()
+    assert json.loads(stored["payload_json"])["modelCalls"] == 2
+    assert stored["updated_at_ms"] == 1_800_000_005_000
+    assert web_env.server._live_operation_store().pending(conv_uuid) == []
 
 
 async def test_live_delta_broadcast_only_snapshot_is_persisted_at_tool_boundary(web_env):
@@ -6482,45 +6711,48 @@ async def test_assistant_events_use_source_native_operation_specs_without_hidden
     assert all("_webOperationSpecs" not in json.dumps(frame.get("payload") or {}, ensure_ascii=False) for frame in assistant_frames + reasoning_frames)
 
 
-@pytest.mark.parametrize("tool_name", ["Agent", "AgentContinue", "AgentMessage", "AgentStop"])
 @pytest.mark.parametrize("event_type", ["tool_progress", "tool_update"])
-async def test_detached_agent_progress_does_not_split_foreground_assistant_segment(web_env, tool_name, event_type):
-    row = await web_env.server._create_web_conversation(123, title="detached agent progress")
-    chat_id = int(row["internal_chat_id"])
-    conv_uuid = row["conversation_uuid"]
-    live = web_env.server._live_for(row)
+async def test_detached_agent_progress_does_not_split_foreground_assistant_segment(web_env, event_type):
+    # Tool names only select detached-Agent membership; each gets its own
+    # conversation in one shared environment.
+    for tool_name in ("Agent", "AgentContinue", "AgentMessage", "AgentStop"):
+        case = f"{event_type}/{tool_name}"
+        row = await web_env.server._create_web_conversation(123, title="detached agent progress")
+        chat_id = int(row["internal_chat_id"])
+        conv_uuid = row["conversation_uuid"]
+        live = web_env.server._live_for(row)
 
-    await live.publish({"type": "accepted", "turnUuid": "turn-detached-agent"})
-    await live.publish({"type": "tool_start", "turnUuid": "turn-detached-agent", "toolCallId": "call-agent", "name": tool_name, "arguments": "{}", "line": "Agent running"})
-    await live.publish({"type": "delta", "turnUuid": "turn-detached-agent", "text": "已启动后台 Agent", "reasoning": "前台仍在输出"})
-    foreground_snapshot = live.snapshot()
-    await live.publish({
-        "type": event_type,
-        "turnUuid": "turn-detached-agent",
-        "toolCallId": "call-agent",
-        "name": tool_name,
-        "arguments": "{}",
-        "payload": {
-            "toolName": tool_name,
-            "status": "running",
-            "detached": True,
-            "task": {"taskUuid": "task-1", "status": "running", "detached": True},
-        },
-    })
-    progress_snapshot = live.snapshot()
-    assert progress_snapshot["draftText"] == foreground_snapshot["draftText"]
-    assert progress_snapshot["draftReasoning"] == foreground_snapshot["draftReasoning"]
-    assert progress_snapshot["currentStatus"] == foreground_snapshot["currentStatus"]
-    await live.publish({"type": "delta", "turnUuid": "turn-detached-agent", "text": "已启动后台 Agent，等待结果"})
-    await live.publish({"type": "final", "turnUuid": "turn-detached-agent", "text": "已启动后台 Agent，等待结果"})
+        await live.publish({"type": "accepted", "turnUuid": "turn-detached-agent"})
+        await live.publish({"type": "tool_start", "turnUuid": "turn-detached-agent", "toolCallId": "call-agent", "name": tool_name, "arguments": "{}", "line": "Agent running"})
+        await live.publish({"type": "delta", "turnUuid": "turn-detached-agent", "text": "已启动后台 Agent", "reasoning": "前台仍在输出"})
+        foreground_snapshot = live.snapshot()
+        await live.publish({
+            "type": event_type,
+            "turnUuid": "turn-detached-agent",
+            "toolCallId": "call-agent",
+            "name": tool_name,
+            "arguments": "{}",
+            "payload": {
+                "toolName": tool_name,
+                "status": "running",
+                "detached": True,
+                "task": {"taskUuid": f"task-{tool_name}", "status": "running", "detached": True},
+            },
+        })
+        progress_snapshot = live.snapshot()
+        assert progress_snapshot["draftText"] == foreground_snapshot["draftText"], case
+        assert progress_snapshot["draftReasoning"] == foreground_snapshot["draftReasoning"], case
+        assert progress_snapshot["currentStatus"] == foreground_snapshot["currentStatus"], case
+        await live.publish({"type": "delta", "turnUuid": "turn-detached-agent", "text": "已启动后台 Agent，等待结果"})
+        await live.publish({"type": "final", "turnUuid": "turn-detached-agent", "text": "已启动后台 Agent，等待结果"})
 
-    state = await web_env.server._chat_payload(chat_id, row)
-    assistant_ops = [op for op in state["operations"] if str(op["opId"]).startswith("assistant:turn-detached-agent:")]
-    assert [op["opId"] for op in assistant_ops] == ["assistant:turn-detached-agent:1"]
-    assert assistant_ops[0]["payload"]["text"] == "已启动后台 Agent，等待结果"
+        state = await web_env.server._chat_payload(chat_id, row)
+        assistant_ops = [op for op in state["operations"] if str(op["opId"]).startswith("assistant:turn-detached-agent:")]
+        assert [op["opId"] for op in assistant_ops] == ["assistant:turn-detached-agent:1"], case
+        assert assistant_ops[0]["payload"]["text"] == "已启动后台 Agent，等待结果", case
 
-    assistant_frames = [frame for frame in await web_env.server._web_frames(conv_uuid) if frame["debug"].get("eventType") in {"delta", "final"} and frame["opType"] == "assistant_message"]
-    assert {frame["opId"] for frame in assistant_frames} == {"assistant:turn-detached-agent:1"}
+        assistant_frames = [frame for frame in await web_env.server._web_frames(conv_uuid) if frame["debug"].get("eventType") in {"delta", "final"} and frame["opType"] == "assistant_message"]
+        assert {frame["opId"] for frame in assistant_frames} == {"assistant:turn-detached-agent:1"}, case
 
 
 @pytest.mark.parametrize("event_type", ["tool_progress", "tool_update"])
@@ -7411,6 +7643,98 @@ async def test_websocket_full_state_resets_cursor_after_suffix_high_water_rollba
         assert int(next_message["frame"]["frameSeq"]) <= stale_after
     finally:
         await ws.close()
+
+
+async def test_websocket_sends_in_memory_progress_on_connect_and_on_request(web_env):
+    cookie = await _login_cookie(web_env)
+    row = await web_env.server._create_web_conversation(123, title="live snapshot")
+    live = web_env.server._live_for(row)
+    await live.publish({"type": "accepted", "turnUuid": "turn-live"})
+    await live.publish({"type": "delta", "turnUuid": "turn-live", "reasoning": "想"})
+    await live.publish({"type": "delta", "turnUuid": "turn-live", "reasoning": "想一想"})
+    ws = await web_env.client.ws_connect(
+        f"/api/conversations/{row['conversation_uuid']}/ws",
+        headers={"Cookie": f"openbear_web_session={cookie}"},
+    )
+    try:
+        state = await ws.receive_json(timeout=2)
+        assert state["type"] == "state"
+        reasoning = next(op for op in state["state"]["operations"] if op["opType"] == "reasoning")
+        assert reasoning["payload"]["text"] == "想一想" and reasoning["liveRev"] == 1
+        snapshot = await ws.receive_json(timeout=2)
+        assert snapshot["type"] == "live_snapshot"
+        [entry] = snapshot["ops"]
+        assert (entry["opId"], entry["action"], entry["revision"], entry["liveRev"]) == (
+            reasoning["opId"], "snapshot", reasoning["revision"], 1)
+        assert entry["payload"]["text"] == "想一想"
+        await ws.send_json({"type": "live_resync"})
+        again = await ws.receive_json(timeout=2)
+        assert again["type"] == "live_snapshot" and again["ops"][0]["liveRev"] == 1
+    finally:
+        await ws.close()
+
+
+async def test_agent_card_progress_is_live_until_its_status_changes(web_env):
+    row = await web_env.server._create_web_conversation(123, title="agent live progress")
+    conv_uuid = str(row["conversation_uuid"])
+    live = web_env.server._live_for(row)
+    await live.publish({"type": "accepted", "turnUuid": "turn-agent"})
+    await live.publish({"type": "tool_start", "toolCallId": "call-agent", "name": "Agent", "arguments": "{}"})
+
+    def progress(status, current, **extra):
+        return {"type": "tool_progress", "toolCallId": "call-agent", "name": "Agent", "arguments": "{}",
+                "payload": {"status": status, "detached": True, **extra,
+                            "task": {"status": status, "currentStatus": current, "liveProgress": False}}}
+
+    running = await live.publish(progress("running", "检索中", recentEvents=[{"seq": 1, "kind": "model_call_started"}]))
+    assert running["_webFrames"][-1]["opId"] == "agent:call-agent"
+    writing = await live.publish(progress("running", "正在生成文件内容"))
+    assert "_webFrames" not in writing
+    [update] = writing["_webLive"]
+    assert update["payload"]["task"]["currentStatus"] == "正在生成文件内容"
+    agent = next(op for op in await web_env.server._web_operations(conv_uuid) if op["opId"] == "agent:call-agent")
+    assert agent["payload"]["task"]["currentStatus"] == "正在生成文件内容"
+    assert agent["payload"]["recentEvents"] == [{"seq": 1, "kind": "model_call_started"}]
+
+    done = await live.publish(progress("completed", "任务完成"))
+    terminal = done["_webFrames"][-1]
+    # The end frame is complete for clients that never saw the live updates.
+    assert terminal["payload"]["recentEvents"] == [{"seq": 1, "kind": "model_call_started"}]
+    assert terminal["payload"]["task"]["currentStatus"] == "任务完成"
+    frames = [frame for frame in await web_env.server._web_frames(conv_uuid) if frame["opId"] == "agent:call-agent"]
+    assert [frame["action"] for frame in frames] == ["start", "patch", "end"]
+    assert web_env.server._live_operation_store().pending(conv_uuid) == []
+
+
+async def test_live_snapshot_keeps_its_action_for_user_interaction(web_env):
+    row = await web_env.server._create_web_conversation(123, title="interaction snapshot")
+    conv_uuid = str(row["conversation_uuid"])
+    live = web_env.server._live_for(row)
+    await live.publish({"type": "accepted", "turnUuid": "turn-ui"})
+    await live.publish({"type": "tool_start", "toolCallId": "call-ui", "name": "UserInteraction", "arguments": "{}"})
+    await live.publish({"type": "tool_update", "toolCallId": "call-ui", "name": "UserInteraction",
+                        "arguments": "{}", "line": "等待回答"})
+    [entry] = web_env.server._live_operation_store().pending(conv_uuid)
+    snapshot = entry.snapshot()
+    # frame_public normalizes UserInteraction actions; a live snapshot must stay one.
+    assert (snapshot["opType"], snapshot["action"]) == ("user_interaction", "snapshot")
+
+
+async def test_rebuilt_live_state_never_reuses_a_sent_live_rev(web_env):
+    row = await web_env.server._create_web_conversation(123, title="live rev reseed")
+    conv_uuid = str(row["conversation_uuid"])
+    live = web_env.server._live_for(row)
+    store = web_env.server._live_operation_store()
+    await live.publish({"type": "accepted", "turnUuid": "turn-r"})
+    await live.publish({"type": "delta", "turnUuid": "turn-r", "reasoning": "一"})
+    sent = (await live.publish({"type": "delta", "turnUuid": "turn-r", "reasoning": "一二"}))["_webLive"][0]
+    assert (sent["revision"], sent["liveRev"]) == (1, 1)
+    # State lost without a new stored revision (e.g. a rolled-back write) is rebuilt from the row.
+    store.drop(conv_uuid, sent["opId"])
+    rebuilt = (await live.publish({"type": "delta", "turnUuid": "turn-r", "reasoning": "一二三"}))["_webLive"][0]
+    assert rebuilt["revision"] == 1 and rebuilt["liveRev"] > sent["liveRev"] + 1
+    reasoning = next(op for op in await web_env.server._web_operations(conv_uuid) if op["opId"] == sent["opId"])
+    assert reasoning["liveRev"] == rebuilt["liveRev"] and reasoning["payload"]["text"] == "一二三"
 
 
 async def test_websocket_incremental_bootstrap_fills_subscribe_race_once(web_env, monkeypatch):

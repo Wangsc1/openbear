@@ -48,6 +48,35 @@ def test_continue_rejection_does_not_mutate_blocking_task():
     assert specs[0]["lifecycle"] == "terminal"
 
 
+@pytest.mark.parametrize("name", ["Agent", "AgentContinue"])
+async def test_plain_launch_error_terminalizes_only_its_placeholder(web_env, name):
+    server = web_env.server
+    row = await server._create_web_conversation(123, title="failed launch")
+    conv = row["conversation_uuid"]
+    live = server._live_for(row)
+    arguments = json.dumps({"prompt": "sheet", "tools": []})
+    error = "error: 工具 Agent 执行失败: AttributeError: 'NoneType' object has no attribute 'session_uuid'"
+    await live.publish({"type": "accepted", "turnUuid": "root"})
+    for call_id in ("failed-launch", "other-launch"):
+        await live.publish({"type": "tool_start", "turnUuid": "root", "name": name,
+                            "toolCallId": call_id, "arguments": arguments})
+    before = {op["opId"]: op for op in await server._web_operations(conv)}
+    await live.publish({"type": "tool_result", "turnUuid": "root", "name": name,
+                        "toolCallId": "failed-launch", "arguments": arguments,
+                        "result": error, "durationMs": 8})
+    after = {op["opId"]: op for op in await server._web_operations(conv)}
+    failed = after["agent:failed-launch"]
+    assert failed["status"] == "failed"
+    assert failed["lifecycle"] == "terminal"
+    assert failed["payload"]["taskUuid"] == ""
+    assert failed["payload"]["resultText"] == error
+    assert after["agent:other-launch"] == before["agent:other-launch"]
+    frames = await server._web_frames(conv)
+    terminal = [frame for frame in frames if frame["opId"] == "agent:failed-launch"][-1]
+    assert terminal["action"] == "error"
+    assert terminal["payload"]["status"] == "failed"
+
+
 async def _legacy_continue(web_env, *, task_status="completed", source_is_task=False):
     server = web_env.server
     row = await server._create_web_conversation(123, title="legacy continuation")

@@ -1,4 +1,5 @@
 import {installationEnvironment} from "../pwa/install.js";
+import { contextFetch } from '../sessionBoundary.js';
 
 // Mobile home-screen apps need an explicit save/share flow: iOS can navigate
 // away, while Android's download manager is outside the standalone window.
@@ -19,7 +20,7 @@ export const SHARE_FILE_LIMIT = 20 * 1024 * 1024;
 
 // Bound memory even when metadata/Content-Length are stale or absent. Never
 // buffer an arbitrarily large attachment just to make it shareable on a phone.
-export async function readShareFile(identity, metadata, {signal, fetcher = fetch, onProgress} = {}) {
+export async function readShareFile(identity, metadata, {signal, fetcher = contextFetch, onProgress} = {}) {
 	if (!Number.isSafeInteger(metadata?.sizeBytes) || metadata.sizeBytes < 0) throw new Error("附件大小未知，请使用备用下载入口。");
 	if (metadata.sizeBytes > SHARE_FILE_LIMIT) return null;
 	const response = await fetcher(identity.downloadUrl, {credentials: "same-origin", redirect: "error", signal});

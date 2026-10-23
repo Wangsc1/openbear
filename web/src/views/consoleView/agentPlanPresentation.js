@@ -58,7 +58,7 @@ const AGENT_MONITOR_EVENT_KINDS = new Set([
   "task_created", "task_started", "task_completed", "task_failed", "task_cancelled", "task_interrupted",
   "agent_control", "agent_supervision", "control_requested", "control_response", "steer_applied",
   "pause_applied", "resume_applied", "cancel_requested", "needs_openbear_control",
-  "agent_plan_protocol_corrected", "agent_control_continuation_saved",
+  "agent_plan_protocol_corrected", "agent_gate_repeated", "agent_control_continuation_saved",
   "model_context_window_rotated",
   "model_context_pre_compacted", "model_context_overflow_compacted", "model_context_compaction_failed",
 ]);
@@ -78,6 +78,7 @@ const CONTEXT_COMPACTION_SOURCE_LABELS = {
   agent_result_preflight: "Agent 结果回灌前",
   emergency: "上下文溢出应急压缩",
   pre_model_request: "模型请求前",
+  cache_expired: "继续前（缓存已过期）",
   pre_model: "模型请求前",
   preflight: "本轮执行前",
   tool_batch: "工具批次结束后",
@@ -103,7 +104,7 @@ const ACTIVITY_EXCLUDED_EVENT_KINDS = new Set([
   "agent_control", "agent_supervision", "control_requested", "control_response", "steer_applied",
   "pause_applied", "resume_applied", "cancel_requested", "needs_openbear_control",
   "plan_submitted", "plan_decision", "plan_decision_approve", "plan_decision_revise", "plan_decision_cancel",
-  "plan_replan_requested", "agent_plan_protocol_corrected", "agent_control_continuation_saved",
+  "plan_replan_requested", "agent_plan_protocol_corrected", "agent_gate_repeated", "agent_control_continuation_saved",
 ]);
 
 function object(value) {
@@ -757,6 +758,25 @@ function modelProcessLine(item, label, description, modelStatus, modelStatusText
   };
 }
 
+/** The running call's in-memory progress (task.liveProgress) as an event-shaped record. */
+export function liveProgressEvent(liveProgress) {
+  const progress = object(liveProgress);
+  if (!Object.keys(progress).length) return null;
+  // detail keeps the shape the stored progress event had. False marks a field
+  // the other progress kind carries (pushed payloads are deep-merged).
+  const {summary, updatedAtMs, ...rest} = progress;
+  const detail = Object.fromEntries(Object.entries(rest).filter(([, value]) => value !== false));
+  if (detail.toolInput) delete detail.attemptId;
+  return {
+    kind: "model_stream_progress",
+    seq: 0,
+    ts: Math.floor(number(updatedAtMs) / 1000),
+    summary: text(summary),
+    attemptId: text(progress.attemptId),
+    detail,
+  };
+}
+
 export function compactAgentStepActivityLines(events = [], options = {}) {
   const output = [];
   const pendingTools = [];
@@ -787,6 +807,25 @@ export function compactAgentStepActivityLines(events = [], options = {}) {
       output[modelState.index] = line;
     }
     if (finish) modelState = null;
+  };
+
+  const applyStreamProgress = (item) => {
+    const detail = object(item.detail);
+    const chars = number(detail.textChars || detail.text_chars);
+    updateModel(item, (label) => {
+      const retry = modelState?.attempt && modelState?.maximum ? `重试 ${modelState.attempt}/${modelState.maximum}` : "";
+      const input = detail.toolInput ? modelOutputView(detail.toolInput, detail.toolInput.updatedAtMs) : null;
+      const statusText = input
+        ? `${input.label}${input.tools ? ` · ${input.tools}` : ''} · 已接收 ${input.bytes} · ${input.elapsed}`
+        : `流式输出中${chars ? ` · ${chars} 字` : ""}`;
+      return {
+        message: `模型调用：${label}${retry ? ` · ${retry}` : ""} · ${statusText}`,
+        description: retry,
+        status: "running",
+        statusText,
+      };
+    }, "active");
+    if (modelState) modelState.streamChars = chars;
   };
 
   const endModel = (item, statusText, {finish = true, failed = true} = {}) => {
@@ -869,8 +908,9 @@ export function compactAgentStepActivityLines(events = [], options = {}) {
           "active",
           "model_call_compact",
         ));
-        modelState = {index, label, attempt: retry.attempt, maximum: retry.maximum, streamChars: 0, retrySummary: ""};
+        modelState = {index, label, attempt: retry.attempt, maximum: retry.maximum, streamChars: 0, retrySummary: "", attemptId: text(detail.attemptId)};
       } else {
+        modelState.attemptId = text(detail.attemptId);
         modelState.attempt = retry.attempt;
         modelState.maximum = retry.maximum;
         modelState.settled = false;
@@ -930,21 +970,8 @@ export function compactAgentStepActivityLines(events = [], options = {}) {
     }
 
     if (kind === "model_stream_progress") {
-      const chars = number(detail.textChars || detail.text_chars);
-      updateModel(item, (label) => {
-        const retry = modelState?.attempt && modelState?.maximum ? `重试 ${modelState.attempt}/${modelState.maximum}` : "";
-        const input = detail.toolInput ? modelOutputView(detail.toolInput, detail.toolInput.updatedAtMs) : null;
-        const statusText = input
-          ? `${input.label}${input.tools ? ` · ${input.tools}` : ''} · 已接收 ${input.bytes} · ${input.elapsed}`
-          : `流式输出中${chars ? ` · ${chars} 字` : ""}`;
-        return {
-          message: `模型调用：${label}${retry ? ` · ${retry}` : ""} · ${statusText}`,
-          description: retry,
-          status: "running",
-          statusText,
-        };
-      }, "active");
-      if (modelState) modelState.streamChars = chars;
+      // Stored only by older versions; current progress arrives as options.liveProgress.
+      applyStreamProgress(item);
       continue;
     }
 
@@ -1084,6 +1111,15 @@ export function compactAgentStepActivityLines(events = [], options = {}) {
     }
 
     output.push(item);
+  }
+
+  // In-memory progress of the running call, never part of the event list. The
+  // caller formats it like an event line (liveProgressEvent) for identical rows.
+  const liveLine = object(options.liveProgressLine);
+  const liveAttemptId = text(liveLine.attemptId);
+  if (modelState && !modelState.settled && Object.keys(object(liveLine.detail)).length
+      && (!liveAttemptId || liveAttemptId === modelState.attemptId)) {
+    applyStreamProgress({...liveLine, kind: "model_stream_progress"});
   }
 
   // Only the still-active parameter row uses wall time. Historical rows are

@@ -60,8 +60,12 @@ class WebAdminAppMixin:
         install_webhooks(app, self)
         from app.cron.http import install as install_cron
         install_cron(app, self)
-        from app.recommendations.http import install as install_recommendations
-        install_recommendations(app, self)
+        if getattr(self, "managed_runtime", None) is not None:
+            from app.managed.http import install as install_managed
+            install_managed(app, self, self.managed_runtime)
+        if getattr(self, "instances", None) is not None:
+            from app.instances.http import install as install_instances
+            install_instances(app, self, self.instances)
         app.cleanup_ctx.append(self._realtime_context)
         app.cleanup_ctx.append(self._web_push_context)
         app.on_shutdown.append(self._realtime_shutdown)
@@ -78,9 +82,12 @@ class WebAdminAppMixin:
             web.get("/statistics", self.handle_index),
             web.get("/webhooks", self.handle_index),
             web.get("/cron", self.handle_index),
-            web.get("/recommendations", self.handle_index),
+            web.get("/instances", self.handle_index),
             web.get("/assets/{path:.*}", self.handle_asset),
             *(web.get(path, self.handle_pwa_asset) for path in PWA_PUBLIC_FILES),
+            web.get("/api/auth/mode", self.handle_api_auth_mode),
+            web.post("/api/auth/password/login", self.handle_api_password_login),
+            web.post("/api/auth/password/change", self.handle_api_password_change),
             web.post("/api/auth/login/start", self.handle_login_post),
             web.get("/api/auth/login/status/{request_uuid}", self.handle_api_auth_status),
             web.post("/api/auth/login/consume/{request_uuid}", self.handle_api_auth_consume),
@@ -116,6 +123,12 @@ class WebAdminAppMixin:
             web.get("/api/conversations/{conversation_uuid}/properties", self.handle_api_conversation_properties),
             web.put("/api/conversations/{conversation_uuid}/properties", self.handle_api_conversation_properties_put),
             web.post("/api/conversations/{conversation_uuid}/properties/impact", self.handle_api_conversation_properties_impact),
+            web.get("/api/conversations/{conversation_uuid}/collab", self.handle_api_conversation_collab),
+            web.get("/api/collab/requests/{request_uuid}", self.handle_api_collab_request),
+            web.post("/api/collab/requests/{request_uuid}/cancel", self.handle_api_collab_request_cancel),
+            web.get("/api/collab/groups/{group_uuid}", self.handle_api_collab_group),
+            web.put("/api/collab/groups/{group_uuid}", self.handle_api_collab_group_update),
+            web.post("/api/collab/members/{conversation_uuid}/restore", self.handle_api_collab_member_restore),
             web.get("/api/prompt-tools", self.handle_api_prompt_tools),
             web.post("/api/prompt-template/preview", self.handle_api_prompt_template_preview),
             web.get("/api/conversations/{conversation_uuid}/message-visibility", self.handle_api_message_visibility),
@@ -149,6 +162,7 @@ class WebAdminAppMixin:
             web.post("/api/conversations/{conversation_uuid}/system-prompt/preview", self.handle_api_conversation_prompt_preview),
             web.put("/api/conversations/{conversation_uuid}/system-prompt", self.handle_api_conversation_prompt_update),
             web.post("/api/conversations/{conversation_uuid}/stop", self.handle_api_conversation_stop),
+            web.delete("/api/conversations/{conversation_uuid}/prompt-suggestions", self.handle_api_conversation_prompt_suggestions_dismiss),
             web.post("/api/conversations/{conversation_uuid}/retry/cancel", self.handle_api_conversation_retry_cancel),
             web.post("/api/conversations/{conversation_uuid}/retry/now", self.handle_api_conversation_retry_now),
             web.post("/api/conversations/{conversation_uuid}/confirmations/{confirmation_id}/answer", self.handle_api_conversation_confirmation_answer),
@@ -182,6 +196,9 @@ class WebAdminAppMixin:
             web.patch("/api/mcp/servers/{server}/enabled", self.handle_api_mcp_server_enabled),
             web.patch("/api/mcp/servers/{server}/approval", self.handle_api_mcp_server_approval),
             web.patch("/api/mcp/servers/{server}/agent-access", self.handle_api_mcp_server_agent_access),
+            web.get("/api/mcp/servers/{server}/tools", self.handle_api_mcp_server_discover_tools),
+            web.patch("/api/mcp/servers/{server}/tools", self.handle_api_mcp_server_tools),
+            web.post("/api/mcp/servers/{server}/confirm-exposure", self.handle_api_mcp_server_confirm_exposure),
             web.post("/api/mcp/servers/{server}/refresh-tools", self.handle_api_mcp_server_refresh_tools),
             web.post("/api/mcp/servers/{server}/uninstall", self.handle_api_mcp_server_uninstall),
             web.post("/api/mcp/reload", self.handle_api_mcp_reload),

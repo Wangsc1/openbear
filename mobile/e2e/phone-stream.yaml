@@ -1,0 +1,53 @@
+# 流式回放 + 输入发送（ob-phone）：
+# 打开对话 -> 输入（回车换行）-> 按钮发送 -> 模拟后端按原始节奏回放真实流式帧 -> 流式期间上翻滚动 -> 回到底部
+appId: dev.openbear.app
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible:
+      id: "conv-d8e18cc9"
+    timeout: 30000
+- tapOn:
+    id: "conv-d8e18cc9"
+- extendedWaitUntil:
+    visible:
+      id: "row-answer"
+    timeout: 30000
+- tapOn:
+    id: "composer-input"
+- inputText: "line one"
+- pressKey: Enter
+- inputText: "line two"
+- takeScreenshot: stream-01-composer-multiline
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      text: "line one.*"
+    timeout: 15000
+- hideKeyboard
+- extendedWaitUntil:
+    visible:
+      id: "row-reasoning"
+    timeout: 30000
+- takeScreenshot: stream-02-streaming-started
+# 流式期间向上滚动阅读：不应被拉回底部
+- swipe:
+    start: 50%, 30%
+    end: 50%, 75%
+    duration: 300
+- swipe:
+    start: 50%, 30%
+    end: 50%, 75%
+    duration: 300
+- takeScreenshot: stream-03-scrolled-up-during-stream
+- extendedWaitUntil:
+    visible:
+      id: "new-content"
+    timeout: 60000
+- takeScreenshot: stream-04-new-content-pill
+- tapOn:
+    id: "new-content"
+- waitForAnimationToEnd
+- takeScreenshot: stream-05-follow-bottom

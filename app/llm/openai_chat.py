@@ -22,6 +22,7 @@ from app.llm.base import (
 from app.llm.client import HTTPClient
 from app.llm.error_payloads import error_event, read_error
 from app.llm.events import StreamEvent, ToolCall, Usage
+from app.llm.image_limits import prepare_image_payload
 from app.llm.multimodal import text_from_content, to_openai_chat_content
 from app.llm.tool_input import ToolInputTracker
 from app.logging import get_logger
@@ -165,7 +166,9 @@ class OpenAIChatBackend(LLMBackend):
             payload["user"] = sid
             payload["prompt_cache_key"] = sid
         fast_body, _ = fast_request_parts(opts.get("fast_request"))
-        return apply_fast_request_body(payload, fast_body)
+        return prepare_image_payload(
+            apply_fast_request_body(payload, fast_body), base_url=self._base, protocol=self.protocol,
+        )
 
     async def stream(
         self, messages: list[Message], *, model: str, system: str = "",

@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-from app.context.prompts import effective_context_prompt, migrate_context_prompt
 from app.db.engine import DB
 from app.memory.builtin import BuiltinMemoryClient
 from app.tools.base import ToolRegistry
@@ -59,12 +58,3 @@ def test_tool_descriptions_remove_preconfirmation_but_keep_feedback_safety():
     assert "without a redundant UserInteraction pre-confirmation" in descriptions["OpenBearControl"]
     assert "Cancellation or timeout never authorizes execution" in descriptions["OpenBearControl"]
     assert "do not restart/stop openbear.service via Bash" in descriptions["OpenBearControl"]
-
-
-def test_window_prompt_preserves_custom_policy_and_authorization_boundaries():
-    custom = "CUSTOM user rules: approval is bounded; no deployment."
-    assert migrate_context_prompt(custom) == custom
-    effective = effective_context_prompt(custom)
-    assert effective == custom
-    assert effective_context_prompt(effective, "model_summary") == custom
-    assert effective_context_prompt(effective) == effective

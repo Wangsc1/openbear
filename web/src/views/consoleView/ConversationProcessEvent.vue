@@ -1,11 +1,13 @@
 <script setup>
 import {computed, inject, ref, watch} from 'vue';
-import {Brain, SquareTerminal, Search, FileText, FilePenLine, PencilLine, Globe, History, BookOpen, Wrench, ChevronRight, ChevronUp, ListChecks} from '@lucide/vue';
+import {Brain, SquareTerminal, Search, FileText, FilePenLine, PencilLine, Globe, History, BookOpen, Wrench, ChevronRight, ChevronUp, ListChecks, MessagesSquare, FilePlus, MessageSquareReply} from '@lucide/vue';
 import ConsoleToolEvent from './ConsoleToolEvent.vue';
 import WorkDisclosure from './WorkDisclosure.vue';
 import {eventPrimaryToolName, toolDisplayState, toolPreview as argumentToolPreview, toolStatus} from './display.js';
 import {processToolLabel, reasoningDuration, workDurationLabel, WORK_MOTION} from './conversationWork.js';
 import {reasoningPreviewState, reasoningPreviewDirective as vReasoningPreview} from './reasoningPreview.js';
+import CollabRequestDetail from './CollabRequestDetail.vue';
+import {collabStateTone, collabStatusLabel, collabToolCall, OPEN_STATES, useCollabRequests} from './collabRequests.js';
 import {useDeferredReasoning} from './reasoningDetail.js';
 
 const props = defineProps({event: {type: Object, required: true}, part: {type: String, default: ''},
@@ -64,7 +66,41 @@ const toolLabel = computed(() => processToolLabel(toolName.value, state.value.ti
 const toolPreview = computed(() => props.event.calls?.length
 	? argumentToolPreview({...props.event, live: false})
 	: props.event.preview || state.value.preview || '');
-const processIcon = computed(() => isReasoning.value ? Brain : groupEvents.value.length ? ListChecks : ({
+// A request to another conversation reads as who/what/where-it-stands, with
+// the live request state rather than the moment-of-sending tool result.
+const collabStore = useCollabRequests();
+const collab = computed(() => {
+	const call = isReasoning.value ? null : collabToolCall(props.event);
+	if (call?.action === 'respond') return respondRow(call);
+	if (!call || !['send', 'supply'].includes(call.action)) return null;
+	const live = collabStore?.get(call.requestId) || collabStore?.forCall(call.toolCallId) || null;
+	const failed = call.result?.ok === false || Boolean(call.result?.error);
+	const supply = call.action === 'supply';
+	return {
+		requestId: call.requestId || live?.requestId || '', live, failed, supply, expandable: true,
+		label: supply ? '补充材料' : '会话请求',
+		target: live?.to?.title || '',
+		title: live?.title || call.args.title || '',
+		// Material belongs to its request; the request row carries the outcome.
+		status: failed ? '未发出' : supply ? '已补充' : collabStatusLabel(live) || call.result?.stateLabel || '',
+		tone: failed ? 'danger' : supply ? 'info' : live ? collabStateTone(live.state) : 'info',
+		waiting: !failed && !supply && (!live || OPEN_STATES.has(live.state)),
+		failure: call.result?.message || call.result?.error || '',
+	};
+});
+// The receiver's own declaration: what it told the requester, in its words.
+function respondRow(call) {
+	const outcome = {completed: '完成', needs_input: '需要补充', rejected: '拒绝'}[call.args.outcome] || '完成';
+	const failed = call.result?.ok === false || Boolean(call.result?.error);
+	return {
+		respond: true, requestId: '', label: '答复请求', target: '', title: String(call.args.text || '').trim(), expandable: String(call.args.text || '').trim().length > 60,
+		status: failed ? '未记录' : outcome, failed, failure: call.result?.message || '',
+		tone: failed ? 'danger' : call.args.outcome === 'rejected' ? 'danger'
+			: call.args.outcome === 'needs_input' ? 'warning' : 'success',
+		waiting: false,
+	};
+}
+const processIcon = computed(() => isReasoning.value ? Brain : collab.value?.respond ? MessageSquareReply : collab.value ? (collab.value.supply ? FilePlus : MessagesSquare) : groupEvents.value.length ? ListChecks : ({
 	Bash: SquareTerminal, Read: FileText, Write: FilePenLine, Edit: PencilLine, EditBatch: PencilLine,
 	Browser: Globe, History, Memory: BookOpen, TaskMemory: BookOpen,
 	mcp__parrot__web_search: Search, mcp__parrot__web_fetch: Globe,
@@ -96,10 +132,10 @@ const vReasoningScroll = {
 
 <template>
 	<div class="conversation-process" :class="{'is-running': running, 'is-open': open, 'is-reasoning': isReasoning}">
-		<button ref="summaryButton" type="button" class="process-summary" :aria-expanded="open" @click="open = !open">
+		<button ref="summaryButton" type="button" class="process-summary" :aria-expanded="open" :disabled="collab && !collab.expandable && !collab.failed" @click="open = !open">
 			<component :is="processIcon" class="process-icon" :stroke-width="1.75" aria-hidden="true"/>
 			<span class="process-copy">
-			<span class="process-kind" :class="{'work-status-sweep': running}">{{ isReasoning ? (running ? '正在思考' : '思考') : toolLabel }}</span>
+			<span class="process-kind" :class="{'work-status-sweep': running}">{{ isReasoning ? (running ? '正在思考' : '思考') : collab ? collab.label : toolLabel }}</span>
 			<template v-if="isReasoning">
 				<span v-if="running && !open && preview.text" class="process-separator">·</span>
 				<span v-if="running && !open && preview.text" v-reasoning-preview="preview" class="reasoning-preview">
@@ -107,16 +143,28 @@ const vReasoningScroll = {
 				</span>
 				<span v-else-if="!running && duration" class="process-meta">· 持续了 {{ duration }}</span>
 			</template>
+			<template v-else-if="collab">
+				<span v-if="collab.target" class="process-request-target">{{ collab.target }}</span>
+				<span class="process-preview" :title="collab.title">{{ collab.title }}</span>
+				<span v-if="collab.status" class="process-request-status" :class="[`tone-${collab.tone}`, {'work-status-sweep': collab.waiting}]">{{ collab.status }}</span>
+			</template>
 			<template v-else>
 				<span v-if="state.status === 'error'" class="process-error">未成功</span>
 				<span v-if="toolPreview" class="process-preview" :class="{'work-status-sweep': running}" :title="toolPreview">{{ toolPreview }}</span>
 			</template>
 			</span>
-			<ChevronRight class="process-chevron" :stroke-width="1.75" aria-hidden="true"/>
+			<ChevronRight v-if="!collab || collab.expandable || collab.failed" class="process-chevron" :stroke-width="1.75" aria-hidden="true"/>
 		</button>
 		<WorkDisclosure :open="open">
 			<div v-if="isReasoning" class="process-reasoning-detail">
 				<div v-reasoning-scroll class="process-reasoning-scroll" tabindex="0" aria-label="思考内容，可滚动"><div>{{ reasoning || (deferredReasoning.error.value ? `思考内容读取失败：${deferredReasoning.error.value}` : deferredReasoning.loading.value ? '正在读取思考内容…' : '') }}</div></div>
+			</div>
+			<div v-else-if="collab" class="process-tool-detail">
+				<div class="process-request-detail">
+					<p v-if="collab.failed" class="process-error">{{ collab.failure || (collab.respond ? '结果没有记录' : '请求没有发出') }}</p>
+					<p v-else-if="collab.respond" class="process-respond-text">{{ collab.title || '没有附说明' }}</p>
+					<CollabRequestDetail v-else-if="collab.requestId" :request-id="collab.requestId" :request="collab.live" perspective="sender" @changed="collabStore?.load()"/>
+				</div>
 			</div>
 			<div v-else class="process-tool-detail">
 				<div ref="toolContent" class="process-tool-content">
@@ -143,6 +191,7 @@ const vReasoningScroll = {
 	overflow-clip-margin: 8px;
 }
 .process-summary { display: flex; align-items: center; gap: 8px; max-width: 100%; min-width: 0; min-height: 24px; margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.process-summary:disabled { cursor: default; color: inherit; }
 .process-summary:focus-visible { outline: 2px solid var(--bear-accent, var(--ob-focus)); outline-offset: 4px; border-radius: 3px; }
 .process-icon { width: 16px; height: 16px; flex: none; align-self: center; color: var(--work-faint); }
 .process-copy { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
@@ -150,6 +199,13 @@ const vReasoningScroll = {
 .process-meta, .process-separator { flex: none; color: var(--work-faint); font-size: 13px; }
 .process-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--work-muted); }
 .process-error { flex: none; color: var(--ob-danger); font-size: 12px; white-space: nowrap; }
+.process-request-target { flex: 0 1 auto; min-width: 2em; max-width: 9em; overflow: hidden; color: var(--work-text, var(--ob-text)); text-overflow: ellipsis; white-space: nowrap; }
+.process-request-status { flex: none; font-size: 12px; white-space: nowrap; color: var(--work-faint); }
+.process-request-status.tone-success { color: var(--ob-success); }
+.process-request-status.tone-warning { color: var(--ob-warning); }
+.process-request-status.tone-danger { color: var(--ob-danger); }
+.process-respond-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.process-request-detail { min-width: 0; margin-left: 7px; border-left: 1px solid var(--work-rule); padding: 2px 0 2px 16px; color: var(--work-detail-text); font-size: 13px; }
 .process-chevron { width: 13px; height: 13px; flex: none; align-self: center; opacity: 0; color: var(--work-faint); transition: opacity 160ms ease, transform 200ms ease; }
 .process-summary:hover .process-chevron, .process-summary:focus-visible .process-chevron, .is-open > .process-summary .process-chevron { opacity: 1; }
 .is-open > .process-summary .process-chevron { transform: rotate(90deg); }
@@ -183,6 +239,9 @@ const vReasoningScroll = {
 .process-tool-detail :deep(.tool-payload-code) { border: 0; border-radius: 0; background: transparent; }
 .process-tool-detail :deep(.tool-payload-code pre) { padding: 2px 0; font-size: 12px; line-height: 1.65; }
 .process-tool-detail :deep(.tool-payload-code code.hljs) { color: var(--work-detail-text); font-size: 12px; line-height: 1.65; }
+@media (max-width: 640px) {
+	.process-kind:has(+ .process-request-target) { display: none; }
+}
 @media (hover: none) {
 	.process-chevron { opacity: .6; }
 	.process-summary { min-height: 32px; }

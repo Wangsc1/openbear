@@ -4,6 +4,7 @@ import AdminPageHeader from "../components/AdminPageHeader.vue";
 import { computed, onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Api, apiError } from "../api";
+import { withMcpExposureConfirmation } from "../mcpExposure";
 
 const emit = defineEmits(["mobile-header-ready"]);
 const TOOL_PREVIEW_LIMIT = 3;
@@ -21,6 +22,57 @@ const drawerItem = ref(null);
 const settingsSpecLoaded = ref(false);
 const mcpSettingsAvailable = ref(false);
 const mcpSettingPaths = ref([]);
+const disabledDraft = ref([]);
+const disabledBaseline = ref([]);
+const toolQuery = ref("");
+const toolsDirty = computed(() => JSON.stringify([...disabledDraft.value].sort()) !== JSON.stringify([...disabledBaseline.value].sort()));
+const selectionTools = computed(() => asArray(drawerItem.value?.tools).filter(t => fieldText(t.originalToolName, t.description).includes(toolQuery.value.trim().toLowerCase())));
+const enabledDefinitionTools = computed(() => asArray(drawerItem.value?.tools).filter(t => !disabledDraft.value.includes(t.originalToolName) && ["allowed", "tool_disabled", "awaiting_confirmation", ""].includes(t.filterReason || "")));
+const draftDefinitionBytes = computed(() => enabledDefinitionTools.value.length ? enabledDefinitionTools.value.reduce((n, t) => n + numberValue(t.definitionBytes), 0) + enabledDefinitionTools.value.length + 1 : 0);
+function resetToolsDraft(row = drawerItem.value) {
+  disabledDraft.value = [...asArray(row?.disabledTools)];
+  disabledBaseline.value = [...disabledDraft.value];
+}
+function selectAllTools(enabled) {
+  const names = asArray(drawerItem.value?.tools).map(t => t.originalToolName);
+  disabledDraft.value = enabled ? disabledDraft.value.filter(name => !names.includes(name)) : [...new Set([...disabledDraft.value, ...names])];
+}
+function toggleTool(name, enabled) {
+  disabledDraft.value = enabled ? disabledDraft.value.filter(n => n !== name) : [...new Set([...disabledDraft.value, name])];
+}
+function definitionSize(bytes) { return `${(numberValue(bytes) / 1024).toFixed(1)} KB`; }
+async function saveTools() {
+  const key = serverKey(drawerItem.value);
+  if (!key || isServerToggling(drawerItem.value)) return;
+  setServerToggling(key, true);
+  try {
+    const submitted = [...disabledDraft.value];
+    okOrThrow(await withMcpExposureConfirmation(c => Api.setMcpServerTools(key, submitted, c)));
+    disabledBaseline.value = [...submitted];
+    ElMessage.success("工具启停已保存，新回合生效");
+    await load({ silent: true });
+  } catch (error) { if (!error.mcpCancelled) ElMessage.error(apiError(error)); }
+  finally { setServerToggling(key, false); }
+}
+async function confirmExposure(row) {
+  const key = serverKey(row);
+  setServerToggling(key, true);
+  try {
+    okOrThrow(await withMcpExposureConfirmation(c => Api.confirmMcpExposure(key, c)));
+    await load({ silent: true });
+    ElMessage.success("工具定义占用已确认，新回合生效");
+  } catch (error) { if (!error.mcpCancelled) ElMessage.error(apiError(error)); }
+  finally { setServerToggling(key, false); }
+}
+async function discoverTools() {
+  const key = serverKey(drawerItem.value);
+  setServerToggling(key, true);
+  try {
+    const result = okOrThrow(await Api.discoverMcpServerTools(key));
+    drawerItem.value = { ...drawerItem.value, tools: asArray(result.tools), totalTools: asArray(result.tools).length };
+  } catch (error) { ElMessage.error(apiError(error)); }
+  finally { setServerToggling(key, false); }
+}
 const accessDraft = ref({ mode: "disabled", tools: [] });
 const accessBaseline = ref({ mode: "disabled", tools: [] });
 const accessServer = ref("");
@@ -86,8 +138,8 @@ async function refreshServerTools(row) {
 }
 async function closeDrawer(done) {
   if (isServerToggling(drawerItem.value)) return;
-  if (accessDirty.value && drawerKind.value === "server") {
-    try { await ElMessageBox.confirm("未保存的 Agent 访问修改将被丢弃。", "放弃修改？", { confirmButtonText: "放弃修改", cancelButtonText: "继续编辑" }); }
+  if ((accessDirty.value || toolsDirty.value) && drawerKind.value === "server") {
+    try { await ElMessageBox.confirm("未保存的工具启停或 Agent 访问修改将被丢弃。", "放弃修改？", { confirmButtonText: "放弃修改", cancelButtonText: "继续编辑" }); }
     catch { return; }
   }
   done();
@@ -98,6 +150,7 @@ const STATUS_TEXT = {
   failed: "连接失败",
   disabled: "已停用",
   pending: "连接中",
+  awaiting_confirmation: "待确认",
   stopped: "已停止",
   unknown: "未知状态",
 };
@@ -125,6 +178,8 @@ const TRANSPORT_TEXT = {
 };
 const FILTER_REASON_TEXT = {
   allowed: "可用",
+  tool_disabled: "此工具已停用",
+  awaiting_confirmation: "工具定义占用待确认",
   global_disabled: "全局 MCP 已停用",
   server_disabled: "此 MCP 已停用",
   global_deny: "命中全局拒绝规则",
@@ -221,7 +276,7 @@ function statusType(value) {
   const statusValue = String(value || "");
   if (statusValue === "connected") return "success";
   if (statusValue === "failed") return "danger";
-  if (statusValue === "pending") return "warning";
+  if (statusValue === "pending" || statusValue === "awaiting_confirmation") return "warning";
   if (statusValue === "disabled" || statusValue === "stopped") return "info";
   return "info";
 }
@@ -610,6 +665,7 @@ function syncDrawerItem() {
     if (next) {
       drawerItem.value = next;
       if (!accessDirty.value) resetAccessDraft(next);
+      if (!toolsDirty.value) resetToolsDraft(next);
     }
   } else if (drawerKind.value === "tool") {
     const publicName = String(drawerItem.value?.publicName || "").trim();
@@ -628,13 +684,13 @@ async function setMcpEnabled(value) {
   mcpToggling.value = true;
   status.value = { ...status.value, enabled: value, summary: { ...(status.value.summary || {}), enabled: value } };
   try {
-    const data = okOrThrow(await Api.setMcpEnabled(value));
+    const data = okOrThrow(await withMcpExposureConfirmation(c => Api.setMcpEnabled(value, c)));
     applyStatusPayload(data);
     ElMessage.success(`全局 MCP 已${value ? "启用" : "禁用"}`);
     await load({ silent: true });
   } catch (error) {
     status.value = { ...status.value, enabled: previous, summary: { ...(status.value.summary || {}), enabled: previous } };
-    ElMessage.error(apiError(error));
+    if (!error.mcpCancelled) ElMessage.error(apiError(error));
     await load({ silent: true });
   } finally {
     mcpToggling.value = false;
@@ -647,13 +703,13 @@ async function setServerEnabled(row, value) {
   setServerToggling(key, true);
   setServerEnabledLocal(key, value);
   try {
-    const data = okOrThrow(await Api.setMcpServerEnabled(key, value));
+    const data = okOrThrow(await withMcpExposureConfirmation(c => Api.setMcpServerEnabled(key, value, c)));
     applyStatusPayload(data);
     ElMessage.success(`MCP「${serverName(row)}」已${value ? "启用" : "禁用"}`);
     await load({ silent: true });
   } catch (error) {
     setServerEnabledLocal(key, previous);
-    ElMessage.error(apiError(error));
+    if (!error.mcpCancelled) ElMessage.error(apiError(error));
     await load({ silent: true });
   } finally {
     setServerToggling(key, false);
@@ -727,11 +783,11 @@ async function setServerApproval(row, value) {
   }
 }
 async function mayLeaveAccess(row = null) {
-  if (!drawerOpen.value || drawerKind.value !== "server" || !accessDirty.value) return true;
+  if (!drawerOpen.value || drawerKind.value !== "server" || (!accessDirty.value && !toolsDirty.value)) return true;
   if (row && serverKey(row) === accessServer.value) return false;
   if (isServerToggling(drawerItem.value)) return false;
   try {
-    await ElMessageBox.confirm("未保存的 Agent 访问修改将被丢弃。", "放弃修改？", { confirmButtonText: "放弃修改", cancelButtonText: "继续编辑" });
+    await ElMessageBox.confirm("未保存的工具启停或 Agent 访问修改将被丢弃。", "放弃修改？", { confirmButtonText: "放弃修改", cancelButtonText: "继续编辑" });
     return true;
   } catch { return false; }
 }
@@ -740,6 +796,8 @@ async function openServer(row) {
   drawerKind.value = "server";
   drawerItem.value = row;
   resetAccessDraft(row);
+  resetToolsDraft(row);
+  toolQuery.value = "";
   drawerOpen.value = true;
 }
 async function openTool(row) {
@@ -782,7 +840,7 @@ async function load(options = {}) {
 async function reloadMcp() {
   reloading.value = true;
   try {
-    const result = okOrThrow(await Api.reloadMcp());
+    const result = okOrThrow(await withMcpExposureConfirmation(c => Api.reloadMcp(c)));
     const s = result.summary || {};
     ElMessage.success(`MCP 配置已重新加载：${s.serverCount || result.servers || 0} 个 MCP，${s.visibleTools || result.tools || 0} 个可用接口`);
     await load({ silent: true });
@@ -931,7 +989,8 @@ onMounted(load);
 
           <div class="mcp-facts">
             <span>{{ transportText(card.transport) }}</span>
-            <span><strong>{{ card.visibleTools }}</strong>/{{ card.totalTools }} 个接口</span>
+            <span><strong>{{ status.toolSelectionAvailable ? card.enabledTools : card.visibleTools }}</strong>/{{ card.totalTools }} {{ status.toolSelectionAvailable ? '已启用工具' : '个接口' }}</span>
+            <span v-if="status.toolSelectionAvailable">定义 {{ definitionSize(card.definitionBytes) }}</span>
             <span v-if="card.promptCount"><strong>{{ card.promptCount }}</strong> 个提示词</span>
             <span v-if="card.filteredTools" class="is-warning"><strong>{{ card.filteredTools }}</strong> 个已过滤</span>
             <span v-if="card.required">必需连接</span>
@@ -1015,12 +1074,44 @@ onMounted(load);
               </div>
             </el-descriptions-item>
             <el-descriptions-item label="接口数量">共 {{ drawerItem.totalTools || 0 }} 个，可用 {{ drawerItem.visibleTools || 0 }} 个，已过滤 {{ drawerItem.filteredTools || 0 }} 个</el-descriptions-item>
+            <el-descriptions-item v-if="status.toolSelectionAvailable" label="定义占用">已启用 {{ drawerItem.enabledTools || 0 }} / {{ drawerItem.totalTools || 0 }} · {{ definitionSize(drawerItem.definitionBytes) }}</el-descriptions-item>
             <el-descriptions-item label="审批策略"><el-tag :type="approvalType(drawerItem.approval)" effect="plain" round>{{ approvalText(drawerItem.approval) }}</el-tag></el-descriptions-item>
             <el-descriptions-item label="是否必需">{{ boolText(drawerItem.required) }}</el-descriptions-item>
             <el-descriptions-item label="最近连接">{{ formatTime(drawerItem.lastConnectedAt) }}</el-descriptions-item>
             <el-descriptions-item label="最近失败">{{ formatTime(drawerItem.lastFailedAt) }}</el-descriptions-item>
             <el-descriptions-item label="错误明文">{{ drawerItem.errorPresent ? '已隐藏' : '无' }}</el-descriptions-item>
           </el-descriptions>
+
+          <section v-if="status.toolSelectionAvailable" class="mcp-tool-selection rounded-2xl border border-macborder bg-ob-surface p-4" aria-label="工具启停">
+            <h3 class="mb-2 text-sm font-medium">工具启停</h3>
+            <p class="mb-3 text-xs leading-5 text-macsub">停用的工具不会发送给模型，也不能调用。新增工具默认启用；原有允许 / 拒绝规则仍然有效。</p>
+            <div v-if="drawerItem.status === 'awaiting_confirmation'" class="mb-3 text-xs leading-5 text-ob-warning">
+              此工具集占用超过阈值，尚未向模型开放。可以先减少启用项，或确认当前占用。
+              <el-button class="mt-2" :loading="isServerToggling(drawerItem)" :disabled="toolsDirty" @click="confirmExposure(drawerItem)">确认当前工具集</el-button>
+            </div>
+            <p class="mb-2 text-xs text-macsub">已启用 {{ enabledDefinitionTools.length }} / {{ drawerItem.tools?.length || 0 }} · 定义 {{ definitionSize(draftDefinitionBytes) }}</p>
+            <el-input v-model="toolQuery" placeholder="搜索工具名称或说明" clearable aria-label="搜索工具" />
+            <div class="my-2 flex flex-wrap gap-2">
+              <el-button :disabled="isServerToggling(drawerItem)" @click="selectAllTools(true)">全选</el-button>
+              <el-button :disabled="isServerToggling(drawerItem)" @click="selectAllTools(false)">全不选</el-button>
+              <el-button v-if="!drawerItem.tools?.length" :loading="isServerToggling(drawerItem)" @click="discoverTools">获取工具清单</el-button>
+            </div>
+            <div class="mcp-selection-list">
+              <div v-for="tool in selectionTools" :key="tool.originalToolName" class="mcp-selection-row">
+                <div class="min-w-0 flex-1">
+                  <code class="block break-all text-xs leading-5">{{ tool.originalToolName }}</code>
+                  <p class="mcp-selection-description text-xs leading-5 text-macsub">{{ tool.description }}</p>
+                  <details class="mcp-tool-more text-xs text-macsub"><summary>展开说明 · {{ definitionSize(tool.definitionBytes) }}</summary><p class="break-all leading-5">{{ tool.description }}</p></details>
+                </div>
+                <el-switch :model-value="!disabledDraft.includes(tool.originalToolName)" :disabled="isServerToggling(drawerItem)" :aria-label="`启用 ${tool.originalToolName}`" @change="v => toggleTool(tool.originalToolName, v)" />
+              </div>
+              <p v-if="!selectionTools.length" class="py-3 text-xs text-macsub">{{ toolQuery ? '没有匹配的工具' : '尚未发现工具，可获取清单后选择。' }}</p>
+            </div>
+            <div class="mt-3 flex flex-wrap justify-end gap-2">
+              <el-button :disabled="isServerToggling(drawerItem)" @click="resetToolsDraft()">还原选择</el-button>
+              <el-button type="primary" :loading="isServerToggling(drawerItem)" :disabled="!toolsDirty || isServerToggling(drawerItem)" @click="saveTools">保存工具启停</el-button>
+            </div>
+          </section>
 
           <section class="rounded-2xl border border-macborder bg-ob-surface p-4" aria-label="允许 Agent 访问">
             <h3 class="mb-2 text-sm font-semibold">允许 Agent 访问</h3>
@@ -1089,7 +1180,7 @@ onMounted(load);
           </div>
 
           <div class="rounded-2xl border border-macborder bg-ob-surface p-4">
-            <h3 class="mb-3 text-sm font-semibold">接口清单</h3>
+            <h3 class="mb-3 text-sm font-semibold">接口清单与参数详情</h3>
             <el-empty v-if="!drawerItem.tools?.length" description="此 MCP 暂无接口" :image-size="72" />
             <div v-else class="space-y-2">
               <button v-for="tool in drawerItem.tools" :key="tool.publicName || tool.originalToolName" type="button" class="tool-row" @click="openTool(tool)">
@@ -1171,6 +1262,15 @@ onMounted(load);
 </template>
 
 <style scoped>
+.mcp-tool-selection { min-width: 0; }
+.mcp-selection-list { max-height: 460px; overflow-y: auto; overflow-x: hidden; }
+.mcp-selection-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--ob-border); min-width: 0; }
+.mcp-selection-row :deep(.el-switch) { flex-shrink: 0; min-height: 44px; }
+.mcp-selection-description { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.mcp-tool-more { text-align: left; }
+.mcp-tool-more summary { min-height: 32px; line-height: 32px; cursor: pointer; }
+@media (max-width: 767px) { .mcp-selection-list { max-height: 45vh; } }
+
 .mcp-help { margin-bottom: 12px; color: var(--ob-text-subtle); font-size: 12px; }
 .mcp-help summary { cursor: pointer; min-height: 28px; line-height: 28px; }
 .mcp-help p { max-width: 80ch; padding: 6px 0; line-height: 1.7; }

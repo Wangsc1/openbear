@@ -5,6 +5,7 @@ import {
   applyOperationFrame,
   convergeStoppedAcknowledgement,
   deriveOperationRunState,
+  findActiveTurnIndex,
   eventDisplayTimeMs,
   eventStartedAtMs,
   eventUpdatedAtMs,
@@ -766,6 +767,77 @@ test("operation projection groups distinct execution runs into one root turn", (
   assert.equal(assistants.length, 1);
   assert.equal(assistants[0].id, "op-assistant-root-1");
   assert.ok(assistants[0].localTimeline.some((item) => item.kind === "answer" && item.message.content === "最终汇总"));
+});
+
+function continuationScenario() {
+  const op = (opId, opType, runId, root, displaySeq, payload = {}, extra = {}) => ({
+    opId, opType, runId, targetType: "run", targetId: runId, runRootTurnId: root, turnUuid: root, displaySeq,
+    status: "completed", lifecycle: "terminal", createdAtMs: displaySeq * 1000, updatedAtMs: displaySeq * 1000, payload, ...extra,
+  });
+  return [
+    op("run:root-1", "run", "root-1", "root-1", 10, { runId: "root-1", source: "user", status: "failed" }),
+    op("msg:root-1", "user_message", "root-1", "root-1", 11, { text: "审计这套 Java" }),
+    op("agent:t1", "agent", "root-1", "root-1", 12, { task: { status: "completed" } }, { targetType: "task", targetId: "t1", taskUuid: "t1" }),
+    op("assistant-error:root-1", "assistant_message", "root-1", "root-1", 13, { text: "本轮执行失败", error: true, complete: true }, { status: "failed" }),
+    op("stats:root-1", "stats", "root-1", "root-1", 14, { durationMs: 1000 }),
+    op("run:root-2", "run", "root-2", "root-2", 20, { runId: "root-2", source: "user" }),
+    op("msg:root-2", "user_message", "root-2", "root-2", 21, { text: "刚才的报错算违规吗" }),
+    op("assistant:root-2", "assistant_message", "root-2", "root-2", 22, { text: "不算", complete: true }),
+    op("run:exec-2", "run", "exec-2", "root-1", 30, { runId: "exec-2", source: "task_notification", internal: true }, { internal: true }),
+    op("notice:task:batch", "notice", "root-1", "root-1", 31, { text: "1 个后台任务完成", internal: true }, { targetType: "task", targetId: "", lifecycle: "informational", internal: true }),
+    op("assistant:root-1:exec-2", "assistant_message", "exec-2", "root-1", 32, { text: "审计结论", complete: true }),
+    op("stats:exec-2", "stats", "exec-2", "root-1", 33, { durationMs: 2000 }),
+  ];
+}
+
+test("a root resumed after a later turn continues as its own block where it actually ran", () => {
+  const projected = projectOperationMessages(continuationScenario());
+  assert.deepEqual(projected.map((msg) => msg.role === "user" ? (msg.continuation ? "continuation" : msg.content) : "assistant"),
+    ["审计这套 Java", "assistant", "刚才的报错算违规吗", "assistant", "continuation", "assistant"]);
+  const [, original, , , placeholder, resumed] = projected;
+  assert.deepEqual(placeholder.continuation, {
+    rootTurnUuid: "root-1", runIds: ["exec-2"], source: "task_notification",
+    rootUserOpId: "msg:root-1", rootStartedAt: 11, rootPreview: "审计这套 Java",
+  });
+  assert.equal(placeholder.syntheticPlaceholder, true);
+  assert.equal(placeholder.turnUuid, undefined, "a continuation is not a deletable/referable user turn");
+  assert.ok(original.localTimeline.some((event) => event.message?.content === "本轮执行失败"));
+  assert.ok(!original.localTimeline.some((event) => event.message?.content === "审计结论"));
+  assert.deepEqual(original.localStats, { durationMs: 1000 }, "the failed run keeps its own statistics");
+  assert.ok(resumed.localTimeline.some((event) => event.message?.content === "审计结论"));
+  assert.deepEqual(resumed.localStats, { durationMs: 2000 });
+});
+
+test("further runs of a continuation merge into it until another turn begins", () => {
+  const ops = continuationScenario();
+  const more = (opId, opType, runId, displaySeq, payload) => ({
+    opId, opType, runId, targetType: "run", targetId: runId, runRootTurnId: "root-1", turnUuid: "root-1", displaySeq,
+    status: "completed", lifecycle: "terminal", createdAtMs: displaySeq * 1000, updatedAtMs: displaySeq * 1000, payload,
+  });
+  ops.push(more("run:exec-3", "run", "exec-3", 40, { runId: "exec-3", source: "task_notification", internal: true }));
+  ops.push(more("assistant:root-1:exec-3", "assistant_message", "exec-3", 41, { text: "补充结论", complete: true }));
+  const projected = projectOperationMessages(ops);
+  const continuations = projected.filter((msg) => msg.continuation);
+  assert.equal(continuations.length, 1);
+  assert.deepEqual(continuations[0].continuation.runIds, ["exec-2", "exec-3"]);
+  assert.ok(projected.at(-1).localTimeline.some((event) => event.message?.content === "补充结论"));
+});
+
+test("a running continuation, not its root turn, receives the live thinking indicator", () => {
+  const running = continuationScenario().map((op) => op.opId === "run:exec-2"
+    ? { ...op, status: "running", lifecycle: "active", payload: { ...op.payload, status: "running" } } : op);
+  const state = deriveOperationRunState(running);
+  assert.equal(state.activeRootTurnId, "root-1");
+  assert.equal(state.activeRunId, "exec-2");
+  const turns = [
+    { turnUuid: "root-1", user: { content: "审计这套 Java" }, events: [] },
+    { turnUuid: "root-2", user: { content: "刚才的报错算违规吗" }, events: [] },
+    { turnUuid: "", user: { syntheticPlaceholder: true, continuation: { runIds: ["exec-2"] } }, events: [] },
+  ];
+  assert.equal(findActiveTurnIndex(turns, state), 2);
+  const withThinking = withTransientIdleThinking(turns, state);
+  assert.deepEqual(withThinking.map((turn) => turn.events.length), [0, 0, 1]);
+  assert.equal(findActiveTurnIndex(turns, { activeRootTurnId: "root-2", activeRunId: "root-2" }), 1);
 });
 
 test("operation projection does not create empty user row for internal task-notification answer", () => {

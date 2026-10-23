@@ -9,6 +9,7 @@ import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,13 +20,14 @@ from app.agent.native_continuation import (
 from app.context.configuration import normalize_strategy
 from app.context.media_recovery import reference_historical_media
 from app.context.prompts import effective_context_prompt
-from app.context.store import ControllerBoundary, RequestTicket, StaleWindow, WindowStore
+from app.context.store import ArchivePlan, ControllerBoundary, RequestTicket, SavePlan, StaleWindow, WindowStore
 from app.context.strategies import (
     CompressionRequest,
     ContextCompressionError,
     ContextStrategy,
     SlidingWindowStrategy,
 )
+from app.context.tool_artifacts import externalize_tool_results
 from app.context.window import (
     InputEstimate,
     RequiredContextTooLarge,
@@ -33,11 +35,24 @@ from app.context.window import (
     estimate_request,
     mark_source,
     neutral_context,
+    neutral_view,
     sanitize_window_checkpoint,
     source_of,
 )
 from app.llm.base import Message
 from app.llm.events import Usage
+
+
+@dataclass
+class CheckpointPlan:
+    messages: list[Message]
+    archive: ArchivePlan
+    safe: list[Message]
+    dropped: int
+    safe_archive: ArchivePlan | None
+    serialized: list[dict[str, Any]]
+    save: SavePlan
+    loaded: dict[str, Any] | None
 
 
 class ContextManager:
@@ -177,16 +192,42 @@ class ContextManager:
                    "requestOptions": self.request_options}
         return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
+    async def plan_checkpoint(self, messages: list[Message]) -> CheckpointPlan:
+        """Everything checkpoint() computes without the writer, for callers that hold it."""
+        self.bind_sources(messages)
+        archive = self.store.plan_archive(messages)
+        safe, dropped = sanitize_window_checkpoint(messages)
+        serialized = serialize_messages(neutral_view(safe))
+        return CheckpointPlan(
+            messages, archive, safe, dropped, self.store.plan_archive(safe) if dropped else None,
+            serialized, self.store.plan_save(safe, serialized=serialized), await self.store.load(),
+        )
+
     async def checkpoint(
         self, messages: list[Message], *, extra_state: dict[str, Any] | None = None,
-        route: str | None = None,
+        route: str | None = None, plan: CheckpointPlan | None = None,
     ) -> dict[str, Any]:
-        self.bind_sources(messages)
-        archived = await self.store.archive(messages)
-        safe, dropped = sanitize_window_checkpoint(messages)
-        if dropped:
-            archived = await self.store.archive(safe)
-        saved_state = ((await self.store.load(fresh=True)) or {}).get("state") or {}
+        if plan is None or plan.messages is not messages:
+            self.bind_sources(messages)
+            archived = await self.store.archive(messages)
+            safe, dropped = sanitize_window_checkpoint(messages)
+            if dropped:
+                archived = await self.store.archive(safe)
+            serialized = serialize_messages(neutral_view(safe))
+            save_plan = self.store.plan_save(safe, serialized=serialized)
+            saved_state = ((await self.store.load(fresh=True)) or {}).get("state") or {}
+        else:
+            safe, dropped, serialized, save_plan = plan.safe, plan.dropped, plan.serialized, plan.save
+            archived = await self.store.archive(messages, plan=plan.archive)
+            if dropped:
+                archived = await self.store.archive(safe, plan=plan.safe_archive)
+            # The pre-read state is reused only if the writer still sees its
+            # revision. Writes that skip the revision (calibration, coverage)
+            # never touch the keys read from saved_state below.
+            loaded = plan.loaded
+            if loaded is None or await self.store.current_revision() != loaded["revision"]:
+                loaded = await self.store.load(fresh=True)
+            saved_state = (loaded or {}).get("state") or {}
         # Checkpoints do not change the request identity; keep it even when a
         # compatibility caller has not supplied the full label/options yet.
         identity = {key: saved_state[key] for key in ("requestModelLabel", "replayIdentity") if key in saved_state}
@@ -195,9 +236,9 @@ class ContextManager:
         if self.replay_identity:
             identity["replayIdentity"] = self.replay_identity
         measurement = {}
-        if saved_state.get("messages") == serialize_messages(neutral_context(safe)):
+        if saved_state.get("messages") == serialized:
             measurement = {key: saved_state[key] for key in (
-                "rawEstimatedInputTokens", "estimatedNextInputTokens", "mediaTokensUnknown"
+                "rawEstimatedInputTokens", "rawEstimateReasoning", "estimatedNextInputTokens", "mediaTokensUnknown"
             ) if key in saved_state}
         extra = {**measurement, **(extra_state or {}), **identity, "incompleteBatch": bool(dropped)}
         saved_route = route if route is not None else self.route
@@ -205,7 +246,7 @@ class ContextManager:
             saved_route = str(((await self.store.load(fresh=True)) or {}).get("route_fingerprint") or "")
         saved = await self.store.save(
             safe, expected_revision=archived["revision"], expected_source_revision=archived["sourceRevision"],
-            route=saved_route, extra_state=extra,
+            route=saved_route, extra_state=extra, plan=save_plan,
         )
         self.window_version = saved["windowVersion"]
         self.state_revision = saved["revision"]
@@ -222,6 +263,7 @@ class ContextManager:
     ) -> list[Message]:
         if not validate_model_context(messages):
             raise ValueError("window_prepare_requires_closed_tool_batch")
+        messages = copy.deepcopy(messages)
         self.bind_sources(messages)
         archived = await self.store.archive(messages, controller_boundary=controller_boundary)
         saved = await self.store.load(fresh=True)
@@ -247,23 +289,38 @@ class ContextManager:
         calibrated = (calibration.get("route") == route
                       and calibration.get("windowVersion") == (saved or {}).get("window_version")
                       and bool(calibration.get("tokens") and calibration.get("estimate")))
+        # Measured on a request without replayed thinking, e.g. the first one
+        # after a rotation: the right conversion for a reduced, thinking-free
+        # selection. It survives rotations; the route still has to match.
+        neutral = ((saved or {}).get("state") or {}).get("neutralCalibration") or {}
+        neutral_ratio = (int(neutral["tokens"]) / int(neutral["estimate"])
+                         if neutral.get("route") == route and neutral.get("tokens") and neutral.get("estimate") else 0.0)
+
+        last_raw: list[tuple[list[Message], InputEstimate]] = []
 
         def raw_estimator(items: list[Message]) -> InputEstimate:
-            return estimate_request(request_view(items) if request_view else items, system=system, tools=tools, backend=self.backend,
-                                    model=self.model, max_tokens=self.policy.max_output_tokens,
-                                    request_options=self.request_options)
+            raw = estimate_request(request_view(items) if request_view else items, system=system, tools=tools, backend=self.backend,
+                                   model=self.model, max_tokens=self.policy.max_output_tokens,
+                                   request_options=self.request_options)
+            last_raw[:] = [(items, raw)]
+            return raw
 
         def estimator(items: list[Message]) -> InputEstimate:
             raw = raw_estimator(items)
             tokens = raw.tokens
-            if calibrated and not raw.media_unknown:
+            if calibrated:
                 previous = int(calibration["estimate"])
                 actual = int(calibration["tokens"])
                 # Anchor growth at the real request, estimate only newly added
                 # material. A provider's fixed/native overhead must not multiply
                 # a later large tool result. Shrinkage remains only a soft guess.
-                tokens = actual + (raw.tokens - previous) if raw.tokens >= previous else round(actual * raw.tokens / previous)
-            return InputEstimate(max(0, tokens), raw.media_unknown, raw.request_bytes)
+                if raw.tokens >= previous:
+                    tokens = actual + (raw.tokens - previous)
+                elif neutral_ratio and not raw.reasoning:
+                    tokens = round(raw.tokens * neutral_ratio)
+                else:
+                    tokens = round(actual * raw.tokens / previous)
+            return InputEstimate(max(0, tokens), raw.media_unknown, raw.request_bytes, raw.reasoning)
 
         measured = estimator(messages)
         before_estimate = measured
@@ -285,6 +342,7 @@ class ContextManager:
             exact = 0
         needed = not self.media_overflow and (force or self.pending or bool(threshold and max(measured.tokens, exact) >= threshold))
         selected = None
+        artifact_detail = {"externalizedToolResults": 0, "toolResultTokensSaved": 0}
         outgoing = messages
         started = time.monotonic()
         # The input must fall below the same configured trigger before the next
@@ -311,6 +369,17 @@ class ContextManager:
             for message in working:
                 if source_of(message).get("kind") == "runtime":
                     message["openbear_context_source"] = {**source_of(message), "kind": "required_runtime"}
+            # File references require the owner's actual Read capability. Do not
+            # expand an Agent grant or a custom Controller tool allowlist here.
+            if any(tool.get("name", tool.get("function", {}).get("name")) == "Read" for tool in tools):
+                owner_dir = hashlib.sha256(self.store.owner.key.encode()).hexdigest()
+                working, artifact_detail = externalize_tool_results(
+                    working, artifact_dir=Path(self.store.db._path).resolve().parent / "tool_artifacts" / "context-results" / owner_dir,
+                    threshold_tokens=self.policy.tool_result_artifact_tokens,
+                )
+                if artifact_detail["externalizedToolResults"]:
+                    calibrated = False
+            self._active_compression.update(artifact_detail)
             strategy = self.strategies.get(self.active_strategy)
             if strategy is None:
                 raise ContextCompressionError(f"context_strategy_unavailable:{self.active_strategy}")
@@ -318,6 +387,7 @@ class ContextManager:
                 working, estimator, self.policy.target(attempt), ceiling,
                 active_task_uuid=self.store.owner.task_uuid if self.store.owner.kind == "agent" else "",
                 active_run_root_turn_uuid=self.active_run_root_turn_uuid,
+                dialogue_target=self.policy.dialogue_target(attempt),
             ))
             outgoing = selected.messages
             for message in outgoing:
@@ -336,6 +406,7 @@ class ContextManager:
             "beforeRequestBytes": before_estimate.request_bytes,
             "afterRequestBytes": measured.request_bytes,
             "referencedMedia": retired_media,
+            **artifact_detail,
             "afterEstimateTokens": measured.tokens, "estimateOnly": True,
             "mediaTokensUnknown": measured.media_unknown,
             "rolloverTriggerTokens": threshold,
@@ -346,6 +417,14 @@ class ContextManager:
             "durationMs": int((time.monotonic() - started) * 1000),
             **(selected.detail if selected else {}),
         }
+        # Without rotation nothing touched the last measured list since then.
+        outgoing_raw = (last_raw[0][1] if not rotated and last_raw and last_raw[0][0] is outgoing else None) or raw_estimator(outgoing)
+        carried: dict[str, Any] = {}
+        if rotated and calibrated and saved:
+            # The selection was judged with this calibration; the very next
+            # prepare of the committed window must meter it the same way, or a
+            # window accepted here is rejected there. Real usage replaces it.
+            carried = {"calibration": {**calibration, "windowVersion": int(saved["window_version"]) + 1}}
         if rotated:
             # Algorithms may create a new summary source. Archive it only after
             # budget validation; the active state is still swapped atomically.
@@ -360,10 +439,11 @@ class ContextManager:
             expected_message_high_water=expected_message_high_water, controller_boundary=controller_boundary,
             source_message_high_water=controller_boundary.high_water if controller_boundary else None,
             extra_state={"strategy": self.active_strategy, "compressionPending": False,
-                         "replayIdentity": self.replay_identity,
+                         "replayIdentity": self.replay_identity, **carried,
                          **({"requestModelLabel": self.model_label or saved["state"]["requestModelLabel"]}
                             if self.model_label or ((saved or {}).get("state") or {}).get("requestModelLabel") else {}),
-                         "estimatedNextInputTokens": measured.tokens, "rawEstimatedInputTokens": raw_estimator(outgoing).tokens, "mediaTokensUnknown": measured.media_unknown},
+                         "estimatedNextInputTokens": measured.tokens, "rawEstimatedInputTokens": outgoing_raw.tokens,
+                         "rawEstimateReasoning": outgoing_raw.reasoning, "mediaTokensUnknown": measured.media_unknown},
         )
         self.window_version = result["windowVersion"]
         self.state_revision = result["revision"]

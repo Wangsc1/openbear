@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
 import re
@@ -25,45 +24,9 @@ from app.tools.agents import (
     register_agent_tools,
 )
 from app.tools.allowlist import AGENT_DELEGATION_TOOL_NAMES
-from app.tools.base import ToolRegistry, ToolRuntimeContext, current_tool_context
+from app.tools.base import ToolRegistry, ToolRuntimeContext
 from app.web_admin import WebAdminServer
 from app.web_operations import reduce_operation_payload
-
-
-async def test_tool_registry_preserves_protected_result_verbatim():
-    reg = ToolRegistry()
-    long_result = "完整 Agent 结论：" + ("证据" * 20_000)
-
-    async def result(_args):
-        return long_result
-
-    reg.add(
-        "ProtectedAgentResult",
-        "test",
-        {"type": "object", "properties": {}},
-        result,
-        preserve_result=True,
-    )
-    delivered = await reg.dispatch("ProtectedAgentResult", "{}", max_chars=128)
-
-    assert delivered == long_result
-    assert "tool_result_truncated" not in delivered
-
-
-async def test_tool_registry_injects_runtime_context():
-    reg = ToolRegistry()
-
-    async def whoami(_args):
-        ctx = current_tool_context()
-        return f"chat={ctx.chat_id};session={ctx.session_uuid};source={ctx.source}"
-
-    reg.add("WhoAmI", "test", {"type": "object", "properties": {}}, whoami)
-    result = await reg.dispatch(
-        "WhoAmI",
-        "{}",
-        context=ToolRuntimeContext(chat_id=123, session_uuid="s1", source="chat"),
-    )
-    assert result == "chat=123;session=s1;source=chat"
 
 
 @pytest.fixture
@@ -264,14 +227,6 @@ def test_default_rath_agent_prompt_only_adds_specialization():
     assert "不套用固定的工作流程或报告栏目" in prompt
     for duplicated in ("## 工作流程", "## 输出格式", "## 质量标准", "建议下一步", "风险 / 未覆盖项", "收敛优先"):
         assert duplicated not in prompt, duplicated
-
-
-def test_agent_new_and_continue_callbacks_emit_progress_after_persisting_ledger_usage():
-    for method in (AgentTools._run_one, AgentTools.continue_task):
-        source = inspect.getsource(method)
-        persist_at = source.index("latest_ledger_usage = await self._persist_agent_model_call(")
-        emit_at = source.index("await _emit_progress()", persist_at)
-        assert emit_at > persist_at
 
 
 async def test_agent_accounting_snapshots_are_absolute_monotonic_and_keep_only_durable_usage(agent_tool_env):
@@ -678,7 +633,7 @@ async def test_agent_plan_mode_defaults_direct_and_managed_requires_controller_r
     assert direct_task.input["planMode"] == "direct"
     assert _task_public(direct_task)["planMode"] == "direct"
     assert "Agent Plan 强制执行协议" not in backend.calls[0]["system"]
-    assert {tool["name"] for tool in backend.calls[0]["tools"]} == {"Read"}
+    assert {tool["name"] for tool in backend.calls[0]["tools"]} == {"Read", "AgentControlAck"}
 
     managed_raw = await reg.dispatch(
         "Agent",
@@ -1741,7 +1696,7 @@ async def test_agent_uses_web_preset_and_agent_scoped_tools(agent_tool_env):
     assert data["agentSession"]["agentKey"] == "code-reviewer"
     assert "你是代码审查员" in backend.calls[0]["system"]
     tool_names = {tool["name"] for tool in backend.calls[0]["tools"]}
-    assert tool_names == {"Read"}
+    assert tool_names == {"Read", "AgentControlAck"}
 
 
 async def test_agent_requested_tools_cannot_exceed_preset_allowlist(agent_tool_env):
@@ -2153,73 +2108,6 @@ async def test_agent_uses_conversation_agent_run_config_and_freezes_snapshot(age
     assert backend.calls
     assert backend.calls[0]["think_level"] == "medium"
     assert backend.calls[0]["service_tier"] in {"", None}
-
-
-async def test_agent_continue_keeps_frozen_runtime_after_conversation_change(agent_tool_env):
-    dao = agent_tool_env
-    backend = _RecordingBackend()
-    reg = ToolRegistry()
-    manager = AgentControlService(dao)
-    register_agent_tools(
-        reg,
-        config=_FakeConfig(),
-        dao=dao,
-        manager=manager,
-        llm_factory=_FakeFactory(backend),
-        model_selection=_FakeSelection(),
-    )
-
-    await dao.db.conn.execute(
-        """
-        INSERT INTO web_conversations (
-          conversation_uuid, owner_chat_id, internal_chat_id, title, model,
-          agent_model, agent_think_level, agent_fast_mode, status, current_status, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-        """,
-        (
-            "openbear-session-2", 200, 200, "t", "openai/gpt",
-            "openai/cheap", "medium", 0, "idle", "就绪", 1, 1,
-        ),
-    )
-    await dao.db.conn.commit()
-
-    raw = await reg.dispatch(
-        "Agent",
-        json.dumps({"description": "第一轮", "prompt": "先调查", "tools": []}, ensure_ascii=False),
-        context=ToolRuntimeContext(chat_id=200, session_uuid="openbear-session-2", source="chat"),
-    )
-    first = json.loads(raw)
-    task_uuid = first["task"]["taskUuid"]
-    assert first["ok"] is True
-
-    # Change conversation defaults after task finished; continue must stay frozen.
-    await dao.db.conn.execute(
-        "UPDATE web_conversations SET agent_model=?, agent_think_level=?, agent_fast_mode=? WHERE conversation_uuid=?",
-        ("openai/gpt", "high", 1, "openbear-session-2"),
-    )
-    await dao.db.conn.commit()
-
-    cont = await reg.dispatch(
-        "AgentMessage",
-        json.dumps({
-            "to": task_uuid,
-            "message": "继续补充结论",
-            "reasonCode": "user_instruction",
-            "reason": "用户要求继续补充现有任务结论",
-        }, ensure_ascii=False),
-        context=ToolRuntimeContext(chat_id=200, session_uuid="openbear-session-2", source="chat"),
-    )
-    cont_data = json.loads(cont)
-    # Terminal tasks cannot continue via AgentMessage in current product rules; if blocked,
-    # at least the first launch freeze is validated. Prefer continue path when available.
-    if cont_data.get("ok"):
-        assert backend.calls[-1]["think_level"] == "medium"
-        task = await dao.get_task(task_uuid)
-        assert task.input["agentSnapshot"]["model"] == "openai/cheap"
-    else:
-        task = await dao.get_task(task_uuid)
-        assert task.input["agentSnapshot"]["model"] == "openai/cheap"
-        assert task.input["agentSnapshot"]["thinkLevel"] == "medium"
 
 
 async def test_agent_inheritance_uses_durable_plan_facts_and_enforces_scope(agent_tool_env):

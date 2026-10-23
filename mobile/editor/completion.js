@@ -1,0 +1,278 @@
+// 补全规则：从 web/src/components/MdEditor.vue 原样搬来（模板变量/指令、@mem/@secret/@doc 引用）。
+// 由 editor/sync-completion.mjs 生成，Web 改了补全规则后重新生成，不要手改。
+/* eslint-disable */
+const TEMPLATE_EXPRESSIONS = [
+  { expr: "time.now", detail: "当前本地时间" },
+  { expr: "time.iso", detail: "当前时间（ISO）" },
+  { expr: "time.date", detail: "当前日期" },
+  { expr: "time.clock", detail: "当前时分秒" },
+  { expr: "time.weekday", detail: "当前星期" },
+  { expr: "time.timezone", detail: "当前时区" },
+  { expr: "time.utcOffset", detail: "UTC 偏移" },
+  { expr: "time.timestamp", detail: "当前时间戳" },
+  { expr: "message.id", detail: "当前消息标识" },
+  { expr: "message.source", detail: "当前消息来源" },
+  { expr: "message.sentAt", detail: "消息发送时间" },
+  { expr: "message.attachmentCount", detail: "消息附件数量" },
+  { expr: "message.attachments", detail: "消息附件列表" },
+  { expr: "conversation.id", detail: "当前会话标识" },
+  { expr: "conversation.title", detail: "当前会话标题" },
+  { expr: "conversation.folderPath", detail: "当前会话目录路径" },
+  // 当前 build_system_prompt_params() 提供的运行时变量
+  { expr: "workspaceDir", detail: "OpenBear 公共 workspace（工具与产物根保持不变）" },
+  { expr: "loop.minutes", detail: "无推进提醒：已多少分钟没有推进" },
+  { expr: "loop.reads", detail: "无推进提醒：期间读取、查询次数" },
+  { expr: "loop.thinkSteps", detail: "无推进提醒：期间思考步数" },
+  { expr: "loop.count", detail: "无推进提醒：本轮第几次提醒" },
+  { expr: "folderWorkspaceDir", detail: "当前主会话目录继承后的工作目录；无设置时回退 workspaceDir" },
+  { expr: "folderPrompt", detail: "当前主会话目录继承后的 Markdown 提示词（就近覆盖）" },
+  { expr: "toolNames", detail: "当前全部可用工具名列表(内置 + MCP)" },
+  { expr: "toolSummaries", detail: "全部工具说明映射" },
+  { expr: "builtinToolNames", detail: "内置工具名列表" },
+  { expr: "builtinToolSummaries", detail: "内置工具说明映射" },
+  { expr: "mcpToolNames", detail: "MCP 工具名；Agent 模板仅含本轮授权范围" },
+  { expr: "mcpToolSummaries", detail: "MCP 工具说明映射" },
+  { expr: "mcpToolGroups", detail: "按 MCP server 聚合的紧凑工具目录" },
+  { expr: "mcpServerInstructions", detail: "MCP 服务说明；Agent 仅含已授权工具所属服务，不授予权限" },
+  { expr: "tools.allowlist", detail: "工具允许清单(与 toolNames 同源)" },
+  { expr: "tools.summaries", detail: "工具说明映射(嵌套结构)" },
+  { expr: "tools.builtin.allowlist", detail: "内置工具允许清单" },
+  { expr: "tools.builtin.summaries", detail: "内置工具说明映射" },
+  { expr: "tools.mcp.allowlist", detail: "MCP 工具允许清单" },
+  { expr: "tools.mcp.summaries", detail: "MCP 工具说明映射" },
+  { expr: "tools.mcp.groups", detail: "按 MCP server 聚合的紧凑工具目录" },
+  { expr: "tools.mcp.serverInstructions", detail: "MCP 服务说明；Agent 仅含已授权工具所属服务，不授予权限" },
+  { expr: "skillsPrompt", detail: "Skills 注入文本" },
+  { expr: "defaultThinkLevel", detail: "默认 thinking 等级" },
+  { expr: "reasoningLevel", detail: "Reasoning 当前等级" },
+
+  // host / runtimeInfo
+  { expr: "host.hostname", detail: "宿主机名" },
+  { expr: "host.os", detail: "宿主 OS" },
+  { expr: "host.arch", detail: "宿主架构" },
+  { expr: "host.platform", detail: "平台详情" },
+  { expr: "runtimeInfo.channel", detail: "当前渠道" },
+  { expr: "runtimeInfo.primaryInterface", detail: "主交互界面" },
+  { expr: "runtimeInfo.outputFormat", detail: "用户输出格式" },
+  { expr: "runtimeInfo.web.primaryInterface", detail: "Web 主界面标识" },
+  { expr: "runtimeInfo.web.outputFormat", detail: "Web 输出格式" },
+  { expr: "runtimeInfo.web.rendering", detail: "Web 渲染方式" },
+  { expr: "runtimeInfo.model", detail: "当前模型" },
+  { expr: "runtimeInfo.host", detail: "Runtime 主机名(兼容别名)" },
+  { expr: "runtimeInfo.hostname", detail: "Runtime 主机名" },
+  { expr: "runtimeInfo.os", detail: "Runtime OS" },
+  { expr: "runtimeInfo.arch", detail: "Runtime 架构" },
+  { expr: "runtimeInfo.shell", detail: "默认 shell" },
+  { expr: "outputFormat", detail: "顶层输出格式别名" },
+  { expr: "templateEngine.name", detail: "模板引擎名称" },
+  { expr: "templateEngine.supportedSyntax", detail: "模板引擎支持语法" },
+  { expr: "availableAgents", detail: "当前可用 Agent 数组" },
+  { expr: "agents.available", detail: "当前可用 Agent 数组别名" },
+
+  // 常用 helper
+  { expr: "helpers.toolLines(toolNames, toolSummaries)", detail: "渲染全部工具清单" },
+  { expr: "helpers.toolLines(builtinToolNames, builtinToolSummaries)", detail: "渲染内置工具清单" },
+  { expr: "helpers.toolLines(mcpToolNames, mcpToolSummaries)", detail: "渲染 MCP 工具完整清单（兼容）" },
+  { expr: "helpers.mcpGroupLines(mcpToolGroups)", detail: "渲染 MCP 紧凑分组目录" },
+  { expr: "helpers.literalBlock(item.instructions)", detail: "安全包裹动态多行文本，避免 Markdown 边界冲突" },
+  { expr: "helpers.runtimeLine(runtimeInfo, defaultThinkLevel)", detail: "渲染 Runtime 行" },
+  { expr: "helpers.has(toolNames,'OpenBearControl')", detail: "判断某个工具是否可用" },
+  { expr: "helpers.join(toolNames, ', ')", detail: "数组 join 输出" },
+
+  // memory 根结构
+  { expr: "memory.expandedEntries", detail: "每轮展开到提示词的完整记忆条目" },
+  { expr: "memory.byCat.memory", detail: "长期记忆条目列表" },
+  { expr: "memory.byCat.tools", detail: "工具说明条目列表" },
+  { expr: "memory.groupsByCat.memory", detail: "环境事实按 grp 分组" },
+  { expr: "memory.groupsByCat.tools", detail: "工具分类按 grp 分组" },
+  { expr: "memory.secretNames", detail: "凭证索引列表(name,note)" },
+  { expr: "memory.docNames", detail: "文档索引列表(name,title)" },
+
+  // 循环变量(模板里常见命名)
+  { expr: "e.title", detail: "当前记忆条目标题" },
+  { expr: "e.ref", detail: "当前记忆条目引用 key" },
+  { expr: "e.body", detail: "当前记忆条目 Markdown 正文" },
+  { expr: "e.fields", detail: "当前记忆条目结构化字段" },
+  { expr: "e.grp", detail: "当前记忆条目分组" },
+  { expr: "e.note", detail: "当前记忆条目备注" },
+  { expr: "a.id", detail: "当前 Agent id" },
+  { expr: "a.name", detail: "当前 Agent 名称" },
+  { expr: "a.scenario", detail: "当前 Agent 适用场景" },
+  { expr: "g.name", detail: "当前分组名" },
+  { expr: "g.entries", detail: "当前分组内条目列表" },
+  { expr: "s.name", detail: "凭证 key" },
+  { expr: "s.note", detail: "凭证备注" },
+  { expr: "d.name", detail: "文档 key" },
+  { expr: "d.title", detail: "文档标题" },
+  { expr: "item.server", detail: "当前 MCP server instructions 的服务器名" },
+  { expr: "item.instructions", detail: "当前 MCP server instructions 正文" },
+  { expr: "group.server", detail: "当前 MCP 工具分组的 server 名" },
+  { expr: "group.toolCount", detail: "当前 MCP 工具分组的工具数" },
+  { expr: "group.namespacePrefix", detail: "多工具 MCP 的公共命名空间前缀" },
+  { expr: "group.exactToolName", detail: "单工具 MCP 的准确工具名" },
+];
+
+const TEMPLATE_DIRECTIVES = [
+  { label: "@if", detail: "条件块", insert: "@if ${1:condition}\n  $0\n@endif" },
+  { label: "@else", detail: "否则分支", insert: "@else" },
+  { label: "@endif", detail: "结束条件块", insert: "@endif" },
+  { label: "@each expanded memory", detail: "循环每轮展开的完整记忆", insert: "@if memory.expandedEntries.length\n@each ${1:e} in memory.expandedEntries\n### [[ ${1:e}.title ]] -- @mem/[[ ${1:e}.ref ]]\n[[ ${1:e}.body ]]\n@endeach\n@endif" },
+  { label: "@each memory entry", detail: "循环记忆条目", insert: "@each ${1:e} in ${2:memory.byCat.memory}\n### [[ ${1:e}.title ]] -- @mem/[[ ${1:e}.ref ]]\n[[ ${1:e}.body ]]\n@endeach" },
+  { label: "@each group", detail: "循环分组 + 组内条目", insert: "@each ${1:g} in ${2:memory.groupsByCat.memory}\n@if ${1:g}.name\n### [[ ${1:g}.name ]]\n@endif\n@each ${3:e} in ${1:g}.entries\n#### [[ ${3:e}.title ]] -- @mem/[[ ${3:e}.ref ]]\n[[ ${3:e}.body ]]\n@endeach\n@endeach" },
+  { label: "@each secret index", detail: "循环凭证索引", insert: "@each ${1:s} in memory.secretNames\n- 🔑 @secret/[[ ${1:s}.name ]] — [[ ${1:s}.note ]]\n@endeach" },
+  { label: "@each doc index", detail: "循环文档索引", insert: "@each ${1:d} in memory.docNames\n- 📄 @doc/[[ ${1:d}.name ]] — [[ ${1:d}.title ]]\n@endeach" },
+  { label: "@endeach", detail: "结束循环块", insert: "@endeach" },
+  { label: "@raw", detail: "原样输出块,不解析模板语法", insert: "@raw\n$0\n@endraw" },
+  { label: "@endraw", detail: "结束原样输出块", insert: "@endraw" },
+];
+
+function allowedExpression(expr, roots) {
+  return !Array.isArray(roots) || roots.some(root => expr === root || expr.startsWith(root + '.'));
+}
+
+function buildTemplateExpressionSuggestions(monacoApi, position, line, roots) {
+  const open = line.lastIndexOf("[[");
+  if (open < 0) return null;
+
+  // 只处理当前正在输入的 [[ ...。
+  // Monaco 会把 [[ 自动补成 [[]]，某些输入路径下光标会落在闭合 ]] 后面，
+  // 所以额外兼容“空表达式已闭合”的形态；否则用户刚打 [[ 就会看到 No suggestions。
+  let exprPart = line.slice(open + 2);
+  const closeAt = exprPart.indexOf("]]" );
+  if (closeAt >= 0) {
+    const beforeClose = exprPart.slice(0, closeAt);
+    const afterClose = exprPart.slice(closeAt + 2);
+    if (beforeClose.trim() || afterClose.trim()) return null;
+    exprPart = beforeClose;
+  }
+
+  const typed = exprPart.trim().toLowerCase();
+  const range = {
+    startLineNumber: position.lineNumber,
+    endLineNumber: position.lineNumber,
+    startColumn: open + 1,
+    endColumn: position.column,
+  };
+  const suggestions = TEMPLATE_EXPRESSIONS
+    .filter((it) => allowedExpression(it.expr, roots) && (!typed || it.expr.toLowerCase().includes(typed)))
+    .map((it, idx) => ({
+      label: `[[ ${it.expr} ]]`,
+      kind: it.expr.includes("(") ? monacoApi.languages.CompletionItemKind.Function : monacoApi.languages.CompletionItemKind.Variable,
+      insertText: `[[ ${it.expr} ]]`,
+      range,
+      detail: it.detail,
+      filterText: `[[ ${it.expr} ]] ${it.expr}`,
+      sortText: String(idx).padStart(4, "0"),
+    }));
+  return { suggestions, incomplete: false };
+}
+
+function buildTemplateDirectiveSuggestions(monacoApi, position, line, roots) {
+  const m = line.match(/^(\s*)@(\S*)$/);
+  if (!m) return null;
+  const indent = m[1] || "";
+  const typed = (m[2] || "").toLowerCase();
+  const range = {
+    startLineNumber: position.lineNumber,
+    endLineNumber: position.lineNumber,
+    startColumn: indent.length + 1,
+    endColumn: position.column,
+  };
+  const suggestions = TEMPLATE_DIRECTIVES
+    .filter((it) => (it.insert.match(/\bmemory\.[\w.]+/g) || []).every(expr => allowedExpression(expr, roots)))
+    .filter((it) => !typed || it.label.toLowerCase().replace(/^@/, "").startsWith(typed))
+    .map((it, idx) => ({
+      label: it.label,
+      kind: monacoApi.languages.CompletionItemKind.Keyword,
+      insertText: it.insert,
+      insertTextRules: monacoApi.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+      range,
+      detail: it.detail,
+      filterText: it.label,
+      sortText: String(idx).padStart(4, "0"),
+    }));
+  return { suggestions, incomplete: false };
+}
+
+function buildMemoryRefSuggestions(monacoApi, position, line, data) {
+  // ① @类型/<key> — 列出具体 key 候选
+  const mref = line.match(/@(mem|secret|doc)\/([^\s）)，。、]*)$/);
+  if (mref) {
+    const type = mref[1];
+    const typed = mref[2] || "";
+    // 替换范围:从 @type/ 之后的已输入部分到光标
+    const slashCol = position.column - typed.length;
+    const refRange = { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber, startColumn: slashCol, endColumn: position.column };
+    const list = data[type] || [];
+    const suggestions = list.map((it, idx) => {
+      const label = it.key;
+      const desc = type === "mem" ? (it.name || "") : (type === "secret" ? (it.note || "") : (it.title || ""));
+      return {
+        label: { label, description: desc },
+        kind: monacoApi.languages.CompletionItemKind.Value,
+        insertText: it.key,
+        range: refRange,
+        filterText: it.key + " " + desc,
+        sortText: String(idx).padStart(4, "0"),
+        detail: (type === "mem" ? "记忆" : type === "secret" ? "凭证" : "文档") + (desc ? " · " + desc : ""),
+      };
+    });
+    return { suggestions, incomplete: false };
+  }
+
+  // ② 刚输入 @ / @m / @secret — 提示三种引用前缀
+  // 注意:range 必须包含 @ 本身,insertText 也写完整 @mem/。
+  // Monaco 0.55 对 markdown 里的 @ 不按普通 word 处理;如果 range 是 @ 后面的空位,
+  // 候选会被内部过滤掉,界面就只剩 “No suggestions.”。
+  const atPrefix = line.match(/[@＠]([A-Za-z]*)$/);
+  if (atPrefix && !/[@＠](mem|secret|doc)\//.test(line)) {
+    const typed = (atPrefix[1] || "").toLowerCase();
+    const atRange = {
+      startLineNumber: position.lineNumber,
+      endLineNumber: position.lineNumber,
+      startColumn: position.column - typed.length - 1,
+      endColumn: position.column,
+    };
+    const refs = [
+      { key: "mem", label: "@mem/", detail: "引用另一条记忆", filterText: "@mem/ mem memory 记忆", sortText: "0000" },
+      { key: "secret", label: "@secret/", detail: "引用凭证(按需取)", filterText: "@secret/ secret credential 凭证 密码", sortText: "0001" },
+      { key: "doc", label: "@doc/", detail: "引用长文档(按需取)", filterText: "@doc/ doc document 文档", sortText: "0002" },
+    ].filter((it) => !typed || it.key.startsWith(typed));
+    const suggestions = refs.map((it) => ({
+      label: it.label,
+      kind: monacoApi.languages.CompletionItemKind.Reference,
+      insertText: it.label,
+      range: atRange,
+      filterText: it.filterText,
+      sortText: it.sortText,
+      detail: it.detail,
+      command: { id: "editor.action.triggerSuggest", title: "继续补全 key" },
+    }));
+    return { suggestions, incomplete: false };
+  }
+  return null;
+}
+
+
+let registered = false;
+
+// getState 返回当前编辑器的 {mode, completionMode, completionRoots, refData}，App 只有一个编辑器实例。
+export function registerCompletion(monaco, getState) {
+  if (registered) return;
+  registered = true;
+  monaco.languages.registerCompletionItemProvider("markdown", {
+    triggerCharacters: ["[", "@", "＠", "/", "."],
+    provideCompletionItems(model, position) {
+      const line = model.getValueInRange({ startLineNumber: position.lineNumber, startColumn: 1, endLineNumber: position.lineNumber, endColumn: position.column });
+      const { completionMode: mode, refData, completionRoots } = getState();
+      if (!mode || mode === "none") return { suggestions: [] };
+      if (mode === "template") {
+        return buildTemplateExpressionSuggestions(monaco, position, line, completionRoots)
+          || buildTemplateDirectiveSuggestions(monaco, position, line, completionRoots)
+          || { suggestions: [] };
+      }
+      return buildMemoryRefSuggestions(monaco, position, line, refData || { mem: [], secret: [], doc: [] })
+        || { suggestions: [] };
+    },
+  });
+}
