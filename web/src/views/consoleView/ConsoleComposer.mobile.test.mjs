@@ -27,25 +27,11 @@ async function render(template, bindings) {
   const html = await renderToString(app); return { html, nodes: walk([tree, ...slotTrees]) };
 }
 
-test('mobile footer keeps context, then icon-only Tokens/cache, cost and duration in order with accessible labels', async () => {
-  const template = ast.find(node => node.type === 1 && node.props.some(prop => prop.name === 'class' && prop.value?.content === 'composer-usage-summary'));
-  const props = {contextUsage:{used:125000},tokensText:'75.5M',cachePercentText:'96.0%',durationText:'12m34s',costText:'$3.45678'};
-  for (const values of [{}, {durationText:'250m08s',costText:'$106.91340'}, {durationText:'—',costText:'—'}]) {
-    Object.assign(props, values);
-    const {html} = await render(template, {props});
-    assert.ok(html.includes(`总耗时 ${props.durationText}`));
-    assert.ok(html.includes(`总花费 ${props.costText}`));
-    assert.match(html, /context-usage-trigger/);
-    assert.match(html, /125000/);
-    assert.match(html, /75\.5M（96\.0%）/);
-    assert.match(html, /aria-label="总 Tokens 75\.5M；缓存命中率 96\.0%"/);
-    assert.equal((html.match(/<svg/g)||[]).length,3);
-    const visibleText=html.replace(/<[^>]*>/g,'');
-    assert.doesNotMatch(visibleText,/Tokens|总耗时|总花费|压缩/);
-    assert.ok(visibleText.indexOf('125000')<visibleText.indexOf('75.5M'));
-    assert.ok(visibleText.indexOf('75.5M')<visibleText.indexOf(props.costText));
-    if(props.costText!==props.durationText) assert.ok(visibleText.indexOf(props.costText)<visibleText.indexOf(props.durationText));
-  }
+test('composer removes statistics and their reserved footer space while retaining input controls', () => {
+  assert.equal(ast.some(node => node.type === 1 && node.tag === 'ContextUsageMeter'), false);
+  assert.doesNotMatch(source, /composer-usage-summary|composer-total|import ContextUsageMeter/);
+  assert.ok(editorTemplate);
+  assert.ok(sendTemplate);
 });
 
 test('actual attachment remove button has a filename, stops preview bubbling and emits only the selected attachment', async () => {

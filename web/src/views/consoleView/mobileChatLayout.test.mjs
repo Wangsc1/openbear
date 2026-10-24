@@ -49,10 +49,10 @@ test('phone header reserves its identity width for the title with no path or pro
   assert.match(sources[header],/<slot name="mobile-actions"\/>/);
 });
 
-test('phone portrait and touch landscape hide the bottom keyboard hints without hiding usage or changing desktop',()=>{
+test('phone portrait and touch landscape hide bottom keyboard hints without changing desktop',()=>{
   for(const env of [320,360,390,430,760,844,932].map(width=>({...phone,width}))){
     assert.equal(css('ConsoleComposer.vue','.composer-hints',env).display,'none');
-    if(env.width<=760)assert.equal(css('ConsoleComposer.vue','.composer-usage-summary',env).display,'flex');
+    assert.deepEqual(css('ConsoleComposer.vue','.composer-usage-summary',env),{});
   }
   assert.notEqual(css('ConsoleComposer.vue','.composer-hints',desktop).display,'none');
   const hint=nodes('ConsoleComposer.vue').find(n=>hasClass(n,'composer-hints'));
@@ -129,29 +129,21 @@ test('editor has primary vertical space and model is an unboxed secondary text e
   assert.ok(css(f,link+':focus-visible').outline,'keyboard focus remains visible');
 });
 
-test('phone cumulative footer wraps in normal flow, retaining one context owner and all input actions',()=>{
+test('phone composer ends at the input controls without reserving a statistics row',()=>{
   const file='ConsoleComposer.vue', all=nodes(file);
-  const footer=all.find(n=>hasClass(n,'composer-usage-summary'));
-  const box=all.find(n=>hasClass(n,'composer-box'));
-  assert.equal(walk([footer]).filter(n=>n.tag==='ContextUsageMeter').length,1);
-  assert.equal(walk([box]).filter(n=>n.tag==='ContextUsageMeter').length,0);
-  assert.equal(all.filter(n=>n.tag==='ContextUsageMeter').length,1);
+  assert.equal(all.some(n=>hasClass(n,'composer-usage-summary')),false);
+  assert.equal(all.filter(n=>n.tag==='ContextUsageMeter').length,0);
+  assert.ok(all.some(n=>n.tag==='ReferenceEditor'));
+  assert.ok(all.some(n=>hasClass(n,'send-button')));
   for(const width of [320,360,390,430,760]){
-    const env={...phone,width}, style=css(file,'.composer-usage-summary',env);
-    assert.equal(style.display,'flex');
-    assert.equal(style['flex-wrap'],'wrap');
-    assert.equal(style.position,undefined);
+    const env={...phone,width};
+    assert.deepEqual(css(file,'.composer-usage-summary',env),{});
+    assert.deepEqual(css(file,'.composer-total',env),{});
     assert.equal(css(file,'.composer-box',env)['margin-bottom'],undefined);
-    assert.equal(css(file,'.composer-total',env)['white-space'],'nowrap');
+    assert.equal(css(file,'.composer-shell',env).padding,'.5rem .75rem 8px');
   }
-  assert.equal(css(file,'.composer-usage-summary',desktop).display,'none');
-  assert.equal(css(file,'.composer-total::before',phone).content,'"·"');
-  assert.equal(css(file,'.composer-total > svg',phone).width,'11px');
-  const meter=fs.readFileSync(new URL('./ContextUsageMeter.vue',import.meta.url),'utf8');
-  const trigger=walk(baseParse(parse(meter).descriptor.template.content).children).find(n=>hasClass(n,'context-usage-trigger'));
-  assert.doesNotMatch(trigger.loc.source,/context-inline-strategy|滑窗压缩|摘要压缩/);
-  assert.match(trigger.loc.source,/context-ring-fill/);
 });
+
 
 test('desktop path/title header coexists with unchanged toolbar, editor size and floating rail',()=>{
   assert.deepEqual(css('../../App.vue','.app-shell.is-console .app-main',desktop),{});

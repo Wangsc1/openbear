@@ -66,12 +66,12 @@ test('turn navigation rail blends into the transcript without a rounded floating
   assert.equal(style['box-shadow'], 'none');
 });
 
-test('compact title retains path and numeric statistics, with one live context owner in composer', () => {
+test('compact title retains path and statistics without duplicating context in composer', () => {
   const header = rules('./ConsoleHeader.vue','.header-title');
   assert.equal(header['font-size'],'13px');
   assert.equal(header['font-weight'],'500');
   const composer = read('./ConsoleComposer.vue');
-  assert.equal((composer.match(/<ContextUsageMeter\b/g)||[]).length,1);
+  assert.equal((composer.match(/<ContextUsageMeter\b/g)||[]).length,0);
   assert.match(read('./ContextUsageMeter.vue'),/class="context-inline-value">\{\{ usedLabel \}\} \/ \{\{ triggerLabel \}\}/);
   const tools = read('./MobileConversationTools.vue');
   assert.match(tools,/<el-drawer v-model="menuOpen" direction="btt" size="auto"/);

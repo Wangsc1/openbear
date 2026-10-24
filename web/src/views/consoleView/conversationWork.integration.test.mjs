@@ -723,11 +723,11 @@ test('group bottom close folds the whole disclosure, not just one nested tool', 
 test('small phone toolbar reserves separate tracks rather than hiding controls; reduced-motion and shared theme roles remain', () => {
   const composer=fs.readFileSync(new URL('./ConsoleComposer.vue',import.meta.url),'utf8');
   assert.match(composer,/@media \(max-width: 360px\)[\s\S]*?grid-template-columns: minmax\(0, 1fr\) 38px/);
-  assert.match(composer,/\.composer-usage-summary \{ display: flex; flex-wrap: wrap/);
+  assert.doesNotMatch(composer,/composer-usage-summary|composer-total/);
   assert.doesNotMatch(composer,/\.composer-box \{[^}]*margin-bottom: 32px/);
   assert.match(composer,/\.composer-toolbar \.send-button \{ grid-row: 2; grid-column: 2/);
   // At 320px the shell (24), box padding/border (16) and send column (38)
-  // leave 242px for four 44px actions. Context has its own reserved row below.
+  // leave 242px for four 44px actions. No statistics row is reserved below.
   assert.ok(320 - 40 - 38 >= 4 * 44);
   const css=fs.readFileSync(new URL('./conversationWork.css',import.meta.url),'utf8');
   assert.match(css,/--work-text: var\(--ob-text\)/);

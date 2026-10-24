@@ -6,8 +6,7 @@ import InteractionMarkdown from "./InteractionMarkdown.vue";
 import GroupProposalCard from "./GroupProposalCard.vue";
 import ContextCompactionIcon from "./legacy/ContextCompactionIcon.vue";
 import ModelFeatureIcon from "./ModelFeatureIcon.vue";
-import ContextUsageMeter from './ContextUsageMeter.vue';
-import {Coins, Layers, Clock3, CornerDownLeft, Sparkles, X} from "@lucide/vue";
+import {CornerDownLeft, Sparkles, X} from "@lucide/vue";
 import {ElMessage} from "element-plus";
 import { userStorage } from '../../sessionBoundary.js';
 import {
@@ -1216,12 +1215,6 @@ defineExpose({focus, adjustHeight, openFilePicker, focusInteraction, getReferenc
 						</template>
 					</div>
 				</div>
-			</div>
-			<div class="composer-usage-summary" aria-label="上下文与会话累计统计">
-				<ContextUsageMeter :usage="props.contextUsage" :context-window="props.contextWindowTokens" :threshold="props.contextThresholdTokens" :strategy="props.contextStrategy" :conversation-uuid="props.conversationUuid"/>
-				<span class="composer-total" :title="`总 Tokens ${props.tokensText}；缓存命中率 ${props.cachePercentText}`" :aria-label="`总 Tokens ${props.tokensText}；缓存命中率 ${props.cachePercentText}`"><Layers aria-hidden="true"/><span>{{ props.tokensText }}（{{ props.cachePercentText }}）</span></span>
-				<span class="composer-total" :title="`总花费 ${props.costText}`" :aria-label="`总花费 ${props.costText}`"><Coins aria-hidden="true"/><span>{{ props.costText }}</span></span>
-				<span class="composer-total" :title="`总耗时 ${props.durationText}`" :aria-label="`总耗时 ${props.durationText}`"><Clock3 aria-hidden="true"/><span>{{ props.durationText }}</span></span>
 			</div>
 			<div class="composer-hints mt-2 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-ob-muted">
 				<span class="composer-desktop-shortcut">Enter 发送 · Ctrl/⌘+Enter 也可发送</span>
@@ -2677,8 +2670,6 @@ button.status-chip:hover, .status-chip-active {
 	cursor: not-allowed;
 }
 
-/* Desktop keeps context in run configuration and totals in the header. */
-.composer-usage-summary { display: none; }
 .composer-touch-shortcut { display: none; }
 @media (hover: none) and (pointer: coarse) {
 	.composer-desktop-shortcut { display: none; }
@@ -2688,12 +2679,6 @@ button.status-chip:hover, .status-chip-active {
 @media (max-width: 760px) {
 	.composer-shell { padding: .5rem .75rem 8px; }
 	.composer-box { padding: 7px; border-radius: 15px; }
-	/* Normal flow lets long totals wrap without covering the editor or its actions. */
-	.composer-usage-summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0 5px; min-height: 32px; padding-top: 2px; color: var(--ob-chat-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
-	.composer-total { display: inline-flex; align-items: center; gap: 3px; min-height: 24px; line-height: 24px; white-space: nowrap; }
-	.composer-total::before { content: "·"; margin-right: 2px; color: var(--ob-chat-muted); }
-	.composer-total > svg { width: 11px; height: 11px; flex: none; stroke-width: 1.7; }
-	.composer-total > span { color: var(--ob-chat-subtle); }
 	.composer-status .run-config-chip-strategy { display: inline; font-size: 10px; }
 	.composer-toolbar {
 		display: flex;
