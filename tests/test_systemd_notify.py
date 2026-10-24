@@ -273,6 +273,6 @@ def test_unit_has_matching_watchdog_and_bounded_restart_policy():
     for setting in (
         "Type=notify", "NotifyAccess=main", "WatchdogSec=60", "TimeoutStartSec=180",
         "TimeoutStopSec=90", "TimeoutAbortSec=15", "Restart=on-failure", "RestartSec=10",
-        f"RestartPreventExitStatus={CONFIG_ERROR_EXIT}", "StartLimitIntervalSec=10min", "StartLimitBurst=3",
+        f"RestartPreventExitStatus={CONFIG_ERROR_EXIT}", "StartLimitIntervalSec=10min", "StartLimitBurst=10",
     ):
         assert setting in unit.splitlines()

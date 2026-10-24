@@ -784,6 +784,9 @@ class Updater:
 
     def _start_service(self) -> None:
         self.log(f"启动 {self.service_name}")
+        # The unit's start limit counts every start; an update or rollback start
+        # must not be refused because earlier starts used up that budget.
+        self._systemctl("reset-failed", self.service_name, check=False)
         self._systemctl("start", self.service_name)
         self.stopped = False
 

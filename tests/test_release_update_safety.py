@@ -986,6 +986,6 @@ fi
     )
     result = subprocess.run(["bash", str(harness)], cwd=ROOT, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert events.read_text(encoding="utf-8").splitlines() == ["stop", "start"]
+    assert events.read_text(encoding="utf-8").splitlines() == ["stop", "reset-failed", "start"]
     assert "未切换任何文件" in result.stderr
     assert (install / "app" / "marker").read_text(encoding="utf-8") == "old"
