@@ -247,6 +247,8 @@ async def test_optional_failure_is_recorded_without_background_exception(env, tm
         await manager.close()
     finally:
         await conn.close()
+    # aiosqlite resolves close() just before its worker thread leaves its loop.
+    thread.join(timeout=5)
     assert not thread.is_alive(), "temporary audit DB worker must also be joined"
 
 

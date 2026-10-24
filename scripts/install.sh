@@ -1021,7 +1021,7 @@ restore_release_upgrade() {
         err "恢复服务 disable 状态失败；事务目录保留在 $txn"
         return 1
     fi
-    if [[ "$RELEASE_SERVICE_WAS_ACTIVE" -eq 1 ]] && ! systemctl start "$SERVICE_NAME" >/dev/null 2>&1; then
+    if [[ "$RELEASE_SERVICE_WAS_ACTIVE" -eq 1 ]] && ! service_start start >/dev/null 2>&1; then
         err "旧服务恢复启动失败；事务目录保留在 $txn"
         return 1
     fi
@@ -1071,14 +1071,14 @@ commit_release_upgrade() {
     if ! systemctl stop "$SERVICE_NAME"; then
         err "无法停止 $SERVICE_NAME，未切换任何文件；staging 与备份保留在 $txn"
         if [[ "$RELEASE_SERVICE_WAS_ACTIVE" -eq 1 ]]; then
-            systemctl start "$SERVICE_NAME" >/dev/null 2>&1 || true
+            service_start start >/dev/null 2>&1 || true
         fi
         return 1
     fi
     if ! backup_release_database "$txn/new"; then
         err "数据库备份失败，未切换任何文件"
         if [[ "$RELEASE_SERVICE_WAS_ACTIVE" -eq 1 ]]; then
-            if ! systemctl start "$SERVICE_NAME"; then
+            if ! service_start start; then
                 err "旧服务恢复启动失败；staging 与代码备份保留在 $txn"
                 return 2
             fi
@@ -1095,7 +1095,7 @@ commit_release_upgrade() {
             reason="切换依赖环境失败"
         elif ! write_service; then
             reason="安装 systemd unit 失败"
-        elif ! systemctl start "$SERVICE_NAME"; then
+        elif ! service_start start; then
             reason="启动新版本服务失败"
         elif ! verify_web_ready "$RELEASE_VERSION"; then
             reason="新版本 Web 健康检查失败"
@@ -1374,6 +1374,13 @@ write_service() {
     ok "已安装 $unit"
 }
 
+# The unit's start limit counts every start; an explicit start by the installer
+# must not be refused because earlier starts used up that budget.
+service_start() {
+    systemctl reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
+    systemctl "$1" "$SERVICE_NAME"
+}
+
 ensure_firewall() {
     local port="${WEB_PORT:-$DEFAULT_PORT}"
     section "防火墙"
@@ -1429,7 +1436,7 @@ verify_web_ready() {
 start_and_verify() {
     local expected_version="${1:-}"
     section "启动并验证"
-    systemctl restart "$SERVICE_NAME" || die "重启 $SERVICE_NAME 失败"
+    service_start restart || die "重启 $SERVICE_NAME 失败"
     verify_web_ready "$expected_version" || die "新版本 Web 验收失败"
     print_done
 }

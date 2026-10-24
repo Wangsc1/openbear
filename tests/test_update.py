@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -379,12 +380,36 @@ def test_run_recovers_when_swap_fails_before_or_between_directories(
     assert worker.did_swap is True
     assert active["value"] is True
     assert systemctl_calls[0] == ("stop", "openbear.service")
-    assert systemctl_calls[-1] == ("start", "openbear.service")
+    # The rollback start is never refused by start limits earlier starts used up.
+    assert systemctl_calls[-2:] == [("reset-failed", "openbear.service"), ("start", "openbear.service")]
     assert (install / "app" / "old_only.py").is_file()
     assert not (install / "app" / "new_only.py").exists()
     assert (install / "web" / "dist" / "index.html").read_text(encoding="utf-8") == "old frontend\n"
     result = json.loads((data / "update-result.json").read_text(encoding="utf-8"))
     assert result["status"] == "rolled_back"
+
+
+def test_start_service_clears_start_limit_without_requiring_it(tmp_path: Path, monkeypatch):
+    u = updater()
+    worker = u.Updater({
+        "installRoot": str(tmp_path / "install"),
+        "dataDir": str(tmp_path / "data"),
+        "fromVersion": "1.0.0",
+        "toVersion": "2.0.0",
+        "serviceName": "openbear.service",
+        "healthUrl": "http://127.0.0.1:18961/health",
+    })
+    commands = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        # reset-failed may fail (e.g. nothing to reset); it must not stop the start.
+        return subprocess.CompletedProcess(cmd, 1 if cmd[1] == "reset-failed" else 0, "", "")
+
+    monkeypatch.setattr(u.subprocess, "run", fake_run)
+    worker._start_service()
+    assert commands == [["systemctl", "reset-failed", "openbear.service"], ["systemctl", "start", "openbear.service"]]
+    assert worker.stopped is False
 
 
 def test_sync_deps_skips_when_lock_unchanged(tmp_path: Path):
