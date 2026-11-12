@@ -16,9 +16,7 @@ import (
 )
 
 func TestAccountDirHandsOverOnlyItsOwnTree(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("changing owners needs root")
-	}
+	needChown(t)
 	const account = 65534
 	base := t.TempDir()
 	victim := filepath.Join(base, "victim")
@@ -110,9 +108,7 @@ func TestAccountDirHandsOverOnlyItsOwnTree(t *testing.T) {
 }
 
 func TestAccountDirMigratesOrdinaryTree(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("changing owners needs root")
-	}
+	needChown(t)
 	const account = 65534
 	base := t.TempDir()
 	profile := filepath.Join(base, "profile")
@@ -176,9 +172,7 @@ func TestAccountDirMigratesOrdinaryTree(t *testing.T) {
 }
 
 func TestAccountDirSkipsLinksAndSpecialFiles(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("changing owners needs root")
-	}
+	needChown(t)
 	base := t.TempDir()
 	victim := filepath.Join(base, "victim")
 	profile := filepath.Join(base, "profile")
@@ -267,9 +261,7 @@ func TestAccountDirReturnsTraversalErrors(t *testing.T) {
 	if err := handOver(-1, 0, 0); !errors.Is(err, unix.EBADF) {
 		t.Fatalf("directory read error: %v", err)
 	}
-	if os.Geteuid() != 0 {
-		t.Skip("changing owners needs root")
-	}
+	needChown(t)
 	for _, operation := range []string{"read", "chown"} {
 		t.Run(operation, func(t *testing.T) {
 			base := t.TempDir()
@@ -353,5 +345,19 @@ func TestASnapWrapperIsNoCandidate(t *testing.T) {
 		if c == wrapper {
 			t.Fatalf("candidates %v", browserCandidates())
 		}
+	}
+}
+
+func TestNoChromeDownloadWithoutGlibc(t *testing.T) {
+	keep := glibcLoader
+	defer func() { glibcLoader = keep }()
+	glibcLoader = filepath.Join(t.TempDir(), "ld-linux.so")
+	h := &browserHost{dir: t.TempDir()}
+	if exe, _, err := h.executable(BrowserConfig{Download: true}); exe != "" || err == nil || err.Error() != "browser_unsupported_libc" {
+		t.Fatalf("exe %q err %v", exe, err)
+	}
+	os.WriteFile(glibcLoader, nil, 0o755)
+	if exe, _, err := h.executable(BrowserConfig{Download: true}); exe != "" || err != nil {
+		t.Fatalf("with glibc: exe %q err %v, want a download", exe, err)
 	}
 }
