@@ -32,7 +32,7 @@ export async function setup(t, {width = 1440, height = 900, dark = false, tabs =
   if (reach) items.push(server('sg', 'SG', {region: 'SG'}), server('toy', 'TOY', {region: 'CN'}), server('lab', 'Lab', {region: 'CN'}));
   let slow = 0;
   // The server settings' mesh alerts (reminders.mesh), merged on save as the controller does.
-  let alerts = Object.fromEntries(['standby', 'entry', 'flap', 'exit', 'memory', 'apply', 'upgrade', 'missing', 'keys'].map(k => [k, true]));
+  let alerts = Object.fromEntries(['standby', 'entry', 'flap', 'exit', 'memory', 'apply', 'upgrade', 'missing', 'keys', 'relaymode'].map(k => [k, true]));
   network.reset();
   network.external = async () => ({status: 503, body: ''});
   network.handler = async ({path, method, body, url}) => {
@@ -69,7 +69,7 @@ export async function setup(t, {width = 1440, height = 900, dark = false, tabs =
   page.reload = async () => { await unmount({check: false}); ({unmount} = mountApp(t, root, {width, height, dark, network, touch: width < 760})); await page.locator('#app > *').first().waitFor({state: 'attached'}); };
   page.waitForTimeout = async ms => { await sleep(Number(ms) >= 200 ? Math.max(20, ms / SCALE) : ms); await settle(); };
   await page.locator('#app > *').first().waitFor({state: 'attached'});
-  if (active === 'mesh' && !missing) await page.locator(v3 ? '.m3-tabs' : '.vue-flow__node').first().waitFor();
+  if (active === 'mesh' && !missing) await page.locator(v3 ? '.m3-tabs' : '.vue-flow__node').first().waitFor({timeout: 15000});
   const puts = () => calls.filter(c => c.method === 'PUT' && c.path === '/api/servers/mesh/draft');
   return {page, calls, mesh, puts, fresh: copies, last: () => puts().at(-1)?.body, slowGets: ms => { slow = ms; },
     layoutPuts: () => calls.filter(c => c.method === 'PUT' && c.path === '/api/servers/mesh/layout'),
